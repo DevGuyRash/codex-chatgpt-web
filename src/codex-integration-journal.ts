@@ -22,6 +22,7 @@ import type {
   LegacyCodexIntegrationJournalV8,
 } from "./codex-integration-shared";
 import { verifyManagedJournalState } from "./codex-integration-route";
+import { inspectInstalledCodexConfig } from "./codex-integration-inspection";
 
 function isPreviousAssignment(value: unknown): boolean {
   if (!value || typeof value !== "object") return false;
@@ -134,11 +135,14 @@ function parseJournal(path: string): AnyCodexIntegrationJournal {
   }
   throw new Error(`Invalid Codex integration journal: ${path}`);
 }
-function journalMatchesConfig(journal: AnyCodexIntegrationJournal): boolean {
+function journalMatchesConfig(journal: AnyCodexIntegrationJournal, semantic = false): boolean {
   try {
     assertJournalTargetsConfig(journal, getCodexConfigPath());
     if (!existsSync(journal.configPath)) return false;
     const text = readFileSync(journal.configPath, "utf8");
+    if (semantic && (journal.version === 8 || journal.version === 9 || journal.version === 10) && journal.active) {
+      return inspectInstalledCodexConfig(text, journal).length === 0;
+    }
     if (journal.version === 2) return text.includes(journal.providerBlock);
     verifyManagedJournalState(text, journal);
     return true;
@@ -147,7 +151,7 @@ function journalMatchesConfig(journal: AnyCodexIntegrationJournal): boolean {
   }
 }
 
-export function readJournal(): AnyCodexIntegrationJournal | undefined {
+export function readJournal({ repair = true }: { repair?: boolean } = {}): AnyCodexIntegrationJournal | undefined {
   const primaryPath = getCodexJournalPath();
   const recoveryPath = getCodexJournalRecoveryPath();
   let primary: AnyCodexIntegrationJournal | undefined;
@@ -167,19 +171,19 @@ export function readJournal(): AnyCodexIntegrationJournal | undefined {
   }
   if (primary && recovery && serializeJournal(primary) === serializeJournal(recovery)) return primary;
   if (primary && !recovery && !recoveryError) {
-    atomicWriteFile(recoveryPath, serializeJournal(primary));
+    if (repair) atomicWriteFile(recoveryPath, serializeJournal(primary));
     return primary;
   }
   if (recovery && !primary && !primaryError) {
-    if (!journalMatchesConfig(recovery)) {
+    if (!journalMatchesConfig(recovery, !repair)) {
       throw new Error("Codex integration recovery journal does not match the active config");
     }
-    atomicWriteFile(primaryPath, serializeJournal(recovery));
+    if (repair) atomicWriteFile(primaryPath, serializeJournal(recovery));
     return recovery;
   }
 
-  const primaryMatches = primary ? journalMatchesConfig(primary) : false;
-  const recoveryMatches = recovery ? journalMatchesConfig(recovery) : false;
+  const primaryMatches = primary ? journalMatchesConfig(primary, !repair) : false;
+  const recoveryMatches = recovery ? journalMatchesConfig(recovery, !repair) : false;
   if (primaryMatches === recoveryMatches) {
     throw new Error(
       primaryMatches
@@ -189,7 +193,7 @@ export function readJournal(): AnyCodexIntegrationJournal | undefined {
   }
   const selected = primaryMatches ? primary! : recovery!;
   const data = serializeJournal(selected);
-  writeFilesWithCompensation([
+  if (repair) writeFilesWithCompensation([
     { path: recoveryPath, data },
     { path: primaryPath, data },
   ]);

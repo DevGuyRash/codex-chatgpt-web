@@ -1,0 +1,9 @@
+# Configuration inspection
+
+`codex-chatgpt-web route status` is read-only. For active version 8–10 installations it compares parsed, journal-owned settings instead of literal TOML lines, so whitespace, comments, and equivalent feature/hook representations do not create false value conflicts. Its existing `errors` array remains available; the additive `conflicts` array identifies each conflicting setting, its category, and expected/current scalar values. Hook conflicts expose identity/order/trust status rather than command contents.
+
+Inspection does not grant permission to repair. Invalid TOML, duplicate owned hooks, changed values, ambiguous journal baselines, and changed hook identity or trust remain failures. A readable recovery journal can supply evidence without rewriting the primary copy. Missing or conflicting ownership evidence must be resolved before mutation.
+
+The programmatic `inspectCodexIntegration({ readOnly: true })` entry point provides the same behavior. The legacy default retains its existing recovery and strict mutation-preflight contract for setup, activation, and removal. Those operations are not yet formatting-tolerant repairs; a successful semantic status report does not promise that an older mutation path will accept the same document. Confirmed repair is a separate operation, not a side effect of status.
+
+Diagnostic conflict values are local configuration evidence and can include custom endpoint addresses. They must not be included wholesale in a shareable diagnostic export.

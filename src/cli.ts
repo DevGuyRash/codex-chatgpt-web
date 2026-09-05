@@ -373,12 +373,13 @@ async function routeCommand(args: string[]): Promise<void> {
   assertNoArgs(args);
   const result = action === "status"
     ? (() => {
-        const status = inspectCodexIntegration();
+        const status = inspectCodexIntegration({ readOnly: true });
         return {
           installed: status.installed,
           active: status.active,
           ...(status.routeUrl ? { routeUrl: status.routeUrl } : {}),
           errors: status.errors,
+          conflicts: status.conflicts,
         };
       })()
     : action === "connect"

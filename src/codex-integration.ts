@@ -29,6 +29,7 @@ import type {
   UninstallCodexIntegrationResult,
 } from "./codex-integration-shared";
 import { assertJournalTargetsConfig, readJournal } from "./codex-integration-journal";
+import { inspectInstalledCodexConfig, type CodexIntegrationConflict } from "./codex-integration-inspection";
 import {
   findTopLevelAssignment,
   installCompatibilityV1Features,
@@ -481,21 +482,27 @@ export function uninstallCodexIntegration(): UninstallCodexIntegrationResult {
   return { changed: true };
 }
 
-export function inspectCodexIntegration(): {
+export function inspectCodexIntegration({ readOnly = false }: { readOnly?: boolean } = {}): {
   installed: boolean;
   active: boolean;
   configPath: string;
   routeUrl?: string;
   journal?: AnyCodexIntegrationJournal;
   errors: string[];
+  conflicts: CodexIntegrationConflict[];
 } {
-  const journal = readJournal();
+  const journal = readJournal({ repair: !readOnly });
   const errors: string[] = [];
+  const conflicts: CodexIntegrationConflict[] = [];
   if (journal) {
     try {
       assertJournalTargetsConfig(journal, getCodexConfigPath());
       const text = readFileSync(journal.configPath, "utf8");
-      if ((journal.version === 4 || journal.version === 5 || journal.version === 6 || journal.version === 7 || journal.version === 8 || journal.version === 9 || journal.version === 10) && !journal.active) {
+      if (readOnly && (journal.version === 8 || journal.version === 9 || journal.version === 10) && journal.active) {
+        conflicts.push(...inspectInstalledCodexConfig(text, journal));
+        errors.push(...conflicts.map(conflict => conflict.message));
+      }
+      else if ((journal.version === 4 || journal.version === 5 || journal.version === 6 || journal.version === 7 || journal.version === 8 || journal.version === 9 || journal.version === 10) && !journal.active) {
         verifyRestoredRoute(text, journal);
       }
       else if (journal.version === 3 || journal.version === 4 || journal.version === 5 || journal.version === 6 || journal.version === 7 || journal.version === 8 || journal.version === 9 || journal.version === 10) {
@@ -525,5 +532,6 @@ export function inspectCodexIntegration(): {
       : {}),
     ...(journal ? { journal } : {}),
     errors,
+    conflicts,
   };
 }

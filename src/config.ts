@@ -13,7 +13,7 @@ import { VERSION } from "./version";
 export type RuntimeMode = "browser-only" | "full";
 export type BrowserHostMode = "managed-chrome" | "launcher";
 export type BrowserInteractionMode = "automatic" | "manual";
-export type SubagentProtocol = "compatibility-v1" | "native";
+export type SubagentProtocol = import("./contracts/codex-integration").SubagentProtocol;
 
 /**
  * ChatGPT caches a connector's public MCP contract by connector identity. The direct turn-token

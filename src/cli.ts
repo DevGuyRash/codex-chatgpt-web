@@ -29,6 +29,8 @@ import { existingFullSetupCredentials, preflightSetup, setup, type SetupOptions 
 import { installRuntimeKeyBytes, managedRuntimeKeyPath, stopTunnel, tunnelStatus, waitForTunnelReady } from "./tunnel";
 import { getTunnelServiceStatus, restartTunnelService, startTunnelService, stopTunnelService, uninstallTunnelService } from "./tunnel-service";
 import { VERSION } from "./version";
+import { applyCodexIntegrationRepair, previewCodexIntegrationRepair } from "./codex-integration-repair";
+import { assertRuntimeEndpointClosed } from "./service";
 import { runDevCommand } from "./dev-chat/cli";
 
 const HELP = `codex-chatgpt-web ${VERSION}
@@ -41,6 +43,7 @@ Usage:
   codex-chatgpt-web login
   codex-chatgpt-web doctor [--json]
   codex-chatgpt-web route <status|connect|disconnect>
+  codex-chatgpt-web route repair <preview|apply> --subagent-protocol <compatibility-v1|native> [--approve ID]
   codex-chatgpt-web subagents <status|compatibility-v1|native>
   codex-chatgpt-web browser check
   codex-chatgpt-web dev launcher
@@ -370,6 +373,27 @@ async function doctorCommand(args: string[]): Promise<void> {
 
 async function routeCommand(args: string[]): Promise<void> {
   const action = args.shift() ?? "status";
+  if (action === "repair") {
+    const operation = args.shift() ?? "preview";
+    const protocol = takeOption(args, "--subagent-protocol");
+    const approvalId = takeOption(args, "--approve");
+    const launcherControl = takeFlag(args, "--launcher-control");
+    assertNoArgs(args);
+    if (protocol !== "native" && protocol !== "compatibility-v1") throw new Error("Repair requires --subagent-protocol compatibility-v1 or native; there is no automatic protocol choice");
+    if (operation === "preview") {
+      if (approvalId || launcherControl) throw new Error("Repair preview does not accept apply authorization");
+      stdout.write(`${JSON.stringify(previewCodexIntegrationRepair(protocol), null, 2)}\n`);
+      return;
+    }
+    if (operation !== "apply" || !approvalId) throw new Error("Repair apply requires --approve with the exact preview ID");
+    if (launcherControl) authorizeLauncherControl("configuration repair");
+    const config = loadConfig();
+    if (config.browserHost === "launcher" && !launcherControl) throw new Error("Launcher-owned configuration must be repaired through Codex Web GPT Settings");
+    if (getServiceStatus().loaded) throw new Error("Stop the managed runtime safely before applying configuration repair");
+    await assertRuntimeEndpointClosed(config);
+    stdout.write(`${JSON.stringify(applyCodexIntegrationRepair(protocol, approvalId), null, 2)}\n`);
+    return;
+  }
   assertNoArgs(args);
   const result = action === "status"
     ? (() => {

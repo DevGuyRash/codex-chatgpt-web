@@ -2,7 +2,7 @@ import { test, expect } from "bun:test";
 import { mkdtempSync, readFileSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { writeFilesWithCompensation } from "../src/codex-integration-shared";
+import { snapshotFile, writeFilesWithCompensation } from "../src/codex-integration-shared";
 
 test("failed integration preserves edits made after a successful transaction write", () => {
   const dir = mkdtempSync(join(tmpdir(), "integration-transaction-"));
@@ -51,6 +51,30 @@ test("failed integration restores its own unchanged write", () => {
       { path: config, data: "transaction" },
       { path: join(obstruction, "journal"), data: "journal" },
     ])).toThrow();
+    expect(readFileSync(config, "utf8")).toBe("original");
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("approved preimages are revalidated before any transaction mutation", () => {
+  const dir = mkdtempSync(join(tmpdir(), "integration-transaction-"));
+  try {
+    const config = join(dir, "config.toml");
+    writeFileSync(config, "approved original");
+    const expected = [snapshotFile(config)];
+    writeFileSync(config, "concurrent edit");
+    expect(() => writeFilesWithCompensation([{ path: config, data: "proposal" }], [], { expected })).toThrow("changed since approval");
+    expect(readFileSync(config, "utf8")).toBe("concurrent edit");
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("a failed post-write verification compensates completed writes", () => {
+  const dir = mkdtempSync(join(tmpdir(), "integration-transaction-"));
+  try {
+    const config = join(dir, "config.toml");
+    writeFileSync(config, "original");
+    expect(() => writeFilesWithCompensation([{ path: config, data: "proposal" }], [], {
+      verify: () => { expect(readFileSync(config, "utf8")).toBe("proposal"); throw new Error("verification failed"); },
+    })).toThrow("verification failed");
     expect(readFileSync(config, "utf8")).toBe("original");
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });

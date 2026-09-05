@@ -2,14 +2,8 @@ import { parseTomlValue } from "./toml-edit";
 import { inspectCodexInterruptHook } from "./codex-interrupt-hook";
 import type { AnyCodexIntegrationJournal } from "./codex-integration-shared";
 
-/** Structured inspection evidence, not permission to overwrite the user's configuration. */
-export interface CodexIntegrationConflict {
-  path: string;
-  category: "missing" | "value_changed" | "hook_changed" | "invalid_config" | "ownership_conflict";
-  message: string;
-  expected?: string | number | boolean;
-  current?: string | number | boolean | null;
-}
+import type { CodexIntegrationConflict } from "./contracts/codex-integration";
+export type { CodexIntegrationConflict } from "./contracts/codex-integration";
 
 type InspectableJournal = Extract<AnyCodexIntegrationJournal, { version: 8 | 9 | 10 }>;
 type Table = Record<string, unknown>;

@@ -288,22 +288,40 @@ export function restoreFileSnapshot(snapshot: FileSnapshot): void {
 export function writeFilesWithCompensation(
   writes: Array<{ path: string; data: string | Uint8Array }>,
   removals: string[] = [],
+  options: { expected?: readonly FileSnapshot[]; verify?: () => void } = {},
 ): void {
   const paths = [...new Set([...writes.map(write => write.path), ...removals])];
   const snapshots = paths.map(snapshotFile);
   const applied = new Map<string, FileSnapshot>();
+  const matches = (expected: FileSnapshot): boolean => {
+    const current = snapshotFile(expected.path);
+    return current.exists === expected.exists && (!current.exists || Boolean(current.data?.equals(expected.data!)));
+  };
+  for (const expected of options.expected ?? []) {
+    if (!matches(expected)) throw new Error(`Codex integration input changed since approval: ${expected.path}`);
+  }
+  const beforeMutation = (path: string): void => {
+    const expected = applied.get(path) ?? snapshots.find(snapshot => snapshot.path === path)!;
+    if (!matches(expected)) throw new Error(`Codex integration file changed during the transaction: ${path}`);
+  };
   try {
     for (const write of writes) {
       // Capture the bytes supplied to the write, not a subsequent read which could
       // already contain an external edit. Only completed mutations are ours to undo.
       const data = Buffer.from(write.data);
+      beforeMutation(write.path);
       atomicWriteFile(write.path, data);
       applied.set(write.path, { path: write.path, exists: true, data });
     }
     for (const removal of removals) {
+      beforeMutation(removal);
       rmSync(removal, { force: true });
       applied.set(removal, { path: removal, exists: false });
     }
+    for (const expected of applied.values()) {
+      if (!matches(expected)) throw new Error(`Codex integration output changed before verification: ${expected.path}`);
+    }
+    options.verify?.();
   } catch (error) {
     const rollbackFailures: string[] = [];
     for (const snapshot of [...snapshots].reverse()) {

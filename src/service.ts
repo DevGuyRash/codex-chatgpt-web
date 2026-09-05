@@ -1,5 +1,6 @@
 import { existsSync, mkdirSync, readFileSync, rmSync } from "node:fs";
 import { homedir, userInfo } from "node:os";
+import { createConnection } from "node:net";
 import { dirname, join } from "node:path";
 import type { AppConfig } from "./config";
 import { assertDurableRuntimeCommand, atomicWriteFile, getConfigDir } from "./config";
@@ -13,6 +14,28 @@ export interface ServiceStatus {
   loaded: boolean;
   label: string;
   definitionPath?: string;
+}
+
+/** A stopped endpoint is necessary, not sufficient, evidence of settled process ownership. */
+export async function assertRuntimeEndpointClosed(config: { host: string; port: number }): Promise<void> {
+  if (!["127.0.0.1", "::1", "localhost"].includes(config.host)) throw new Error("Repair requires a known loopback runtime endpoint");
+  const hosts = config.host === "localhost" ? ["127.0.0.1", "::1"] : [config.host];
+  for (const host of hosts) await new Promise<void>((resolve, reject) => {
+    const socket = createConnection({ host, port: config.port });
+    let settled = false;
+    const finish = (error?: Error): void => {
+      if (settled) return;
+      settled = true;
+      socket.setTimeout(0);
+      socket.destroy();
+      error ? reject(error) : resolve();
+    };
+    socket.setTimeout(1_000, () => finish(new Error("Could not prove that the runtime endpoint is stopped")));
+    socket.once("connect", () => finish(new Error("Runtime is still listening; stop it safely before applying configuration repair")));
+    socket.once("error", (error: NodeJS.ErrnoException) => {
+      finish(error.code === "ECONNREFUSED" ? undefined : new Error("Could not prove that the runtime endpoint is stopped"));
+    });
+  });
 }
 
 function xml(value: string): string {

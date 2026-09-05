@@ -24,6 +24,24 @@ test("launcher logs redact tunnel ids, runtime keys, and bearer credentials", ()
   });
 });
 
+test("browser exception DOM never survives persistence or legacy diagnostic export", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-web-gpt-private-dom-"));
+  const filePath = path.join(root, "launcher.jsonl");
+  const destinationPath = path.join(root, "export.jsonl");
+  const message = 'locator.waitFor: strict mode violation: <a href="/c/private-id-canary" aria-label="private-title-canary">private-title-canary</a>';
+  try {
+    const logger = createLogger({ filePath });
+    logger.error("browser.failed", { message, phase: "connector", candidates: 2 });
+    assert.doesNotMatch(fs.readFileSync(filePath, "utf8"), /private-(id|title)-canary/);
+    fs.appendFileSync(filePath, `${JSON.stringify({ at: "2026-09-04", level: "error", event: "legacy.browser.failed", detail: { message } })}\n`);
+    assert.equal(exportSanitizedLogs({ filePath, destinationPath }), 2);
+    const exported = fs.readFileSync(destinationPath, "utf8");
+    assert.doesNotMatch(exported, /private-(id|title)-canary/);
+    assert.match(exported, /"candidates":2/);
+    assert.match(exported, /"phase":"connector"/);
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
+
 test("failed launcher IPC calls are written to runtime activity", async () => {
   let registered;
   const errors = [];

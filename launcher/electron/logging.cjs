@@ -7,6 +7,13 @@ const MAX_MEMORY_RECORDS = 300;
 const MAX_LOG_STRING_CHARS = 16 * 1024;
 
 function redactText(value) {
+  // Playwright errors embed arbitrary rendered content, including sidebar titles. Partial
+  // redaction of a DOM dump cannot establish privacy; retain only its structural category.
+  if (/strict mode violation|\blocator\.[A-Za-z]+:|<\/?(?:a|div|span|textarea|input|button)\b/i.test(value)) {
+    return /strict mode violation/i.test(value)
+      ? "[browser-ui-error: ambiguous locator; rendered content omitted]"
+      : "[browser-ui-error: rendered content omitted]";
+  }
   const redacted = value
     .replace(/tunnel_[a-f0-9]{32}/g, "[tunnel-id]")
     .replace(/\bsk-[A-Za-z0-9_-]{12,}\b/g, "[runtime-key]")

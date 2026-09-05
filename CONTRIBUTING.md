@@ -36,7 +36,7 @@ large unsolicited pull request may be closed even when substantial work went int
 ## Before opening a pull request
 
 1. Run `bun install --frozen-lockfile` in the repository root and in `launcher/`.
-2. Run `bun run verify`.
+2. Run `bun run verify`, or use `just ci` for local verification including the offline browser fixture and workflow linting. See [local CI](docs/local-verification.md) for setup and native packaging checks.
 3. Add a focused regression test for behavior changes.
 4. For browser UI changes, include the observed DOM evidence and a reproducible fixture. Do not
    broaden selectors speculatively.

@@ -24,12 +24,75 @@ import type {
 import { verifyManagedJournalState } from "./codex-integration-route";
 import { inspectInstalledCodexConfig } from "./codex-integration-inspection";
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
 function isPreviousAssignment(value: unknown): boolean {
-  if (!value || typeof value !== "object") return false;
+  if (!isRecord(value)) return false;
   const assignment = value as Record<string, unknown>;
   if (typeof assignment.present !== "boolean") return false;
+  if (assignment.index !== undefined && (!Number.isSafeInteger(assignment.index) || Number(assignment.index) < 0)) return false;
   return !assignment.present
     || (typeof assignment.rawLine === "string" && typeof assignment.value === "string");
+}
+
+function isPreviousFeature(value: unknown, key: "multi_agent" | "multi_agent_v2"): boolean {
+  if (!isRecord(value) || !isPreviousAssignment(value) || typeof value.tablePresent !== "boolean") return false;
+  if (value.tableName !== undefined && value.tableName !== "features" && value.tableName !== "features.multi_agent_v2") return false;
+  if (key === "multi_agent" && (value.tableName === "features.multi_agent_v2" || value.inlineTable === true)) return false;
+  if (value.inlineTable !== undefined && typeof value.inlineTable !== "boolean") return false;
+  if (value.separatorInserted !== undefined && typeof value.separatorInserted !== "boolean") return false;
+  if (!value.present) return true;
+  if (!value.tablePresent) return false;
+  try {
+    const parsed = Bun.TOML.parse(value.rawLine as string) as Record<string, unknown>;
+    const assignmentKey = value.tableName === "features.multi_agent_v2" ? "enabled" : key;
+    if (Object.keys(parsed).length !== 1 || !Object.hasOwn(parsed, assignmentKey)) return false;
+    const actual = parsed[assignmentKey];
+    if (value.inlineTable) {
+      if (!isRecord(actual)) return false;
+      return actual.enabled === undefined ? value.value === "unset"
+        : typeof actual.enabled === "boolean" && String(actual.enabled) === value.value;
+    }
+    return typeof actual === "boolean" && String(actual) === value.value;
+  } catch { return false; }
+}
+
+function isPreviousDepth(value: unknown): boolean {
+  if (!isRecord(value) || !isPreviousAssignment(value) || typeof value.tablePresent !== "boolean") return false;
+  if (value.separatorInserted !== undefined && typeof value.separatorInserted !== "boolean") return false;
+  if (!value.present) return true;
+  if (!value.tablePresent) return false;
+  try {
+    const parsed = Bun.TOML.parse(value.rawLine as string) as Record<string, unknown>;
+    return Object.keys(parsed).length === 1 && Object.hasOwn(parsed, "max_depth")
+      && Number.isSafeInteger(parsed.max_depth) && Number(parsed.max_depth) > 0
+      && String(parsed.max_depth) === value.value;
+  } catch { return false; }
+}
+
+function isPreviousString(value: unknown, key: string): boolean {
+  if (!isRecord(value) || !isPreviousAssignment(value)) return false;
+  if (!value.present) return true;
+  try {
+    const parsed = Bun.TOML.parse(value.rawLine as string) as Record<string, unknown>;
+    return Object.keys(parsed).length === 1 && Object.hasOwn(parsed, key)
+      && typeof parsed[key] === "string" && parsed[key] === value.value;
+  } catch { return false; }
+}
+
+function hasModernOwnership(value: Record<string, unknown>): boolean {
+  if (!isRecord(value.previous) || !isRecord(value.installed)) return false;
+  const previous = value.previous;
+  if (!["openai_base_url", "model_provider", "model_catalog_json"].every(key => isPreviousString(previous[key], key))) return false;
+  if ((value.version === 9 || value.version === 10)
+    && !isPreviousString(value.previousRealtimeWebrtcCallBaseUrl, "experimental_realtime_webrtc_call_base_url")) return false;
+  if (typeof value.installed.openai_base_url !== "string" || !value.installed.openai_base_url) return false;
+  return value.installed.subagent_protocol !== "compatibility-v1"
+    || (isPreviousFeature(value.previousMultiAgent, "multi_agent")
+      && isPreviousFeature(value.previousMultiAgentV2, "multi_agent_v2")
+      && isPreviousDepth(value.previousAgentMaxDepth));
 }
 
 function isInstalledInterruptHook(value: unknown): boolean {
@@ -43,7 +106,14 @@ function isInstalledInterruptHook(value: unknown): boolean {
 }
 
 function parseJournal(path: string): AnyCodexIntegrationJournal {
-  const value = JSON.parse(stripUtf8Bom(readFileSync(path, "utf8"))) as Record<string, unknown>;
+  let input: unknown;
+  try { input = JSON.parse(stripUtf8Bom(readFileSync(path, "utf8"))); }
+  catch { throw new Error(`Invalid Codex integration journal: ${path}`); }
+  if (!isRecord(input)) throw new Error(`Invalid Codex integration journal: ${path}`);
+  const value = input;
+  if ((value.version === 8 || value.version === 9 || value.version === 10) && !hasModernOwnership(value)) {
+    throw new Error(`Invalid Codex integration journal: ${path}`);
+  }
   const installed = value.installed as Record<string, unknown> | undefined;
   if (value.version === 10
     && typeof value.active === "boolean"

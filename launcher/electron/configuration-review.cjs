@@ -29,11 +29,12 @@ function parseConfigurationPreview(output, protocol) {
   if (preview.version === 2 && (!preview.target || !text(preview.target.id) || !["base", "profile"].includes(preview.target.kind)
     || ![preview.target.codexHome, preview.target.configPath, preview.target.runtimeHome].every(text)
     || (preview.target.kind === "profile" && (typeof preview.target.profile !== "string" || !/^[A-Za-z0-9_-]+$/.test(preview.target.profile)))
-    || !Array.isArray(preview.groups) || preview.groups.length > 6
-    || !preview.groups.every(group => group && ["connection", "subagents", "interrupt", "catalog", "runtime", "other"].includes(group.id)
+    || !Array.isArray(preview.groups) || preview.groups.length > 7
+    || !preview.groups.every(group => group && ["connection", "subagents", "interrupt", "catalog", "runtime", "integrations", "other"].includes(group.id)
       && Array.isArray(group.settings) && group.settings.length <= 512 && group.settings.every(setting => setting && text(setting.path)
         && scalar(setting.current) && scalar(setting.proposed) && ["active", "commented_out", "missing", "ambiguous"].includes(setting.state)
         && typeof setting.inherited === "boolean" && typeof setting.resolutionRequired === "boolean"
+        && (setting.changeKind === undefined || ["added", "removed", "changed", "unchanged", "unresolved"].includes(setting.changeKind))
         && (setting.baseline === undefined || scalar(setting.baseline))
         && Array.isArray(setting.findings) && setting.findings.length <= 512 && setting.findings.every(finding => finding && text(finding.message) && text(finding.path))
         && Array.isArray(setting.occurrences) && setting.occurrences.length <= 512 && setting.occurrences.every(item => item && /^[a-f0-9]{64}$/.test(item.id)

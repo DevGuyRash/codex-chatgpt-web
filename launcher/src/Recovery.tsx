@@ -6,9 +6,10 @@ import type { DiagnosticProblem, DoctorReport, Language, LauncherApi, LauncherSt
 
 export const RecoveryContext = createContext<(action: RecoveryAction) => void>(() => {});
 export function ErrorToast({ copy, language, message, problem, disabled, onDismiss }: { copy: Copy; language: Language; message: string; problem?: DiagnosticProblem; disabled: boolean; onDismiss: () => void }) {
+  const friendly = language === "zh-CN" ? ["操作未完成。请使用下方恢复操作查看下一步。", "技术详情"] : language === "ja" ? ["操作を完了できませんでした。下の復旧操作で次の手順を確認してください。", "技術的な詳細"] : ["The operation did not complete. Use the recovery action below to review the next step.", "Technical details"];
   return <motion.div role="alert" animate={{ opacity: 1, y: 0 }} className="error-toast" exit={{ opacity: 0, y: 8 }} initial={{ opacity: 0, y: 8 }} transition={{ duration: 0.3, ease: [0.16, 1, 0.3, 1] }}>
     <i aria-hidden="true" className="state-dot is-error" />
-    <div><strong>{copy.error}</strong><p>{message}</p>
+    <div><strong>{copy.error}</strong><p>{friendly[0]}</p><details><summary>{friendly[1]}</summary><p>{message}</p></details>
       {problem ? <ProblemFindings findings={problem.findings} /> : null}
       <RecoveryActions actions={problem?.actions ?? ["run-doctor", "export-logs"]} language={language} disabled={disabled} />
     </div>
@@ -16,9 +17,9 @@ export function ErrorToast({ copy, language, message, problem, disabled, onDismi
   </motion.div>;
 }
 const actionLabels = {
-  en: { "run-doctor": "Run Doctor", "review-configuration": "Review configuration repair", "review-setup": "Review setup", "export-logs": "Export diagnostic logs", close: "Close", title: "Diagnostics and recovery", working: "Checking…" },
-  "zh-CN": { "run-doctor": "运行诊断", "review-configuration": "查看配置修复", "review-setup": "查看设置", "export-logs": "导出诊断日志", close: "关闭", title: "诊断与恢复", working: "检查中…" },
-  ja: { "run-doctor": "診断を実行", "review-configuration": "設定の修復を確認", "review-setup": "セットアップを確認", "export-logs": "診断ログをエクスポート", close: "閉じる", title: "診断と復旧", working: "確認中…" },
+  en: { "run-doctor": "Run Doctor", "review-configuration": "Review fix", "review-setup": "Review setup", "export-logs": "Export diagnostic logs", close: "Close", title: "Diagnostics and recovery", working: "Checking…" },
+  "zh-CN": { "run-doctor": "运行诊断", "review-configuration": "审核修复", "review-setup": "查看设置", "export-logs": "导出诊断日志", close: "关闭", title: "诊断与恢复", working: "检查中…" },
+  ja: { "run-doctor": "診断を実行", "review-configuration": "修復を確認", "review-setup": "セットアップを確認", "export-logs": "診断ログをエクスポート", close: "閉じる", title: "診断と復旧", working: "確認中…" },
 };
 export function RecoveryActions({ actions, language, disabled = false }: { actions: RecoveryAction[]; language: Language; disabled?: boolean }) {
   const recover = useContext(RecoveryContext);
@@ -45,6 +46,9 @@ export function RecoveryDialog({ action, api, language, devProfile, onClose, onR
   const [report, setReport] = useState<DoctorReport | null>(null);
   const [busy, setBusy] = useState(action === "run-doctor");
   const [error, setError] = useState<string | null>(null);
+  const [rechecking, setRechecking] = useState(false);
+  const [applied, setApplied] = useState(false);
+  const outcome = language === "zh-CN" ? ["更改已应用", "需要重启", "连接已验证", "检查未完成。请查看技术详情，然后重新运行诊断。", "技术详情"] : language === "ja" ? ["変更を適用しました", "再起動が必要です", "接続を確認しました", "確認を完了できませんでした。技術的な詳細を確認し、診断を再実行してください。", "技術的な詳細"] : ["Changes applied", "Restart required", "Connection verified", "The check could not finish. Review the technical details, then run diagnostics again.", "Technical details"];
   useEffect(() => { const element = dialog.current!; element.showModal(); return () => element.close(); }, []);
   useEffect(() => {
     if (action !== "run-doctor") return;
@@ -53,11 +57,17 @@ export function RecoveryDialog({ action, api, language, devProfile, onClose, onR
     return () => { current = false; };
   }, [action, api]);
   const copy = actionLabels[language];
-  return <dialog ref={dialog} className="configuration-review-dialog recovery-dialog" aria-label={copy.title} onCancel={event => { event.preventDefault(); if (!busy) onClose(); }}>
+  return <dialog ref={dialog} className="configuration-review-dialog recovery-dialog" aria-label={copy.title} onCancel={event => { event.preventDefault(); if (!busy && !rechecking) onClose(); }}>
     <h2>{copy.title}</h2>
     {action === "run-doctor" ? <>{busy ? <p role="status">{copy.working}</p> : null}{report ? <DiagnosticChecks report={report} language={language} disabled={busy} /> : null}</>
-      : !devProfile ? <ConfigurationRepair api={api} language={language} disabled={false} onBusyChange={setBusy} onRepaired={onRepaired} onError={setError} /> : null}
-    {error ? <p role="alert" className="diagnostic-detail">{error}</p> : null}
-    <button type="button" className="button-secondary" disabled={busy} onClick={onClose}>{copy.close}</button>
+      : !devProfile ? <ConfigurationRepair api={api} language={language} disabled={rechecking} onBusyChange={setBusy} onRepaired={state => {
+        onRepaired(state); setApplied(true); setRechecking(true); setReport(null);
+        void api.doctor().then(setReport).catch(cause => setError(cause instanceof Error ? cause.message : String(cause))).finally(() => setRechecking(false));
+      }} onError={setError} /> : null}
+    {applied ? <p role="status">{outcome[0]} · {outcome[1]}{report?.ok ? ` · ${outcome[2]}` : ""}</p> : null}
+    {rechecking ? <p role="status">{copy.working}</p> : null}
+    {action !== "run-doctor" && report ? <DiagnosticChecks report={report} language={language} disabled={busy || rechecking} /> : null}
+    {error ? <><p role="alert">{outcome[3]}</p><details><summary>{outcome[4]}</summary><pre className="diagnostic-detail">{error}</pre></details></> : null}
+    <button type="button" className="button-secondary" disabled={busy || rechecking} onClick={onClose}>{copy.close}</button>
   </dialog>;
 }

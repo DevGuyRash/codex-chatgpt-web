@@ -8,13 +8,16 @@ const { ConfigurationReview } = require("../electron/configuration-review.cjs");
 test("profile migration uses the existing setup IPC owner and preserves its explicit migration option", async () => {
   const handlers = new Map();
   const calls = [];
+  const events = [];
+  let failSetup = false;
   const main = fs.readFileSync(require.resolve("../electron/main.cjs"), "utf8");
   const registration = main.slice(main.indexOf("function registerIpc("), main.indexOf("async function requestQuit("));
   const stateStore = { read: () => ({ browserInteractionMode: "manual" }), update() {} };
   vm.runInNewContext(`${registration}\nregisterIpc({ logger: { error() {}, warn() {} }, stateStore });`, {
     stateStore, IS_DEV_PROFILE: false, IS_CODEX_PROFILE: true, registerLoggedIpc,
     ipcMain: { handle: (name, handler) => handlers.set(name, handler), on() {} }, publishOperation() {},
-    runtimeHost: { setupCore: async options => { calls.push(JSON.parse(JSON.stringify(options))); return { mode: "browser-only", stdout: "" }; }, runtimeConfigSnapshot: () => ({ config: {} }) },
+    runtimeHost: { setupCore: async options => { if (failSetup) throw new Error("Setup cancelled"); calls.push(JSON.parse(JSON.stringify(options))); return { mode: "browser-only", stdout: "" }; }, runtimeConfigSnapshot: () => ({ config: {} }) },
+    send: name => events.push(name),
     browserHost: { returnToIdle: async () => {} }, startCatalogVerificationMonitor() {},
   });
   let api;
@@ -23,6 +26,10 @@ test("profile migration uses the existing setup IPC owner and preserves its expl
   });
   await api.setupCore({ migrateBase: true });
   assert.deepEqual(calls, [{ migrateBase: true }]);
+  assert.deepEqual(events, ["launcher:codex-restart-required"]);
+  failSetup = true;
+  await assert.rejects(api.setupCore(), /Setup cancelled/);
+  assert.deepEqual(events, ["launcher:codex-restart-required"]);
   await assert.rejects(api.setupCore({ migrateBase: "yes" }), /Unsupported setup/);
 });
 

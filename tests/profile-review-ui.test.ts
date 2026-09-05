@@ -32,8 +32,9 @@ test.skipIf(!process.env.CHATGPT_TEST_CHROME_EXECUTABLE)("target selector and tw
     await page.evaluate(fixture => { (window as unknown as { profileFixture: unknown }).profileFixture = fixture; }, { preview, targets: { selected, targets: [base, selected], launchCommand: `CODEX_HOME='${base.codexHome}' '/verified/codex' --profile '${selected.profile}'` } });
     await page.addStyleTag({ content: readFileSync(join(root, "bundle", "profile-review.css"), "utf8") });
     await page.addScriptTag({ content: readFileSync(join(root, "bundle", "profile-review.js"), "utf8") });
-    await page.getByRole("heading", { name: "Integration targets", exact: true }).waitFor();
+    await page.getByRole("heading", { name: "Codex connection", exact: true }).waitFor();
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+    await page.getByText("Advanced: separate command-line profiles", { exact: true }).click();
     await page.getByText("Review base-to-profile migration", { exact: true }).first().click();
     const opener = page.getByRole("button", { name: "Review base-to-profile migration", exact: true });
     await opener.click();

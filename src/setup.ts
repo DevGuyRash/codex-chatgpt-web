@@ -527,7 +527,7 @@ function prepareSetupConfiguration(options: SetupOptions) {
     const baseReview = withConfigurationReview({ ...preview, changes: describeCodexConfigurationChanges(migration.original, migration.restored), conflicts: [] }, migration.base, migration.original, configurationReviewContext(migration.base, migration.expected));
     preview.additionalTargets = [{ target: migration.base, groups: baseReview.groups! }];
   }
-  return { ...prepared, integrationPlan, preview: withConfigurationReview(preview, target, original, { ...configurationReviewContext(target, integrationPlan.expected), proposedBaseSource: integrationPlan.migration?.restored }), runtimeInput };
+  return { ...prepared, integrationPlan, preview: withConfigurationReview(preview, target, original, { ...configurationReviewContext(target, integrationPlan.expected, integrationPlan.journal), proposedBaseSource: integrationPlan.migration?.restored }), runtimeInput };
 }
 
 export function previewSetupConfiguration(options: SetupOptions): CodexRepairPreview {

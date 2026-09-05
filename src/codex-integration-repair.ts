@@ -100,7 +100,7 @@ function materialize(protocol: SubagentProtocol, options: RepairOptions = {}): M
 export function previewCodexIntegrationRepair(protocol: SubagentProtocol, options: RepairOptions = {}): CodexRepairPreview {
   const plan = materialize(protocol, options);
   const target = options.target ?? resolveIntegrationTarget();
-  return withConfigurationReview({ ...plan.preview, resolutions: options.resolutions ?? [] }, target, plan.snapshots[0]?.data?.toString("utf8") ?? "", configurationReviewContext(target, plan.snapshots));
+  return withConfigurationReview({ ...plan.preview, resolutions: options.resolutions ?? [] }, target, plan.snapshots[0]?.data?.toString("utf8") ?? "", configurationReviewContext(target, plan.snapshots, plan.journal));
 }
 
 /** Callers settle runtime ownership before applying; no runtime is started or stopped here. */

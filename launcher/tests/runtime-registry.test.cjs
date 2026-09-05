@@ -7,6 +7,32 @@ const net = require("node:net");
 const { RuntimeRegistry } = require("../electron/runtime-registry.cjs");
 const { resolveIntegrationTarget } = require("../electron/integration-target.cjs");
 
+test("listing targets preserves the base and normal profiles when another profile is linked or broken", context => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "cgw-registry-links-"));
+  try {
+    const codexHome = path.join(root, "codex");
+    fs.mkdirSync(codexHome);
+    fs.writeFileSync(path.join(codexHome, "config.toml"), "# base\n");
+    fs.writeFileSync(path.join(codexHome, "work.config.toml"), "# work\n");
+    const external = path.join(root, "external.toml");
+    fs.writeFileSync(external, "# managed elsewhere\n");
+    try {
+      fs.symlinkSync(external, path.join(codexHome, "linked.config.toml"));
+      fs.symlinkSync(path.join(root, "missing.toml"), path.join(codexHome, "broken.config.toml"));
+    } catch (error) { if (process.platform === "win32" && error.code === "EPERM") { context.skip("File symlinks require Windows developer mode or privileges"); return; } throw error; }
+    const registry = new RuntimeRegistry({ runtimeRoot: path.join(root, "runtime") });
+    assert.deepEqual(registry.list(codexHome).map(target => target.profile ?? "base"), ["base", "work"]);
+    const discovered = registry.discover(codexHome);
+    assert.equal(discovered.entries.find(entry => entry.profile === "linked").status, "external");
+    assert.equal(discovered.entries.find(entry => entry.profile === "linked").resolvedPath, external);
+    assert.equal(discovered.entries.find(entry => entry.profile === "broken").status, "unavailable");
+    assert.throws(() => resolveIntegrationTarget({ codexHome, runtimeRoot: registry.runtimeRoot, profile: "broken" }), /aliases/);
+    assert.equal(fs.lstatSync(path.join(codexHome, "linked.config.toml")).isSymbolicLink(), true);
+    assert.equal(fs.readFileSync(external, "utf8"), "# managed elsewhere\n");
+    assert.equal(fs.existsSync(registry.runtimeRoot), false);
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
+
 test("reservation excludes an idle base runtime's custom port", async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "cgw-registry-base-"));
   try {
@@ -16,6 +42,24 @@ test("reservation excludes an idle base runtime's custom port", async () => {
     fs.mkdirSync(registry.runtimeRoot, { recursive: true });
     fs.writeFileSync(path.join(registry.runtimeRoot, "config.json"), JSON.stringify({ port: preferred }));
     assert.notEqual((await registry.ensure(target)).port, preferred);
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
+
+test("discovery keeps file targets and reports corrupt optional registry records without rewriting them", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "cgw-registry-partial-"));
+  try {
+    const codexHome = path.join(root, "codex");
+    fs.mkdirSync(codexHome);
+    fs.writeFileSync(path.join(codexHome, "work.config.toml"), "# existing profile\n");
+    const registry = new RuntimeRegistry({ runtimeRoot: path.join(root, "runtime") });
+    fs.mkdirSync(path.dirname(registry.path), { recursive: true });
+    const target = resolveIntegrationTarget({ codexHome, runtimeRoot: registry.runtimeRoot, profile: "work" });
+    const invalid = JSON.stringify({ version: 1, targets: [{ target, port: "invalid" }] });
+    fs.writeFileSync(registry.path, invalid);
+    const discovered = registry.discover(codexHome);
+    assert.equal(discovered.entries.filter(entry => entry.status === "available").length, 2);
+    assert.equal(discovered.issues[0].code, "target_registry_entry_unavailable");
+    assert.equal(fs.readFileSync(registry.path, "utf8"), invalid);
   } finally { fs.rmSync(root, { recursive: true, force: true }); }
 });
 

@@ -208,6 +208,28 @@ class RuntimeHost {
     return this.lifecycleOperation || this.active || (stuckChild ? "previous runtime process shutdown" : null);
   }
 
+  async withCodexRestartGuard(operation) {
+    this.assertProductionProfile("Codex restart");
+    if (this.currentOperation()) throw new Error("Finish the active launcher operation before restarting Codex");
+    this.lifecycleOperation = "codex-restart";
+    let drained = false;
+    let config;
+    try {
+      config = this.supervisor.readConfig();
+      const daemon = this.supervisor.daemon;
+      if (daemon && daemon.exitCode === null && daemon.signalCode === null) {
+        if (!config) throw new Error("Bridge work could not be checked");
+        drained = await this.supervisor.acquireDrain(config, 0);
+      } else if (config && await this.supervisor.proxyHealthPayload(config)) {
+        throw new Error("A runtime outside this launcher's ownership is running");
+      }
+      return await operation();
+    } finally {
+      try { if (drained) await this.supervisor.control(config, "resume"); }
+      finally { this.lifecycleOperation = null; }
+    }
+  }
+
   browserInteractionMode() {
     const mode = this.getBrowserInteractionMode();
     if (mode !== "automatic" && mode !== "manual") {

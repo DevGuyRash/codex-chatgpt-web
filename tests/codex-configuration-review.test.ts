@@ -27,3 +27,12 @@ test("a profile override is not a duplicate; inheritance is explicit", () => {
   expect(connection.occurrences).toHaveLength(2);
   expect(result.groups!.find(group => group.id === "subagents")!.settings[0]!.inherited).toBe(true);
 });
+
+test("review distinguishes activation from unchanged values and does not call external hooks app cleanup", () => {
+  const result = withConfigurationReview({ ...preview, status: "ready", changes: [
+    { path: "openai_base_url", current: null, proposed: "http://localhost:17841/v1", currentState: "commented_out" },
+  ] }, target, '# openai_base_url="http://localhost:17841/v1"\n[hooks]\nPermissionRequest=[{hooks=[{command="external helper"}]}]\n[hooks.state."external:permission:0:0"]\ntrusted_hash="external-hash"\n');
+  expect(result.groups!.find(group => group.id === "connection")!.settings[0]!.changeKind).toBe("added");
+  expect(result.groups!.find(group => group.id === "interrupt")).toBeUndefined();
+  expect(result.groups!.find(group => group.id === "integrations")!.settings.every(setting => setting.changeKind === "unchanged")).toBe(true);
+});

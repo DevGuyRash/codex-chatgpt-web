@@ -114,7 +114,11 @@ export interface LauncherSnapshot {
 }
 
 export interface LauncherApi {
-  integrationTargets(): Promise<{ selected: import("../../src/contracts/codex-integration").IntegrationTarget; targets: import("../../src/contracts/codex-integration").IntegrationTarget[]; launchCommand?: string; capabilityError?: string }>;
+  integrationTargets(): Promise<{ selected: import("../../src/contracts/codex-integration").IntegrationTarget; targets: import("../../src/contracts/codex-integration").IntegrationTarget[]; discovery?: import("../../src/contracts/codex-integration").IntegrationTargetDiscovery; inspectionError?: string; launchCommand?: string; capabilityError?: string }>;
+  chooseCodexHome(): Promise<string | null>;
+  codexRestartAvailability(): Promise<import("../../src/contracts/codex-restart").CodexRestartAvailability>;
+  restartCodex(token: string): Promise<import("../../src/contracts/codex-restart").CodexRestartResult>;
+  onCodexRestartRequired(listener: () => void): () => void;
   openIntegrationTarget(target: { codexHome: string; profile?: string }): Promise<{ target: import("../../src/contracts/codex-integration").IntegrationTarget }>;
   checkTargetCapabilities(): Promise<{ cancelled: boolean }>;
   snapshot(): Promise<LauncherSnapshot>;

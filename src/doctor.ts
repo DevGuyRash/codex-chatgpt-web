@@ -1,7 +1,7 @@
 import { existsSync, readFileSync, statSync } from "node:fs";
 import type { AppConfig } from "./config";
 import { getConfigDir, getConfigPath, loadConfig } from "./config";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { inspectCodexIntegration } from "./codex-integration";
 import { browserLoginStateExists, loginVerificationMarkerPath } from "./browser-login";
 import { getServiceStatus } from "./service";
@@ -14,6 +14,8 @@ import {
 } from "./launcher-browser-host";
 import { processRunning } from "./process";
 import type { IntegrationTarget } from "./contracts/codex-integration";
+import { RuntimeRegistry } from "../launcher/electron/runtime-registry.cjs";
+import { targetDiscoveryChecks } from "./target-discovery-diagnostics";
 
 export type CheckStatus = "ok" | "warning" | "error";
 
@@ -90,15 +92,24 @@ async function proxyCheck(config: AppConfig): Promise<DoctorCheck> {
 
 export async function runDoctor(target?: IntegrationTarget): Promise<DoctorReport> {
   const checks: DoctorCheck[] = [];
+  const discovery = () => {
+    try {
+      const runtimeRoot = target?.kind === "profile" ? dirname(dirname(target.runtimeHome)) : target?.runtimeHome ?? getConfigDir();
+      checks.push(...targetDiscoveryChecks(new RuntimeRegistry({ runtimeRoot }).discover(target?.codexHome), target));
+    }
+    catch { checks.push({ id: "target-discovery", status: "warning", code: "target_discovery_unavailable", message: "Connections could not be listed", detail: "Check your Codex home directory and its permissions, then refresh connections." }); }
+  };
   let config: AppConfig;
   try {
     config = loadConfig(target?.runtimeHome);
     target ??= config.integrationTarget;
     checks.push({ id: "config", status: "ok", message: `Configuration is valid (${getConfigPath(target?.runtimeHome)})` });
   } catch (error) {
+    discovery();
     checks.push({ id: "config", status: "error", message: "Configuration is invalid", detail: error instanceof Error ? error.message : String(error) });
     return { ok: false, checks };
   }
+  discovery();
 
   if (config.browserHost === "launcher") {
     try {

@@ -3,7 +3,7 @@ const path = require("node:path");
 const net = require("node:net");
 const { randomUUID } = require("node:crypto");
 const { setTimeout: delay } = require("node:timers/promises");
-const { canonicalConfigurationPath, listIntegrationTargets, resolveIntegrationTarget, validateIntegrationTarget } = require("./integration-target.cjs");
+const { canonicalConfigurationPath, discoverIntegrationTargets, resolveIntegrationTarget, validateIntegrationTarget } = require("./integration-target.cjs");
 const { writePrivateFileAtomic } = require("./atomic-file.cjs");
 
 function portAvailable(port) {
@@ -39,10 +39,31 @@ class RuntimeRegistry {
   }
 
   list(codexHome) {
-    const known = new Map(listIntegrationTargets({ codexHome, runtimeRoot: this.runtimeRoot }).map(target => [target.id, target]));
-    const home = resolveIntegrationTarget({ codexHome, runtimeRoot: this.runtimeRoot }).codexHome;
-    for (const { target } of this.read().targets) if (target.codexHome === home) known.set(target.id, target);
-    return [...known.values()].sort((a, b) => a.kind === "base" ? -1 : b.kind === "base" ? 1 : a.profile.localeCompare(b.profile));
+    return this.discover(codexHome).entries.flatMap(entry => entry.target ? [entry.target] : []);
+  }
+
+  discover(codexHome) {
+    const result = discoverIntegrationTargets({ codexHome, runtimeRoot: this.runtimeRoot });
+    const home = result.entries[0]?.codexHome;
+    const known = new Map(result.entries.map(entry => [entry.id, entry]));
+    try {
+      if (fs.existsSync(this.path)) {
+        const state = JSON.parse(fs.readFileSync(this.path, "utf8"));
+        if (state?.version !== 1 || !Array.isArray(state.targets) || state.targets.length > 128) throw new Error("Invalid registry");
+        const ids = new Set();
+        const ports = new Set();
+        for (const entry of state.targets) {
+          try {
+            const target = validateIntegrationTarget(entry.target);
+            if (target.kind !== "profile" || path.dirname(path.dirname(target.runtimeHome)) !== this.runtimeRoot) throw new Error("Invalid owner");
+            if (!Number.isSafeInteger(entry.port) || entry.port < 1024 || entry.port > 65535 || ids.has(target.id) || ports.has(entry.port)) throw new Error("Conflicting registry endpoint");
+            ids.add(target.id); ports.add(entry.port);
+            if (target.codexHome === home && !known.has(target.id)) known.set(target.id, { ...target, status: "available", target });
+          } catch { result.issues.push({ code: "target_registry_entry_unavailable", path: this.path }); }
+        }
+      }
+    } catch { result.issues.push({ code: "target_registry_unavailable", path: this.path }); }
+    return { entries: [...known.values()].sort((a, b) => a.kind === "base" ? -1 : b.kind === "base" ? 1 : a.profile.localeCompare(b.profile)), issues: result.issues };
   }
 
   assertBaseOwner(target) {

@@ -26,6 +26,9 @@ const {
 } = require("./logging.cjs");
 const { RuntimeHost } = require("./runtime.cjs");
 const { ConfigurationReview } = require("./configuration-review.cjs");
+const { CodexRestartController } = require("./codex-restart.cjs");
+const { createRestartAdapter } = require("./codex-restart-platforms.cjs");
+let codexRestartController;
 const { ensurePackagedRuntime, waitForPackagedRuntimeSource } = require("./runtime-install.cjs");
 const { RuntimeSupervisor } = require("./runtime-supervisor.cjs");
 const { DEVELOPMENT_PROFILE, resolveLauncherProfile } = require("./profile.cjs");
@@ -135,7 +138,7 @@ function startCatalogVerificationMonitor({ logger, stateStore }) {
   stopCatalogVerificationMonitor();
   const check = async () => {
     const current = stateStore.read();
-    if (current.coreSetupComplete !== true || current.codexCatalogVerified === true) {
+    if (current.coreSetupComplete !== true || (current.codexCatalogVerified === true && current.codexRestartRequired !== true)) {
       stopCatalogVerificationMonitor();
       return;
     }
@@ -154,16 +157,19 @@ function startCatalogVerificationMonitor({ logger, stateStore }) {
       }
       if (!Number.isInteger(health?.successful_model_catalog_requests)
         || health.successful_model_catalog_requests < 1) return;
+      const restart = current.codexRestartRequired === true ? await codexRestartController?.restartEvidence() : null;
+      const restartVerified = current.codexRestartRequired !== true || (restart && Date.parse(health.last_successful_model_catalog_request_at) >= restart.after);
+      if (current.codexCatalogVerified === true && current.codexRestartRequired === !restartVerified) return;
       const state = stateStore.update({
         codexCatalogVerified: true,
-        codexRestartRequired: false,
+        codexRestartRequired: !restartVerified,
       });
       logger.info("codex.model_catalog_verified", {
         requests: health.successful_model_catalog_requests,
         at: health.last_successful_model_catalog_request_at,
       });
       send("launcher:state-changed", state);
-      stopCatalogVerificationMonitor();
+      if (restartVerified) stopCatalogVerificationMonitor();
     } catch (error) {
       logger.debug("codex.model_catalog_verification_pending", {
         message: error instanceof Error ? error.message : String(error),
@@ -480,9 +486,34 @@ function registerIpc({ logger, stateStore }) {
   });
   handle("launcher:integration-targets", async () => {
     if (!runtimeRegistry) throw new Error("DEV does not own Codex integration targets");
-    const result = await runtimeHost.run("target-inspection", ["targets", "inspect"], { embedded: true, privateOutput: true, timeoutMs: 15_000 });
-    const inspected = JSON.parse(result.stdout);
-    return { selected: LAUNCHER_PROFILE.integrationTarget, targets: runtimeRegistry.list(LAUNCHER_PROFILE.codexHome), launchCommand: inspected.launchCommand, capabilityError: inspected.capabilityError };
+    let discovery;
+    try { discovery = runtimeRegistry.discover(LAUNCHER_PROFILE.codexHome); }
+    catch { discovery = { entries: [], issues: [{ code: "target_discovery_unavailable", path: LAUNCHER_PROFILE.codexHome }] }; }
+    let inspected = {};
+    let inspectionError;
+    try {
+      const result = await runtimeHost.run("target-inspection", ["targets", "inspect"], { embedded: true, privateOutput: true, timeoutMs: 15_000 });
+      inspected = JSON.parse(result.stdout);
+    } catch (error) { inspectionError = error instanceof Error ? error.message : String(error); }
+    return { selected: LAUNCHER_PROFILE.integrationTarget, targets: discovery.entries.flatMap(entry => entry.target ? [entry.target] : []), discovery, inspectionError, launchCommand: inspected.launchCommand, capabilityError: inspected.capabilityError };
+  });
+  handle("launcher:codex-home-folder", async () => {
+    const choice = await dialog.showOpenDialog(mainWindow, { properties: ["openDirectory"], defaultPath: LAUNCHER_PROFILE.codexHome });
+    return choice.canceled || choice.filePaths.length !== 1 ? null : choice.filePaths[0];
+  });
+  const restartController = () => {
+    if (!codexRestartController) codexRestartController = new CodexRestartController({ adapter: createRestartAdapter(), withIdleBridge: operation => {
+      if (browserHost.activeTraceId || browserHost.currentOperation() || configurationReview.snapshot()) throw new Error("Finish active work before restarting Codex");
+      return runtimeHost.withCodexRestartGuard(operation);
+    } });
+    return codexRestartController;
+  };
+  handle("launcher:codex-restart-availability", () => IS_DEV_PROFILE || IS_CODEX_PROFILE ? { status: "manual", reason: "unsupported" } : restartController().availability());
+  handle("launcher:codex-restart-execute", async (_event, token) => {
+    if (IS_DEV_PROFILE || IS_CODEX_PROFILE || typeof token !== "string") return { status: "manual", reason: "unsupported" };
+    const result = await restartController().execute(token);
+    if (result.status === "launched") startCatalogVerificationMonitor({ logger, stateStore });
+    return result;
   });
   handle("launcher:target-open", async (_event, input) => {
     if (!runtimeRegistry || !input || typeof input !== "object" || (input.profile !== undefined && typeof input.profile !== "string") || typeof input.codexHome !== "string") throw new Error("Select an explicit Codex home and optional profile name");
@@ -682,6 +713,8 @@ function registerIpc({ logger, stateStore }) {
     const state = stateStore.update({ codexRestartRequired: true, codexCatalogVerified: false });
     send("launcher:state-changed", state);
     stopCatalogVerificationMonitor();
+    if (typeof codexRestartController !== "undefined") codexRestartController?.resetEvidence();
+    send("launcher:codex-restart-required", null);
     return { state };
   });
   handle("launcher:cancel-turns", () => {
@@ -766,7 +799,9 @@ function registerIpc({ logger, stateStore }) {
         message: error instanceof Error ? error.message : String(error),
       });
     });
+    if (typeof codexRestartController !== "undefined") codexRestartController?.resetEvidence();
     if (!IS_DEV_PROFILE) startCatalogVerificationMonitor({ logger, stateStore });
+    if (!IS_DEV_PROFILE) send("launcher:codex-restart-required", null);
     return { ok: true, stdout: result.stdout, restartRequired: !IS_DEV_PROFILE };
   });
   handle("launcher:setup-mcp", async (_event, input) => {

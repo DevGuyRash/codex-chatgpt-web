@@ -18,7 +18,7 @@ function problemFor(error, fallback = "The operation could not complete") {
 }
 function withRecovery(report) {
   return { ...report, checks: report.checks.map(check => check.status === "ok" ? check : {
-    ...check, problem: problemFor(check, check.message),
+    ...check, problem: { ...problemFor(check, check.message), actions: Object.hasOwn(recovery, check.code ?? "") ? recovery[check.code] : ["export-logs"] },
   }) };
 }
 function runtimeFailure(stderr, fallback) {

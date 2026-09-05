@@ -1,4 +1,4 @@
-import { useId } from "react";
+import { useId, useState } from "react";
 import type { CodexRepairPreview, Language } from "./types";
 
 const copy = {
@@ -39,26 +39,33 @@ export function ConfigurationCards({ preview, language, selectOccurrence }: {
   selectOccurrence?: (id: string) => void;
 }) {
   const labels = copy[language];
+  const [showUnchanged, setShowUnchanged] = useState(false);
+  const review = language === "zh-CN" ? { before: "更改前", after: "更改后", added: "新增", removed: "移除", changed: "已更改", unchanged: "不变", unresolved: "需要处理", show: "显示未更改的设置", hide: "隐藏未更改的设置", integrations: ["其他集成", "由其他工具管理的设置。"], helper: "更新清理程序", address: "连接地址", compatibility: "子代理兼容性", cleanup: "取消任务时清理", summary: "查看此连接的更改；展开技术详情可查看准确的定义。" } : language === "ja" ? { before: "変更前", after: "変更後", added: "追加", removed: "削除", changed: "変更", unchanged: "変更なし", unresolved: "対応が必要", show: "変更のない設定を表示", hide: "変更のない設定を隠す", integrations: ["その他の連携", "他のツールが管理する設定です。"], helper: "後処理ヘルパーを更新", address: "接続先アドレス", compatibility: "サブエージェントの互換性", cleanup: "タスクをキャンセルしたときの後処理", summary: "この接続の変更を確認します。正確な定義は技術的な詳細で確認できます。" } : { before: "Before", after: "After", added: "Added", removed: "Removed", changed: "Changed", unchanged: "Unchanged", unresolved: "Needs attention", show: "Show unchanged settings", hide: "Hide unchanged settings", integrations: ["Other integrations", "Settings managed by other tools."], helper: "Update the cleanup helper", address: "Connection address", compatibility: "Subagent compatibility", cleanup: "Cleanup when you cancel a task", summary: "Review what changes for this connection. Expand technical details to inspect the exact definitions." };
+  const kind = (setting: NonNullable<CodexRepairPreview["groups"]>[number]["settings"][number]) => setting.changeKind ?? (setting.state === "ambiguous" ? "unresolved" : setting.state === "commented_out" ? "added" : setting.current === setting.proposed ? "unchanged" : setting.current == null ? "added" : setting.proposed == null ? "removed" : "changed");
+  const unchangedCount = preview.groups?.flatMap(group => group.settings).filter(setting => kind(setting) === "unchanged" && !setting.findings.length && !setting.resolutionRequired).length ?? 0;
   const sectionHelp = language === "zh-CN" ? "选择保留的路由区段。只会移动路由设置；其他区段的标记和已移动文本将被注释保留。无关内容不会改变。" : language === "ja" ? "残す経路セクションを選択します。経路設定だけを移動し、他のマーカーと移動元のテキストはコメントとして保持します。無関係の内容は変更しません。" : "Choose the route section to retain. Only route settings move; other markers and moved source stay commented out. Unrelated contents remain unchanged.";
   const id = useId();
   const value = (item: unknown) => item == null ? labels.missing : String(item);
   return <div className="configuration-groups">
+    <p>{review.summary}</p>
     {preview.additionalTargets?.map(related => <ConfigurationCards key={related.target.id} preview={{ ...preview, ...related, additionalTargets: undefined }} language={language} />)}
     {preview.target ? <p className="configuration-target"><strong>{labels.target}: {preview.target.kind === "profile" ? `${labels.profile} ${preview.target.profile}` : labels.base}</strong><code>{preview.target.configPath}</code></p> : null}
-    {preview.groups?.map(group => <section className="configuration-group" key={group.id} aria-labelledby={`${id}-${group.id}`}>
-      <h3 id={`${id}-${group.id}`}>{labels[group.id][0]}</h3><p>{labels[group.id][1]}</p>
+    {unchangedCount ? <button type="button" className="button-secondary" aria-expanded={showUnchanged} onClick={() => setShowUnchanged(!showUnchanged)}>{showUnchanged ? review.hide : review.show} ({unchangedCount})</button> : null}
+    {preview.groups?.map(group => ({ ...group, settings: group.settings.filter(setting => showUnchanged || kind(setting) !== "unchanged" || setting.findings.length || setting.resolutionRequired).sort((a, b) => Number(kind(a) === "unchanged") - Number(kind(b) === "unchanged")) })).filter(group => group.settings.length).map(group => <section className="configuration-group" key={group.id} aria-labelledby={`${id}-${group.id}`}>
+      <h3 id={`${id}-${group.id}`}>{(group.id === "integrations" ? review.integrations : labels[group.id])[0]}</h3><p>{(group.id === "integrations" ? review.integrations : labels[group.id])[1]}</p>
       {group.settings.map(setting => {
         const hook = group.id === "interrupt";
         const trust = hook && setting.path.endsWith("trusted_hash");
         const command = hook && setting.path.endsWith("command");
-        const name = command ? labels.command : trust ? labels.trust : hook && setting.path.endsWith("timeout") ? labels.timeout : setting.path;
-        const display = (item: unknown, proposed = false) => item == null ? labels.missing : trust ? proposed && setting.current !== setting.proposed ? labels.approve : labels.approved : command ? labels.execute : value(item);
-        return <article className="configuration-change-card" key={setting.path}>
-          <h4>{name}</h4>
-          <div className="configuration-value-pair"><section><h5>{labels.current}</h5>
+        const name = command ? review.cleanup : trust ? labels.trust : hook && setting.path.endsWith("timeout") ? labels.timeout : setting.path.endsWith("base_url") ? review.address : group.id === "subagents" ? review.compatibility : (group.id === "integrations" ? review.integrations : labels[group.id])[0];
+        const changeKind = kind(setting);
+        const display = (item: unknown, proposed = false) => item == null ? labels.missing : trust ? proposed && setting.current !== setting.proposed ? labels.approve : labels.approved : command ? proposed && changeKind === "changed" ? review.helper : labels.execute : value(item);
+        return <article className={`configuration-change-card change-${changeKind}`} key={setting.path}>
+          <h4>{name} <small>{review[changeKind]}</small></h4>
+          <div className="configuration-value-pair"><section className="configuration-before"><h5>{review.before}</h5>
             <p>{setting.state === "ambiguous" ? labels.ambiguous : setting.state === "commented_out" ? labels.inactive : <code>{display(setting.current)}</code>}</p>
             {setting.inherited ? <small>{labels.inherited}</small> : null}
-          </section><section><h5>{labels.proposed}</h5><p>{preview.status !== "ready" ? labels.blocked : <><code>{display(setting.proposed, true)}</code>{setting.current === setting.proposed ? <small>{labels.unchanged}</small> : null}</>}</p></section></div>
+          </section><section className="configuration-after"><h5>{review.after}</h5><p>{preview.status !== "ready" ? labels.blocked : <code>{display(setting.proposed, true)}</code>}</p></section></div>
           {trust ? <p>{labels.hash}</p> : null}
           {setting.findings.length ? <ul className="diagnostic-findings">{setting.findings.map((finding, index) => <li key={index}>{finding.message}</li>)}</ul> : null}
           {setting.occurrences.length ? <details open={setting.resolutionRequired || undefined} className="configuration-occurrences"><summary>{labels.sources} ({setting.occurrences.length})</summary>
@@ -69,7 +76,7 @@ export function ConfigurationCards({ preview, language, selectOccurrence }: {
             </li>)}</ul>
           </details> : null}
           {setting.baseline !== undefined ? <details><summary>{labels.history}</summary><p>{labels.baseline}</p><code>{value(setting.baseline)}</code></details> : null}
-          {hook ? <details><summary>{labels.details}</summary><p>{labels.exact}</p><code>{setting.path}</code><p>{labels.current}: <code>{value(setting.current)}</code></p><p>{labels.proposed}: <code>{value(setting.proposed)}</code></p></details> : null}
+          <details><summary>{labels.details}</summary>{hook ? <p>{labels.exact}</p> : null}<code>{setting.path}</code><p>{labels.current}: <code>{value(setting.current)}</code></p><p>{labels.proposed}: <code>{value(setting.proposed)}</code></p></details>
         </article>;
       })}
     </section>)}

@@ -11,6 +11,7 @@ import {
 import { createPortal } from "react-dom";
 import { ConfigurationRepair, SetupConfigurationReview } from "./ConfigurationRepair";
 import { IntegrationTargets } from "./IntegrationTargets";
+import { CodexRestartContext, CodexRestartDialog, RestartOptions } from "./CodexRestart";
 import { DiagnosticChecks, ErrorToast, RecoveryContext, RecoveryDialog } from "./Recovery";
 import { copyFor, type Copy } from "./i18n";
 import { Icon, type IconName } from "./icons";
@@ -46,6 +47,7 @@ export function App() {
   const [configurationPreview, setConfigurationPreview] = useState<CodexRepairPreview | null>(null);
   const [recovery, setRecovery] = useState<{ action: "run-doctor" | "review-configuration"; request: number } | null>(null);
   const [recoveryBusy, setRecoveryBusy] = useState(false);
+  const [restartRequested, setRestartRequested] = useState(false);
   const recover = (action: RecoveryAction) => {
     if (!api || recoveryBusy || configurationPreview || operation?.status === "running") return;
     setError(null);
@@ -91,6 +93,7 @@ export function App() {
     });
     const unsubscribeBrowser = api.onBrowserState(setBrowser);
     const unsubscribeConfiguration = api.onConfigurationPreview(preview => { previewEventSeen = true; setConfigurationPreview(preview); });
+    const unsubscribeRestart = api.onCodexRestartRequired?.(() => setRestartRequested(true));
     const unsubscribeOperation = api.onOperation((next) => {
       setOperation(next);
       if (next.status === "failed" && next.name !== "mcp-verification") setError(next.message);
@@ -104,6 +107,7 @@ export function App() {
       unsubscribeState();
       unsubscribeBrowser();
       unsubscribeConfiguration();
+      unsubscribeRestart?.();
       unsubscribeOperation();
       unsubscribeLog();
       unsubscribeUpdate();
@@ -128,7 +132,7 @@ export function App() {
   const copy = copyFor(language);
 
   return (
-    <RecoveryContext.Provider value={recover}><div
+    <CodexRestartContext.Provider value={() => setRestartRequested(true)}><RecoveryContext.Provider value={recover}><div
       className="app-root"
       data-language={language}
       data-platform={snapshot.platform}
@@ -146,7 +150,7 @@ export function App() {
           />
         ) : (
           <LauncherShell
-            configurationReviewOpen={configurationPreview !== null || recovery !== null}
+            configurationReviewOpen={configurationPreview !== null || recovery !== null || restartRequested}
             browser={browser}
             copy={copy}
             key="launcher"
@@ -161,10 +165,11 @@ export function App() {
       </AnimatePresence>
       {configurationPreview ? <SetupConfigurationReview preview={configurationPreview} language={language} decide={(id, approved) => api!.decideConfiguration(id, approved)} /> : null}
       {recovery && !configurationPreview ? <RecoveryDialog key={recovery.request} action={recovery.action} api={api} language={language} devProfile={snapshot.profile === "development"} onClose={() => setRecovery(null)} onRepaired={updateState} /> : null}
+      {restartRequested && !configurationPreview && !recovery ? <CodexRestartDialog api={api} language={language} onClose={() => setRestartRequested(false)} /> : null}
       <AnimatePresence>
         {error ? <ErrorToast copy={copy} language={language} message={error} problem={operation?.status === "failed" && (error === operation.message || error.endsWith(`: ${operation.message}`)) ? operation.problem : undefined} disabled={recoveryBusy || operation?.status === "running" || configurationPreview !== null} onDismiss={() => setError(null)} /> : null}
       </AnimatePresence>
-    </div></RecoveryContext.Provider>
+    </div></RecoveryContext.Provider></CodexRestartContext.Provider>
   );
 }
 
@@ -1229,6 +1234,7 @@ function SetupSurface({
       {!devProfile && snapshot.state.codexRestartRequired ? (
         <NoticeRow icon="alert" tone="warning">
           {copy.restartCodex}
+          <RestartOptions language={snapshot.state.language ?? "en"} />
         </NoticeRow>
       ) : null}
 
@@ -1748,6 +1754,7 @@ function SettingsSurface({
       {!devProfile && snapshot.state.codexRestartRequired ? (
         <NoticeRow icon="alert" tone="warning">
           {copy.restartCodex}
+          <RestartOptions language={language} />
         </NoticeRow>
       ) : null}
 

@@ -9,6 +9,10 @@ function subscription(channel, listener) {
 contextBridge.exposeInMainWorld("codexWebLauncher", {
   snapshot: () => ipcRenderer.invoke("launcher:snapshot"),
   integrationTargets: () => ipcRenderer.invoke("launcher:integration-targets"),
+  chooseCodexHome: () => ipcRenderer.invoke("launcher:codex-home-folder"),
+  codexRestartAvailability: () => ipcRenderer.invoke("launcher:codex-restart-availability"),
+  restartCodex: (token) => ipcRenderer.invoke("launcher:codex-restart-execute", token),
+  onCodexRestartRequired: (listener) => subscription("launcher:codex-restart-required", listener),
   openIntegrationTarget: (target) => ipcRenderer.invoke("launcher:target-open", target),
   checkTargetCapabilities: () => ipcRenderer.invoke("launcher:target-check"),
   setLanguage: (language) => ipcRenderer.invoke("launcher:set-language", language),

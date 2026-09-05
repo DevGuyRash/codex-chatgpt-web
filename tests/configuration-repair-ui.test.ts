@@ -45,6 +45,12 @@ test.skipIf(!process.env.CHATGPT_TEST_CHROME_EXECUTABLE)("repair UI requires exp
     expect(await apply.isDisabled()).toBe(true);
     expect(await page.getByRole("cell", { name: "native", exact: true }).count()).toBe(1);
     await page.getByRole("checkbox").check();
+    const callsBeforeCollapse = await page.evaluate(() => (window as unknown as { calls: string[] }).calls.slice());
+    await page.getByRole("button", { name: "Hide preview", exact: true }).click();
+    expect(await apply.isVisible()).toBe(false);
+    await page.getByRole("button", { name: "Show preview", exact: true }).click();
+    expect(await page.getByRole("checkbox").isChecked()).toBe(true);
+    expect(await page.evaluate(() => (window as unknown as { calls: string[] }).calls)).toEqual(callsBeforeCollapse);
     await compatibility.check();
     await apply.waitFor({ state: "detached" });
     await preview.click();

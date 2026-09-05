@@ -11,6 +11,24 @@ export interface IntegrationTarget {
   profile?: string;
 }
 
+/** Discovery is read-only; an entry is not permission to edit its source. */
+export interface IntegrationTargetEntry {
+  id: string;
+  kind: "base" | "profile";
+  profile?: string;
+  codexHome: string;
+  configPath: string;
+  status: "available" | "external" | "unavailable" | "unsupported";
+  target?: IntegrationTarget;
+  resolvedPath?: string;
+  code?: string;
+}
+
+export interface IntegrationTargetDiscovery {
+  entries: IntegrationTargetEntry[];
+  issues: Array<{ code: string; path?: string }>;
+}
+
 export interface ConfigurationResolutionSelection { occurrenceId: string }
 
 export interface ConfigurationReviewOccurrence {
@@ -34,11 +52,12 @@ export interface ConfigurationReviewSetting {
   findings: CodexIntegrationConflict[];
   baseline?: CodexConfigScalar;
   resolutionRequired: boolean;
+  changeKind?: "added" | "removed" | "changed" | "unchanged" | "unresolved";
   resolutionKind?: "assignment" | "table" | "route-section";
 }
 
 export interface ConfigurationReviewGroup {
-  id: "connection" | "subagents" | "interrupt" | "catalog" | "runtime" | "other";
+  id: "connection" | "subagents" | "interrupt" | "catalog" | "runtime" | "integrations" | "other";
   settings: ConfigurationReviewSetting[];
 }
 

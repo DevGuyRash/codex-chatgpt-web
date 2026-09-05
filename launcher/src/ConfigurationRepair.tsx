@@ -1,6 +1,7 @@
 import { useEffect, useId, useRef, useState } from "react";
 import type { CodexRepairPreview, Language, LauncherApi, LauncherState, SubagentProtocol } from "./types";
 import { ConfigurationCards } from "./ConfigurationCards";
+import { alignConfigurationDiff, diffSections, type DiffLine } from "./configuration-diff";
 
 function selectedResolutions(preview: CodexRepairPreview, occurrenceId: string) {
   const setting = preview.groups?.flatMap(group => group.settings).find(item => item.occurrences.some(occurrence => occurrence.id === occurrenceId));
@@ -46,14 +47,18 @@ export function ConfigurationRepair({ api, language, disabled, onBusyChange, onR
 }) {
   const copy = labels[language];
   const id = useId();
+  const previewButton = useRef<HTMLButtonElement>(null);
   const [protocol, setProtocol] = useState<SubagentProtocol | "">("");
   const [preview, setPreview] = useState<CodexRepairPreview | null>(null);
   const [approved, setApproved] = useState(false);
   const [busy, setBusy] = useState(false);
   const [done, setDone] = useState(false);
+  const [expanded, setExpanded] = useState(true);
+  const previewLabels = language === "zh-CN" ? ["隐藏预览", "显示预览", "刷新预览", "已保留预览和选择，尚未应用更改。"] : language === "ja" ? ["プレビューを隠す", "プレビューを表示", "プレビューを更新", "プレビューと選択を保持しています。変更はまだ適用されていません。"] : ["Hide preview", "Show preview", "Refresh preview", "Preview and choices retained. No changes have been applied."];
   const discard = () => { setPreview(null); setApproved(false); };
   const perform = async (apply: boolean, occurrenceId?: string) => {
     if (!protocol || busy || disabled || (apply && (!preview || !approved || preview.status !== "ready"))) return;
+    const invokingControl = document.activeElement instanceof HTMLElement ? document.activeElement : null;
     setBusy(true);
     onBusyChange(true);
     onError(null);
@@ -69,6 +74,7 @@ export function ConfigurationRepair({ api, language, disabled, onBusyChange, onR
         setApproved(false);
         if (preview) setPreview({ ...preview, refreshing: true });
         setPreview(await api.previewIntegrationRepair(protocol, resolutions));
+        setExpanded(true);
       }
     } catch (cause) {
       discard();
@@ -76,9 +82,10 @@ export function ConfigurationRepair({ api, language, disabled, onBusyChange, onR
     } finally {
       setBusy(false);
       onBusyChange(false);
+      requestAnimationFrame(() => { (invokingControl?.isConnected ? invokingControl : previewButton.current)?.focus(); });
     }
   };
-  return <section className="configuration-repair" aria-labelledby={`${id}-title`} aria-busy={busy}>
+  return <section className="configuration-repair" aria-labelledby={`${id}-title`} aria-busy={busy} onKeyDown={event => { if (event.key === "Escape" && preview && !busy) { event.preventDefault(); discard(); previewButton.current?.focus(); } }}>
     <h3 id={`${id}-title`}>{copy.title}</h3>
     <p>{copy.body}</p>
     <fieldset className="repair-protocol" disabled={busy || disabled}>
@@ -90,15 +97,19 @@ export function ConfigurationRepair({ api, language, disabled, onBusyChange, onR
         <span>{choice === "native" ? copy.native : copy.compatibility}</span>
       </label>)}
     </fieldset>
-    <button type="button" className="button-secondary" disabled={!protocol || busy || disabled} onClick={() => void perform(false)}>{busy ? copy.working : copy.preview}</button>
+    <button ref={previewButton} type="button" className="button-secondary" disabled={!protocol || busy || disabled} onClick={() => void perform(false)}>{busy ? copy.working : preview ? previewLabels[2] : copy.preview}</button>
     {preview ? <>
+      <button type="button" className="button-secondary" aria-expanded={expanded} aria-controls={`${id}-preview`} onClick={() => setExpanded(!expanded)}>{expanded ? previewLabels[0] : previewLabels[1]}</button>
+      {!expanded ? <p>{previewLabels[3]}</p> : null}
+      <div id={`${id}-preview`} hidden={!expanded}>
       {preview.status === "blocked" ? <p role="status">{copy.blocked}</p> : null}
       <ConfigurationChanges preview={preview} language={language} selectOccurrence={id => void perform(false, id)} />
       {preview.status === "ready" ? <label className="repair-approval"><input type="checkbox" checked={approved} disabled={busy || disabled} onChange={(event) => setApproved(event.target.checked)} /><span>{copy.approve}</span></label> : null}
       <div className="repair-actions">
         <button type="button" className="button-primary" disabled={preview.status !== "ready" || !approved || busy || disabled} onClick={() => void perform(true)}>{copy.apply}</button>
-        <button type="button" className="button-secondary" disabled={busy || disabled} onClick={discard}>{copy.cancel}</button>
       </div>
+      </div>
+      <button type="button" className="button-secondary" disabled={busy || disabled} onClick={() => { discard(); previewButton.current?.focus(); }}>{copy.cancel}</button>
     </> : null}
     {done ? <p role="status">{copy.done}</p> : null}
   </section>;
@@ -125,9 +136,20 @@ export function ConfigurationChanges({ preview, language, selectOccurrence }: { 
     {preview.effects?.length ? <ul>{preview.effects.map(effect => <li key={effect}>{effect}</li>)}</ul> : null}
     {preview.textChanges?.map(change => <details className="configuration-text-change" key={change.path}>
       <summary>{language === "en" ? "Exact file changes" : language === "ja" ? "ファイルの変更内容" : "文件的具体更改"}: <code>{change.path}</code> ({change.startLine})</summary>
-      <div><section><h4>{copy.current}</h4><pre>{change.before || copy.absent}</pre></section><section><h4>{copy.proposed}</h4><pre>{change.after || copy.absent}</pre></section></div>
+      <ConfigurationDiff before={change.before} after={change.after} startLine={change.startLine} language={language} />
     </details>)}
   </>;
+}
+
+function ConfigurationDiff({ before, after, startLine, language }: { before: string; after: string; startLine: number; language: Language }) {
+  const headings = language === "zh-CN" ? ["更改前 · 移除", "更改后 · 新增", "展开未更改的行"] : language === "ja" ? ["変更前 · 削除", "変更後 · 追加", "変更のない行を展開"] : ["Before · Removed", "After · Added", "Expand unchanged lines"];
+  const renderRows = (rows: DiffLine[]) => rows.map((row, index) => <div className={`configuration-diff-row ${row.changed ? "diff-changed" : ""}`} key={index}>
+    <pre className={row.changed && row.before !== undefined ? "diff-removed" : ""}><span aria-hidden="true">{row.oldLine ?? ""} {row.changed && row.before !== undefined ? "−" : " "}</span><code>{row.before ?? ""}</code></pre>
+    <pre className={row.changed && row.after !== undefined ? "diff-added" : ""}><span aria-hidden="true">{row.newLine ?? ""} {row.changed && row.after !== undefined ? "+" : " "}</span><code>{row.after ?? ""}</code></pre>
+  </div>);
+  return <div className="configuration-diff"><div className="configuration-diff-row"><h4>{headings[0]}</h4><h4>{headings[1]}</h4></div>
+    {diffSections(alignConfigurationDiff(before, after, startLine)).map((section, index) => section.omitted ? <details key={index}><summary>{headings[2]} ({section.rows.length})</summary>{renderRows(section.rows)}</details> : <section key={index}>{renderRows(section.rows)}</section>)}
+  </div>;
 }
 
 const setupLabels = {

@@ -25,7 +25,7 @@ test("empty bounded section receives routes inside its boundaries", () => {
 
 test("source change describes fresh files and final newline changes exactly", () => {
   expect(describeCodexSourceChange("config", "", "new\n")).toEqual([{ path: "config", startLine: 1, before: "", after: "new\n" }]);
-  expect(describeCodexSourceChange("config", "one\r\ntwo", "one\r\ntwo\r\n")).toEqual([{ path: "config", startLine: 2, before: "two", after: "two\r\n" }]);
+  expect(describeCodexSourceChange("config", "one\r\ntwo", "one\r\ntwo\r\n")).toEqual([{ path: "config", startLine: 1, before: "one\r\ntwo", after: "one\r\ntwo\r\n" }]);
 });
 
 test("commented assignments have their actual table scope and ignore string examples", () => {

@@ -17,3 +17,8 @@ test("unknown messages never imply mutation or configuration ownership", () => {
   assert.deepEqual(problemFor({ code: "codex_route_missing", message: "Absent" }).actions, ["review-setup", "run-doctor"]);
   assert.doesNotMatch(runtimeFailure('CGW_ERROR_V1 {"private":"not-for-logs"}', "not-for-logs").message, /not-for-logs/);
 });
+
+test("Doctor does not route an unsupported diagnosis back into the same diagnosis", () => {
+  const report = withRecovery({ ok: true, checks: [{ id: "optional", status: "warning", code: "target_unavailable", message: "Optional profile is unavailable", actions: ["delete-files"] }] });
+  assert.deepEqual(report.checks[0].problem.actions, ["export-logs"]);
+});

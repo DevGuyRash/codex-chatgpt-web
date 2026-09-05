@@ -190,7 +190,7 @@ test("a transient effort control does not turn a Luna-only account into Sol", as
   expect(visibilityReads).toBe(2);
 });
 
-function reasoningPicker(options: { max?: string; delay?: number; missing?: boolean } = {}) {
+function reasoningPicker(options: { max?: string; delay?: number; missing?: boolean; visibleSemantic?: boolean } = {}) {
   let value = 0;
   const keys: string[] = [];
   const hidden = {
@@ -202,7 +202,7 @@ function reasoningPicker(options: { max?: string; delay?: number; missing?: bool
   };
   const sliderControl = { press: async (key: string) => { keys.push(key); value += key === "ArrowRight" ? 1 : -1; } };
   const slider = {
-    isVisible: async () => false, // Live DOM: aria-hidden=true, zero-width semantic span.
+    isVisible: async () => options.visibleSemantic === true, // Also supports older visible semantic sliders.
     filter: () => { throw new Error("Semantic input must not be visibility-filtered"); },
     waitFor: async ({ state }: { state: string }) => { expect(state).toBe("attached"); },
     getAttribute: async (name: string) => ({ "aria-valuemin": "0", "aria-valuemax": options.max ?? "4", "aria-valuenow": String(value), "aria-hidden": "true" })[name] ?? null,
@@ -240,6 +240,10 @@ function reasoningPicker(options: { max?: string; delay?: number; missing?: bool
 test.each([0, 50])("capabilities wait for the visible container and read its hidden semantic input (delay=%s)", async delay => {
   const fixture = reasoningPicker({ delay });
   await expect(detectChatGptAccountCapabilities(fixture.page as never)).resolves.toEqual({ solAvailable: true, proAvailable: true });
+});
+
+test("the older visible semantic slider exposes the same authoritative range", async () => {
+  await expect(detectChatGptAccountCapabilities(reasoningPicker({ visibleSemantic: true }).page as never)).resolves.toEqual({ solAvailable: true, proAvailable: true });
 });
 
 test("an absent effort slider cannot turn three model rows into a saved non-Pro capability", async () => {

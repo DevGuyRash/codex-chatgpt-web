@@ -13,7 +13,9 @@ export function describeCodexSourceChange(path: string, before: string, after: s
   while (prefix < oldLines.length && prefix < newLines.length && oldLines[prefix] === newLines[prefix]) prefix++;
   let suffix = 0;
   while (suffix < oldLines.length - prefix && suffix < newLines.length - prefix && oldLines.at(-1 - suffix) === newLines.at(-1 - suffix)) suffix++;
-  return [{ path, startLine: prefix + 1, before: oldLines.slice(prefix, oldLines.length - suffix).join(""), after: newLines.slice(prefix, newLines.length - suffix).join("") }];
+  const start = Math.max(0, prefix - 3);
+  const remainingSuffix = Math.max(0, suffix - 3);
+  return [{ path, startLine: start + 1, before: oldLines.slice(start, oldLines.length - remainingSuffix).join(""), after: newLines.slice(start, newLines.length - remainingSuffix).join("") }];
 }
 
 /** The review contract is derived from prepared output, never a second implementation of edits. */

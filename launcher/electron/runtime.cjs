@@ -586,7 +586,9 @@ class RuntimeHost {
     }
     this.active = name;
     this.publishOperation?.({ name, status: "running", message: options.message || name });
-    this.logger.info("runtime.operation_started", { name, args: args.map((arg) => /key|token/i.test(arg) ? "[redacted]" : arg) });
+    this.logger.info("runtime.operation_started", options.privateOutput
+      ? { name, privateOutput: true }
+      : { name, args: args.map((arg) => /key|token/i.test(arg) ? "[redacted]" : arg) });
     try {
       const invocation = options.embedded
         ? embeddedRuntimeInvocation({ app: this.app, sourceRoot: this.sourceRoot, args })
@@ -614,10 +616,12 @@ class RuntimeHost {
           pipeErrors.push(`${name} ${stream} pipe failed: ${error instanceof Error ? error.message : String(error)}`);
         };
         collect(child.stdout, stdout, (line) => {
+          if (options.privateOutput) return;
           this.logger.info("runtime.stdout", { operation: name, line });
           this.publishOperation?.({ name, status: "running", message: redactText(line) });
         }, recordPipeError("stdout"));
         collect(child.stderr, stderr, (line) => {
+          if (options.privateOutput) return;
           this.logger.warn("runtime.stderr", { operation: name, line });
           this.publishOperation?.({ name, status: "running", message: redactText(line) });
         }, recordPipeError("stderr"));
@@ -677,7 +681,7 @@ class RuntimeHost {
             ? new Error(`${timedOut.message}; termination failed: ${error.message}`)
             : error);
         });
-        child.once("exit", (code, signal) => {
+        child.once("close", (code, signal) => {
           if (this.activeChild === child) this.activeChild = null;
           if (settled) return;
           settled = true;
@@ -714,7 +718,9 @@ class RuntimeHost {
       this.publishOperation?.({ name, status: "completed", message: options.successMessage || "Completed" });
       return result;
     } catch (error) {
-      const message = redactText(error instanceof Error ? error.message : String(error));
+      const message = options.privateOutput
+        ? "Configuration repair did not complete; review a fresh preview and ensure the runtime is stopped"
+        : redactText(error instanceof Error ? error.message : String(error));
       this.logger.error("runtime.operation_failed", { name, message });
       this.publishOperation?.({ name, status: "failed", message });
       throw new Error(message);
@@ -811,6 +817,57 @@ class RuntimeHost {
       timeoutMs: 15_000,
     });
     return parseBridgeRouteResult(result.stdout, { requireInstalled: true });
+  }
+
+  async previewIntegrationRepair(protocol, operationName = "preview-integration-repair") {
+    this.assertProductionProfile("Codex integration repair");
+    if (protocol !== "native" && protocol !== "compatibility-v1") throw new Error("Choose a subagent protocol before previewing repair");
+    const result = await this.run(operationName, ["route", "repair", "preview", "--subagent-protocol", protocol], {
+      embedded: true, privateOutput: true, timeoutMs: 15_000,
+      message: "Inspecting configuration repair", successMessage: "Repair preview ready",
+    });
+    let preview;
+    try { preview = JSON.parse(result.stdout); } catch { throw new Error("The runtime returned an unreadable repair preview"); }
+    const scalar = value => value === null || typeof value === "boolean" || typeof value === "string" || (typeof value === "number" && Number.isFinite(value));
+    const text = value => typeof value === "string" && value.length <= 4096;
+    if (!preview || preview.version !== 1 || preview.protocol !== protocol
+      || !["ready", "blocked"].includes(preview.status)
+      || typeof preview.approvalId !== "string"
+      || (preview.status === "ready" && !/^[a-f0-9]{64}$/.test(preview.approvalId))
+      || !Array.isArray(preview.changes) || preview.changes.length > 32
+      || !preview.changes.every(change => change && text(change.path) && scalar(change.current) && scalar(change.proposed))
+      || !Array.isArray(preview.conflicts) || preview.conflicts.length > 32
+      || !preview.conflicts.every(conflict => conflict && text(conflict.path) && text(conflict.message)
+        && ["missing", "value_changed", "hook_changed", "invalid_config", "ownership_conflict"].includes(conflict.category)
+        && (conflict.current === undefined || scalar(conflict.current)) && (conflict.expected === undefined || scalar(conflict.expected)))
+      || typeof preview.codexRestartRequired !== "boolean" || typeof preview.launcherRestartRequired !== "boolean") {
+      throw new Error("The runtime repair preview is unsupported or malformed; refresh the local runtime build");
+    }
+    return preview;
+  }
+
+  async applyIntegrationRepair(protocol, approvalId) {
+    this.assertProductionProfile("Codex integration repair");
+    if (protocol !== "native" && protocol !== "compatibility-v1") throw new Error("Choose a subagent protocol before approving repair");
+    if (typeof approvalId !== "string" || !/^[a-f0-9]{64}$/.test(approvalId)) throw new Error("Exact repair preview approval is required");
+    if (this.currentOperation()) throw new Error(`Another launcher operation is active: ${this.currentOperation()}`);
+    if (this.runtimeConfigSnapshot().owner !== "launcher") throw new Error("The launcher cannot stop an externally owned runtime; use its owner to stop it before terminal repair");
+    const name = "apply-integration-repair";
+    this.lifecycleOperation = name;
+    try {
+      const preview = await this.previewIntegrationRepair(protocol, name);
+      if (preview.status !== "ready" || preview.approvalId !== approvalId) throw new Error("Configuration changed; review a fresh preview before applying repair");
+      await this.supervisor.stopForSetup();
+      const result = await this.run(name, ["route", "repair", "apply", "--subagent-protocol", protocol, "--approve", approvalId, "--launcher-control"], {
+        embedded: true, privateOutput: true, env: this.launcherControlEnvironment(), timeoutMs: 15_000,
+        message: "Applying approved configuration repair", successMessage: "Configuration repaired; restart Codex and the launcher",
+      });
+      const applied = JSON.parse(result.stdout);
+      if (!applied || typeof applied.changed !== "boolean" || applied.codexRestartRequired !== true || applied.launcherRestartRequired !== true) {
+        throw new Error("Repair verification returned an unexpected result; inspect configuration before restarting");
+      }
+      return applied;
+    } finally { this.lifecycleOperation = null; }
   }
 
   async restoreBridgeRouteWithinOperation(operationName) {

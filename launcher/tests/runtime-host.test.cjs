@@ -60,6 +60,68 @@ function devHostFor(existingConfig, interactionMode = "automatic") {
   return { host, invocation: () => invocation };
 }
 
+test("private structured operation output and approval arguments stay out of diagnostics", async () => {
+  const { host } = hostFor(null);
+  const evidence = [];
+  host.logger = { info: (...args) => evidence.push(args), warn: (...args) => evidence.push(args), error: (...args) => evidence.push(args) };
+  host.publishOperation = value => evidence.push(value);
+  host.command = () => ({ executable: process.execPath, args: ["-e", 'console.log("PRIVATE_REPAIR_VALUE"); console.error("PRIVATE_REPAIR_VALUE")'], cwd: os.tmpdir() });
+  const result = await host.run("repair-preview", ["--approve", "PRIVATE_APPROVAL"], { privateOutput: true });
+  assert.match(result.stdout, /PRIVATE_REPAIR_VALUE/);
+  assert.doesNotMatch(JSON.stringify(evidence), /PRIVATE_REPAIR_VALUE|PRIVATE_APPROVAL/);
+});
+
+test("confirmed repair settles the supervisor before applying and does not start the runtime", async () => {
+  const { host } = hostFor({ mode: "browser-only", browserHost: "launcher" });
+  const calls = [];
+  const approvalId = "a".repeat(64);
+  host.launcherControlEnvironment = () => ({});
+  host.supervisor.stopForSetup = async () => { calls.push("stop"); };
+  host.supervisor.startIfConfigured = async () => { throw new Error("must not start"); };
+  host.run = async (_name, args, options) => {
+    assert.equal(options.privateOutput, true);
+    if (args.includes("preview")) { calls.push("preview"); return { stdout: JSON.stringify({ version: 1, status: "ready", approvalId, protocol: "native", changes: [], conflicts: [], codexRestartRequired: true, launcherRestartRequired: true }) }; }
+    calls.push("apply");
+    assert.ok(args.includes("--launcher-control"));
+    assert.ok(args.includes(approvalId));
+    return { stdout: JSON.stringify({ changed: true, codexRestartRequired: true, launcherRestartRequired: true }) };
+  };
+  await host.applyIntegrationRepair("native", approvalId);
+  assert.deepEqual(calls, ["preview", "stop", "apply"]);
+  assert.equal(host.currentOperation(), null);
+});
+
+test("stale repair approval cannot stop the runtime", async () => {
+  const { host } = hostFor({ mode: "browser-only", browserHost: "launcher" });
+  host.previewIntegrationRepair = async () => ({ status: "ready", approvalId: "b".repeat(64) });
+  host.supervisor.stopForSetup = async () => { throw new Error("must not stop"); };
+  await assert.rejects(host.applyIntegrationRepair("native", "a".repeat(64)), /fresh preview/);
+  assert.equal(host.currentOperation(), null);
+});
+
+test("busy shutdown prevents repair application without restarting or forcing work", async () => {
+  const { host } = hostFor({ browserHost: "launcher" });
+  const approvalId = "a".repeat(64);
+  host.previewIntegrationRepair = async () => ({ status: "ready", approvalId });
+  host.supervisor.stopForSetup = async () => { throw new Error("Active work must finish"); };
+  host.run = async () => { throw new Error("must not apply"); };
+  await assert.rejects(host.applyIntegrationRepair("native", approvalId), /Active work must finish/);
+  assert.equal(host.currentOperation(), null);
+});
+
+test("private operation failures do not publish raw output", async () => {
+  const { host } = hostFor(null);
+  const evidence = [];
+  host.logger = { info: (...args) => evidence.push(args), warn: (...args) => evidence.push(args), error: (...args) => evidence.push(args) };
+  host.publishOperation = value => evidence.push(value);
+  host.command = () => ({ executable: process.execPath, args: ["-e", 'console.error("PRIVATE_FAILURE"); process.exitCode = 1'], cwd: os.tmpdir() });
+  await assert.rejects(host.run("repair-apply", [], { privateOutput: true }), error => {
+    assert.doesNotMatch(error.message, /PRIVATE_FAILURE/);
+    return true;
+  });
+  assert.doesNotMatch(JSON.stringify(evidence), /PRIVATE_FAILURE/);
+});
+
 test("core setup preserves an existing full-harness installation", async () => {
   const fixture = hostFor({ mode: "full", appName: "Codex Native2" });
   const result = await fixture.host.setupCore();

@@ -1,3 +1,5 @@
+import type { CodexRepairPreview, SubagentProtocol } from "../../src/contracts/codex-integration";
+export type { CodexRepairPreview, SubagentProtocol } from "../../src/contracts/codex-integration";
 export type Language = "en" | "zh-CN" | "ja";
 export type LauncherProfile = "production" | "development";
 export type BrowserInteractionMode = "automatic" | "manual";
@@ -143,6 +145,8 @@ export interface LauncherApi {
   smokeTest(): Promise<{ ok: boolean; effort: string; response: string }>;
   verifyMcp(): Promise<DoctorReport>;
   doctor(): Promise<DoctorReport>;
+  previewIntegrationRepair(protocol: SubagentProtocol): Promise<CodexRepairPreview>;
+  applyIntegrationRepair(protocol: SubagentProtocol, approvalId: string): Promise<{ state: LauncherState }>;
   cancelTurns(): Promise<{ stdout: string }>;
   uninstallIntegration(): Promise<{ cancelled: true } | { cancelled: false; state: LauncherState }>;
   setupCore(): Promise<{ ok: boolean; stdout: string; restartRequired: boolean }>;

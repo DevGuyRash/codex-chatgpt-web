@@ -9,6 +9,7 @@ import {
   type ReactNode,
 } from "react";
 import { createPortal } from "react-dom";
+import { ConfigurationRepair } from "./ConfigurationRepair";
 import { copyFor, type Copy } from "./i18n";
 import { Icon, type IconName } from "./icons";
 import type {
@@ -1714,6 +1715,7 @@ function SettingsSurface({
       ) : null}
 
       <SectionHeading label={copy.diagnostics} spaced />
+      {!devProfile && api ? <ConfigurationRepair api={api} language={language} disabled={busy} onBusyChange={setBusy} onRepaired={updateState} onError={setError} /> : null}
       <button className="diagnostic-row" disabled={busy} onClick={() => void runDoctor()} type="button">
         <Icon name="activity" />
         <span>

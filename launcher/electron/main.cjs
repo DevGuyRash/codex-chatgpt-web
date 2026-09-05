@@ -623,6 +623,14 @@ function registerIpc({ logger, stateStore }) {
   });
 
   handle("launcher:doctor", () => IS_DEV_PROFILE ? runtimeHost.devDoctor() : runtimeHost.doctor());
+  handle("launcher:repair-preview", (protocol) => runtimeHost.previewIntegrationRepair(protocol));
+  handle("launcher:repair-apply", async (protocol, approvalId) => {
+    await runtimeHost.applyIntegrationRepair(protocol, approvalId);
+    const state = stateStore.update({ codexRestartRequired: true, codexCatalogVerified: false });
+    send("launcher:state-changed", state);
+    stopCatalogVerificationMonitor();
+    return { state };
+  });
   handle("launcher:cancel-turns", () => {
     if (IS_DEV_PROFILE) throw new Error("DEV chat turns are owned by the repository CLI process");
     return runtimeHost.cancelActiveTurns();

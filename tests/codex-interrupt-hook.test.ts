@@ -94,3 +94,38 @@ test("refuses to remove a modified or duplicated managed hook", () => {
   expect(() => installCodexInterruptHook(installed.text, "/Users/test/.codex/config.toml", { runtimeCommand: ["/opt/runtime"] }))
     .toThrow("already contains");
 });
+
+test("verifies a semantically unchanged hook after formatting without trusting markers", () => {
+  const installed = installCodexInterruptHook('model = "keep"\n', "/Users/test/.codex/config.toml", { runtimeCommand: ["/opt/runtime"] });
+  const formatted = installed.text.replaceAll(" = ", "    = ").replace(/# Managed by[^\n]*/g, "");
+  expect(() => verifyCodexInterruptHook(formatted, installed.installed)).not.toThrow();
+});
+
+test("removes only the owned hook and trust record from an inline representation", () => {
+  const { installed } = installCodexInterruptHook('', "/Users/test/.codex/config.toml", { runtimeCommand: ["/opt/runtime"] });
+  const text = `model = "keep"\nhooks = { Interrupt = [{ hooks = [{ command = ${JSON.stringify(installed.command)}, type = "command", timeout = 3 }] }], state = { ${JSON.stringify(installed.stateKey)} = { trusted_hash = ${JSON.stringify(installed.trustedHash)} }, other = { trusted_hash = "keep" } } }\n`;
+  const restored = restoreCodexInterruptHook(text, installed);
+  expect(Bun.TOML.parse(restored)).toEqual({ model: "keep", hooks: { Interrupt: [], state: { other: { trusted_hash: "keep" } } } });
+});
+
+test("removal refuses to shift later user hook trust identities", () => {
+  const installed = installCodexInterruptHook('', "/Users/test/.codex/config.toml", { runtimeCommand: ["/opt/runtime"] });
+  const text = installed.text + '\n[[hooks.Interrupt]]\n[[hooks.Interrupt.hooks]]\ntype="command"\ncommand="later-user-hook"\n';
+  expect(() => restoreCodexInterruptHook(text, installed.installed)).toThrow("later");
+});
+
+test("hook-like content inside a multiline note is never removed", () => {
+  const installed = installCodexInterruptHook('', "/Users/test/.codex/config.toml", { runtimeCommand: ["/opt/runtime"] });
+  const note = `note = '''${installed.installed.fragment}'''\n`;
+  const formatted = installed.text.replaceAll(" = ", "   = ");
+  const restored = restoreCodexInterruptHook(note + formatted, installed.installed);
+  expect(restored).toContain(note);
+  expect(() => verifyCodexInterruptHookRestored(restored)).not.toThrow();
+});
+
+test("setup refuses to duplicate an unmarked owned command", () => {
+  const config = { runtimeCommand: ["/opt/runtime"] };
+  const installed = installCodexInterruptHook('', "/Users/test/.codex/config.toml", config);
+  const unmarked = installed.text.replace(/^#.*$/gm, "");
+  expect(() => installCodexInterruptHook(unmarked, "/Users/test/.codex/config.toml", config)).toThrow("uniquely");
+});

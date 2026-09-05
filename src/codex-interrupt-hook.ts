@@ -1,8 +1,10 @@
 import { createHash } from "node:crypto";
+import { isDeepStrictEqual } from "node:util";
 import { realpathSync } from "node:fs";
 import { basename, dirname, join, posix, resolve, win32 } from "node:path";
 import type { AppConfig } from "./config";
 import { getConfigDir } from "./config";
+import { parseTomlValue, removeTomlComments, removeTomlPath } from "./toml-edit";
 import type { InstalledCodexInterruptHook } from "./codex-integration-shared";
 
 export const MANAGED_INTERRUPT_HOOK_START =
@@ -62,11 +64,14 @@ function lineEnding(text: string): "\n" | "\r\n" | "\r" {
 }
 
 function interruptGroupCount(text: string): number {
-  return text.split(/\r\n|\n|\r/).filter(line => /^\s*\[\[hooks\.Interrupt\]\]\s*(?:#.*)?$/.test(line)).length;
+  const groups = record(parseTomlValue(text).hooks)?.Interrupt;
+  if (groups === undefined) return 0;
+  if (!Array.isArray(groups)) throw new Error("Codex Interrupt hooks must be an array before integration setup");
+  return groups.length;
 }
 
-function managedMarkerCount(text: string): number {
-  return text.split(MANAGED_INTERRUPT_HOOK_START).length - 1;
+function hasManagedMarkers(text: string): boolean {
+  return removeTomlComments(text, [MANAGED_INTERRUPT_HOOK_START, MANAGED_INTERRUPT_HOOK_END]) !== text;
 }
 
 function canonicalConfigPath(configPath: string): string {
@@ -95,7 +100,7 @@ export function installCodexInterruptHookCommand(
   configPath: string,
   command: string,
 ): { text: string; installed: InstalledCodexInterruptHook } {
-  if (managedMarkerCount(text) !== 0 || text.includes(MANAGED_INTERRUPT_HOOK_END)) {
+  if (hasManagedMarkers(text)) {
     throw new Error("Codex config already contains a codex-chatgpt-web interrupt hook marker");
   }
   const groupIndex = interruptGroupCount(text);
@@ -124,35 +129,81 @@ export function installCodexInterruptHookCommand(
         : `${ending}${ending}`;
   const trailing = text.length > 0 && text.endsWith(ending) ? ending : "";
   const fragment = `${leading}${core}${trailing}`;
+  // Appending array-table syntax is not valid for every existing TOML representation.
+  // Prove the generated document before returning any proposed integration write.
+  const installed = { command, groupIndex, stateKey, trustedHash, fragment };
+  if (inspectCodexInterruptHook(parseTomlValue(`${text}${fragment}`), installed) !== "valid") {
+    throw new Error("Codex interrupt lifecycle hook cannot be uniquely installed; inspect existing hooks before repair");
+  }
   return {
     text: `${text}${fragment}`,
-    installed: { command, groupIndex, stateKey, trustedHash, fragment },
+    installed,
   };
 }
 
+function record(value: unknown): Record<string, unknown> | undefined {
+  return value !== null && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : undefined;
+}
+
+/** One semantic ownership rule shared by inspection and mutation preflight. */
+export function inspectCodexInterruptHook(document: unknown, installed: InstalledCodexInterruptHook): "valid" | "identity" | "order" {
+  const hooks = record(record(document)?.hooks);
+  const groups = hooks?.Interrupt;
+  if (!Array.isArray(groups) || codexInterruptHookHash(installed.command) !== installed.trustedHash) return "identity";
+  const occurrences = groups.flatMap((group, index) => {
+    const entries = record(group)?.hooks;
+    return Array.isArray(entries) ? entries.filter(entry => record(entry)?.command === installed.command).map(() => index) : [];
+  });
+  if (occurrences.length !== 1) return "identity";
+  if (occurrences[0] !== installed.groupIndex) return "order";
+  const group = record(groups[installed.groupIndex]);
+  const entries = group?.hooks;
+  if (!group || !Array.isArray(entries)) return "identity";
+  const normalized = { ...group, hooks: entries.map(entry => {
+    const hook = record(entry);
+    return hook ? { ...hook, async: hook.async ?? false } : entry;
+  }) };
+  const expected = { hooks: [{ type: "command", command: installed.command, timeout: 3, async: false }] };
+  const same = (a: unknown, b: unknown): boolean => JSON.stringify(canonicalJson(a)) === JSON.stringify(canonicalJson(b));
+  return same(normalized, expected) && same(record(hooks?.state)?.[installed.stateKey], { trusted_hash: installed.trustedHash }) ? "valid" : "identity";
+}
+
 export function verifyCodexInterruptHook(text: string, installed: InstalledCodexInterruptHook): void {
-  const first = text.indexOf(installed.fragment);
-  if (first < 0 || text.indexOf(installed.fragment, first + installed.fragment.length) >= 0) {
-    throw new Error("Codex interrupt lifecycle hook changed after setup; refusing to overwrite it");
-  }
-  if (interruptGroupCount(text.slice(0, first)) !== installed.groupIndex) {
-    throw new Error("Codex interrupt lifecycle hook order changed after setup; refusing to overwrite it");
-  }
-  if (managedMarkerCount(text) !== 1 || !text.includes(MANAGED_INTERRUPT_HOOK_END)) {
-    throw new Error("Codex interrupt lifecycle hook markers changed after setup; refusing to overwrite them");
-  }
-  if (codexInterruptHookHash(installed.command) !== installed.trustedHash) {
-    throw new Error("Codex interrupt lifecycle hook journal hash is invalid");
-  }
+  let document: unknown;
+  try { document = parseTomlValue(text); }
+  catch { throw new Error("Codex interrupt lifecycle hook changed after setup; configuration is invalid"); }
+  const result = inspectCodexInterruptHook(document, installed);
+  if (result === "order") throw new Error("Codex interrupt lifecycle hook order changed after setup; refusing to overwrite it");
+  if (result !== "valid") throw new Error("Codex interrupt lifecycle hook changed after setup; refusing to overwrite it");
 }
 
 export function restoreCodexInterruptHook(text: string, installed: InstalledCodexInterruptHook): string {
   verifyCodexInterruptHook(text, installed);
-  return text.replace(installed.fragment, "");
+  const groups = record(parseTomlValue(text).hooks)?.Interrupt;
+  if (!Array.isArray(groups) || installed.groupIndex !== groups.length - 1) {
+    throw new Error("Cannot remove the managed Interrupt hook without shifting later user hook identities; review those hooks first");
+  }
+  const removed = removeTomlComments(removeTomlPath(removeTomlPath(text,
+    ["hooks", "Interrupt", installed.groupIndex]), ["hooks", "state", installed.stateKey]),
+  [MANAGED_INTERRUPT_HOOK_START, MANAGED_INTERRUPT_HOOK_END]);
+  // Retain exact historical formatting only if the byte replacement has the same
+  // meaning as the syntax-owned removal. A lookalike fragment may be string content.
+  if (text.includes(installed.fragment)) {
+    const exact = text.replace(installed.fragment, "");
+    try {
+      if (isDeepStrictEqual(parseTomlValue(exact), parseTomlValue(removed))) return exact;
+    } catch { /* Use the already verified syntax edit. */ }
+  }
+  return removed;
 }
 
-export function verifyCodexInterruptHookRestored(text: string): void {
-  if (managedMarkerCount(text) !== 0 || text.includes(MANAGED_INTERRUPT_HOOK_END)) {
+export function verifyCodexInterruptHookRestored(text: string, installed?: InstalledCodexInterruptHook): void {
+  const groups = record(parseTomlValue(text).hooks)?.Interrupt;
+  const commandPresent = installed && Array.isArray(groups) && groups.some(group => {
+    const hooks = record(group)?.hooks;
+    return Array.isArray(hooks) && hooks.some(hook => record(hook)?.command === installed.command);
+  });
+  if (hasManagedMarkers(text) || commandPresent) {
     throw new Error("Codex interrupt lifecycle hook is present while the bridge is disconnected");
   }
 }

@@ -1,5 +1,5 @@
-import { stripUtf8Bom } from "./config";
-import { codexInterruptHookHash } from "./codex-interrupt-hook";
+import { parseTomlValue } from "./toml-edit";
+import { inspectCodexInterruptHook } from "./codex-interrupt-hook";
 import type { AnyCodexIntegrationJournal } from "./codex-integration-shared";
 
 /** Structured inspection evidence, not permission to overwrite the user's configuration. */
@@ -24,18 +24,11 @@ function at(document: Table, path: string[]): unknown {
   return value;
 }
 
-function canonical(value: unknown): string {
-  return JSON.stringify(value, (_key, item: unknown) => {
-    const record = table(item);
-    return record ? Object.fromEntries(Object.keys(record).sort().map(key => [key, record[key]])) : item;
-  });
-}
-
 /** Parse once and compare owned values, independent of comments and TOML layout. No writes. */
 export function inspectInstalledCodexConfig(text: string, journal: InspectableJournal): CodexIntegrationConflict[] {
   let document: Table;
   try {
-    const parsed = table(Bun.TOML.parse(stripUtf8Bom(text)));
+    const parsed = table(parseTomlValue(text));
     if (!parsed) throw new Error("Expected TOML document");
     document = parsed;
   } catch {
@@ -72,32 +65,8 @@ export function inspectInstalledCodexConfig(text: string, journal: InspectableJo
       check(["agents", "max_depth"], journal.installed.agent_max_depth!);
     }
   }
-  if (journal.version === 10) {
-    const installed = journal.interruptHook;
-    let matches = false;
-    try {
-      const groups = at(document, ["hooks", "Interrupt"]);
-      const state = at(document, ["hooks", "state", installed.stateKey]);
-      const normalizeGroup = (group: unknown): unknown => {
-        const record = table(group);
-        if (!record || !Array.isArray(record.hooks)) return group;
-        return { ...record, hooks: record.hooks.map((hook: unknown) => {
-          const entry = table(hook);
-          return entry ? { ...entry, async: entry.async ?? false } : hook;
-        }) };
-      };
-      const expectedGroup = { hooks: [{ type: "command", command: installed.command, timeout: 3, async: false }] };
-      const commandOccurrences = Array.isArray(groups) ? groups.flatMap(group => {
-        const hooks = table(group)?.hooks;
-        return Array.isArray(hooks) ? hooks : [];
-      }).filter(hook => table(hook)?.command === installed.command).length : 0;
-      matches = Array.isArray(groups)
-        && canonical(normalizeGroup(groups[installed.groupIndex])) === canonical(expectedGroup)
-        && canonical(state) === canonical({ trusted_hash: installed.trustedHash })
-        && commandOccurrences === 1
-        && codexInterruptHookHash(installed.command) === installed.trustedHash;
-    } catch { /* Malformed ownership evidence must never establish authority. */ }
-    if (!matches) conflicts.push({
+  if (journal.version === 10 && inspectCodexInterruptHook(document, journal.interruptHook) !== "valid") {
+    conflicts.push({
       path: "hooks.Interrupt", category: "hook_changed",
       message: "Codex Interrupt hook identity, order, or trust differs from the installation journal; review it before repair",
     });

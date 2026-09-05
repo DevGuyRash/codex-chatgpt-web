@@ -354,7 +354,7 @@ export function verifyRestoredRoute(
       );
     }
   }
-  if (journal.version === 10) verifyCodexInterruptHookRestored(text);
+  if (journal.version === 10) verifyCodexInterruptHookRestored(text, journal.interruptHook);
   if (journal.version === 5 || journal.version === 6) {
     const previousFeatures: Array<readonly [string, PreviousFeatureAssignment]> = [
       ["remote_compaction_v2", journal.previousRemoteCompactionV2],

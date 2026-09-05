@@ -3,6 +3,7 @@ import { boundCodexRouteSection, inspectCodexConfigSource, setTrackedCodexScalar
 import { resolve } from "node:path";
 import { isDeepStrictEqual } from "node:util";
 import { inspectInstalledCodexConfig } from "./codex-integration-inspection";
+import { CodexConfigurationError } from "./codex-configuration-error";
 import { parseTomlValue, removeTomlComments, setTomlScalar } from "./toml-edit";
 import { ROUTES_BEGIN, ROUTES_END } from "./codex-config-markers";
 import {
@@ -294,7 +295,7 @@ function installLegacyRouteLayout(
 export function verifyInstalledRoute(text: string, journal: ManagedRouteJournal): void {
   if (journal.version === 8 || journal.version === 9 || journal.version === 10) {
     const conflicts = inspectInstalledCodexConfig(text, journal);
-    if (conflicts.length) throw new Error(conflicts.map(conflict => conflict.message).join("; "));
+    if (conflicts.length) throw new CodexConfigurationError(conflicts);
     return;
   }
   const lines = splitLines(text);

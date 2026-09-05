@@ -5,15 +5,33 @@ const { ConfigurationReview, parseConfigurationPreview } = require("../electron/
 const preview = { version: 1, status: "ready", protocol: "native", operation: "setup", approvalId: "a".repeat(64), changes: [], conflicts: [], codexRestartRequired: true, launcherRestartRequired: false };
 
 test("changing protocol discards approval and expiry cannot later authorize setup", async () => {
-  const review = new ConfigurationReview({ publish() {}, timeoutMs: 5 });
-  const first = review.request(preview);
-  review.decide(preview.approvalId, "compatibility-v1");
-  assert.deepEqual(await first, { protocol: "compatibility-v1" });
-  assert.equal(review.snapshot(), null);
+  const review = new ConfigurationReview({ publish() {}, timeoutMs: 20 });
+  const first = review.request(preview, async protocol => ({ ...preview, protocol, approvalId: "b".repeat(64) }));
+  await review.decide(preview.approvalId, "compatibility-v1");
+  assert.equal(review.snapshot().approvalId, "b".repeat(64));
+  assert.throws(() => review.decide(preview.approvalId, true), /no longer current/);
   const keepAlive = setTimeout(() => {}, 1000);
-  try { await assert.rejects(review.request(preview), /expired/); }
+  try { await assert.rejects(first, /expired/); }
   finally { clearTimeout(keepAlive); }
   assert.throws(() => review.decide(preview.approvalId, true), /no longer current/);
+});
+
+test("protocol refresh keeps one visible review, disables stale approval, and ignores results after cancellation", async () => {
+  const events = [];
+  let finishRefresh;
+  const review = new ConfigurationReview({ publish: value => events.push(value) });
+  const completion = review.request(preview, () => new Promise(resolve => { finishRefresh = resolve; }));
+  const refresh = review.decide(preview.approvalId, "compatibility-v1");
+  assert.equal(review.snapshot()?.refreshing, true);
+  assert.equal(review.snapshot()?.protocol, "compatibility-v1");
+  assert.equal(events.includes(null), false);
+  assert.throws(() => review.decide(preview.approvalId, true), /current|refresh/);
+  await Promise.resolve();
+  review.cancel();
+  await assert.rejects(completion, /cancelled/);
+  finishRefresh({ ...preview, protocol: "compatibility-v1", approvalId: "b".repeat(64) });
+  await refresh;
+  assert.equal(review.snapshot(), null);
 });
 
 test("setup review retains only a pending preview and resolves only its explicit current decision", async () => {

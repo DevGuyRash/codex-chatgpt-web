@@ -29,5 +29,7 @@ export interface CodexRepairPreview {
   launcherRestartRequired: boolean;
   effects?: string[];
   operation?: "setup" | "repair";
+  /** Launcher-only transient state; never an approvable runtime plan. */
+  refreshing?: boolean;
   textChanges?: Array<{ path: string; startLine: number; before: string; after: string }>;
 }

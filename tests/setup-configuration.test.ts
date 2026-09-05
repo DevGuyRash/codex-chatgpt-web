@@ -8,6 +8,8 @@ import { getCodexConfigPath, getCodexJournalPath } from "../src/codex-integratio
 import { preflightSetup, previewSetupConfiguration, setup, type SetupOptions } from "../src/setup";
 import { ROUTES_BEGIN, ROUTES_END } from "../src/codex-config-source";
 import { LAUNCHER_BROWSER_IDLE_URL } from "../src/launcher-browser-host";
+import { parseTomlValue } from "../src/toml-edit";
+import { describeCodexSourceChange } from "../src/codex-configuration-plan";
 
 async function fixture(run: (options: SetupOptions) => void | Promise<void>) {
   const root = mkdtempSync(join(tmpdir(), "cgw-setup-review-"));
@@ -69,11 +71,46 @@ test("existing-install setup reactivates tracked comments and explicit replaceme
   expect(previewSetupConfiguration({ ...options, replaceCodexRoute: true }).status).toBe("blocked");
 }));
 
-for (const externalEdit of [false, true]) test(`approved setup uses the exact Codex plan and preserves concurrent runtime edits (${externalEdit})`, () => fixture(async options => {
+for (const structured of [false, true]) test(`setup reviews existing conflicts for each selected protocol without collapsing findings or changing files (structured V2: ${structured})`, () => fixture(async options => {
+  const config = defaultConfig("browser-only");
+  saveConfig(config);
+  installCodexIntegration(config);
+  const disabled = readFileSync(getCodexConfigPath(), "utf8")
+    .replace(/^openai_base_url/gm, "# openai_base_url")
+    .replace(/^experimental_realtime_webrtc_call_base_url/gm, "# experimental_realtime_webrtc_call_base_url")
+    .replace("multi_agent_v2 = false", structured ? 'multi_agent_v2 = { enabled = true, context_management = "keep" }' : "multi_agent_v2 = true");
+  writeFileSync(getCodexConfigPath(), disabled);
+  const native = previewSetupConfiguration({ ...options, subagentProtocol: "native" });
+  const compatible = previewSetupConfiguration({ ...options, subagentProtocol: "compatibility-v1" });
+  expect(native.status).toBe("ready");
+  expect(compatible.status).toBe("ready");
+  const v2Path = structured ? "features.multi_agent_v2.enabled" : "features.multi_agent_v2";
+  expect(native.conflicts.map(conflict => conflict.path)).toEqual(["openai_base_url", "experimental_realtime_webrtc_call_base_url", v2Path]);
+  expect(native.changes.some(change => change.path.startsWith("features.multi_agent_v2"))).toBe(false);
+  expect(compatible.changes.find(change => change.path === v2Path)).toMatchObject({ current: true, proposed: false });
+  expect(compatible.changes.some(change => change.path.includes("context_management"))).toBe(false);
+  expect(native.approvalId).not.toBe(compatible.approvalId);
+  expect(readFileSync(getCodexConfigPath(), "utf8")).toBe(disabled);
+  expect(parseTomlValue(disabled)).toHaveProperty(v2Path, true);
+  await expect(setup(options)).rejects.toThrow("approve its exact preview");
+  expect(readFileSync(getCodexConfigPath(), "utf8")).toBe(disabled);
+}));
+
+for (const existingRepair of [false, true]) for (const externalEdit of [false, true]) test(`approved setup uses the exact Codex plan and preserves concurrent runtime edits (existing repair: ${existingRepair}, external edit: ${externalEdit})`, () => fixture(async options => {
   // Browser account inspection is substituted; planning, files, CLI setup logic, and transactions are real.
   const portProbe = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: () => new Response() });
   options.port = portProbe.port!;
   await portProbe.stop(true);
+  let original = "";
+  if (existingRepair) {
+    const config = defaultConfig("browser-only");
+    saveConfig(config);
+    installCodexIntegration(config);
+    original = readFileSync(getCodexConfigPath(), "utf8")
+      .replace(/^openai_base_url/gm, "# openai_base_url")
+      .replace("multi_agent_v2 = false", 'multi_agent_v2 = { enabled = true, context_management = "preserve" }');
+    writeFileSync(getCodexConfigPath(), original);
+  }
   let inspections = 0;
   const control = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: request => {
     expect(new URL(request.url).pathname).toBe("/v1/session/inspect");
@@ -97,10 +134,13 @@ for (const externalEdit of [false, true]) test(`approved setup uses the exact Co
     if (externalEdit) {
       await expect(setup({ ...options, configurationApproval: preview.approvalId })).rejects.toThrow("input changed since approval");
       expect(readFileSync(getConfigPath(), "utf8")).toBe('{"independent":"edit"}\n');
-      expect(existsSync(getCodexConfigPath())).toBe(false);
+      if (existingRepair) expect(readFileSync(getCodexConfigPath(), "utf8")).toBe(original);
+      else expect(existsSync(getCodexConfigPath())).toBe(false);
     } else {
       await setup({ ...options, configurationApproval: preview.approvalId });
-      expect(readFileSync(getCodexConfigPath(), "utf8")).toBe(preview.textChanges![0]!.after);
+      const installed = readFileSync(getCodexConfigPath(), "utf8");
+      expect(describeCodexSourceChange(getCodexConfigPath(), original, installed)).toEqual(preview.textChanges!);
+      if (existingRepair) expect(parseTomlValue(installed)).toHaveProperty("features.multi_agent_v2", { enabled: true, context_management: "preserve" });
       expect(JSON.parse(readFileSync(getConfigPath(), "utf8"))).toMatchObject({ browserHost: "launcher", subagentProtocol: "native", solAvailable: true });
       expect(existsSync(getCodexJournalPath())).toBe(true);
     }

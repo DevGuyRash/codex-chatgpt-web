@@ -24,7 +24,6 @@ import {
 import {
   applyPreparedCodexIntegration,
   prepareCodexIntegration,
-  preflightCodexIntegration,
   readCodexSubagentProtocol,
 } from "./codex-integration";
 import { inspectLauncherBrowserHost } from "./launcher-browser-host";
@@ -47,6 +46,7 @@ import { VERSION } from "./version";
 import { configurationApprovalId, describeCodexConfigurationChanges, describeCodexSourceChange } from "./codex-configuration-plan";
 import { getCodexConfigPath, serializeJournal, snapshotFile, writeFilesWithCompensation } from "./codex-integration-shared";
 import { inspectCodexConfigSource } from "./codex-config-source";
+import { CodexConfigurationError } from "./codex-configuration-error";
 import type { CodexRepairPreview } from "./contracts/codex-integration";
 
 export interface SetupOptions {
@@ -471,15 +471,16 @@ export function preflightSetup(options: SetupOptions): void {
       throw new Error("Automatic and Zero Risk require different Tunnel IDs and separate ChatGPT connectors");
     }
   }
-  preflightCodexIntegration(config, {
+  prepareCodexIntegration(config, {
     replaceExistingRoute: options.replaceCodexRoute,
+    reviewOwnedChanges: true,
   });
 }
 
 function prepareSetupConfiguration(options: SetupOptions) {
   const runtimeInput = snapshotFile(getConfigPath());
   const prepared = prepareSetup(options);
-  const integrationPlan = prepareCodexIntegration(prepared.config, { replaceExistingRoute: options.replaceCodexRoute });
+  const integrationPlan = prepareCodexIntegration(prepared.config, { replaceExistingRoute: options.replaceCodexRoute, reviewOwnedChanges: true });
   const original = integrationPlan.expected.find(file => file.path === getCodexConfigPath())?.data?.toString("utf8") ?? "";
   const changes = describeCodexConfigurationChanges(original, integrationPlan.configWrite.data);
   const configKeys = ["mode", "subagentProtocol", "releaseVersion", "host", "port", "browserHost", "browserInteractionMode", "appName", "experimentalBiggerContext", "zeroRiskProEnabled", "autoApproveToolCalls"] as const;
@@ -494,7 +495,7 @@ function prepareSetupConfiguration(options: SetupOptions) {
     approvalId: configurationApprovalId({ operation: "setup", options: intent }, [...integrationPlan.expected, runtimeInput], [
       integrationPlan.configWrite, { path: "installation-journal", data: serializeJournal(integrationPlan.journal) },
     ], integrationPlan.removals),
-    changes, conflicts: inspectCodexConfigSource(original).conflicts,
+    changes, conflicts: integrationPlan.conflicts ?? [],
     textChanges: describeCodexSourceChange(getCodexConfigPath(), original, integrationPlan.configWrite.data),
     codexRestartRequired: true, launcherRestartRequired: false,
     effects: [
@@ -514,7 +515,7 @@ export function previewSetupConfiguration(options: SetupOptions): CodexRepairPre
     return prepareSetupConfiguration(options).preview;
   } catch (error) {
     const input = snapshotFile(getCodexConfigPath()).data?.toString("utf8") ?? "";
-    const conflicts = inspectCodexConfigSource(input).conflicts;
+    const conflicts = error instanceof CodexConfigurationError ? error.conflicts : inspectCodexConfigSource(input).conflicts;
     return { version: 1, operation: "setup", status: "blocked", approvalId: "",
       protocol: options.subagentProtocol ?? "compatibility-v1", changes: [],
       conflicts: conflicts.length ? conflicts : [{ path: "setup", category: "ownership_conflict", message: error instanceof Error ? error.message : "Setup inputs need attention" }],
@@ -525,6 +526,9 @@ export function previewSetupConfiguration(options: SetupOptions): CodexRepairPre
 
 export async function setup(options: SetupOptions): Promise<SetupResult> {
   const prepared = prepareSetupConfiguration(options);
+  if (prepared.integrationPlan.conflicts?.length && !options.configurationApproval) {
+    throw new Error("Setup includes configuration repair; approve its exact preview before continuing");
+  }
   if (options.configurationApproval && prepared.preview.approvalId !== options.configurationApproval) {
     throw new Error("Setup configuration changed since preview; review a fresh preview before continuing");
   }

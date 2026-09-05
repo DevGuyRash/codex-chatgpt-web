@@ -16,18 +16,8 @@ import { processRunning } from "./process";
 
 export type CheckStatus = "ok" | "warning" | "error";
 
-export interface DoctorCheck {
-  id: string;
-  status: CheckStatus;
-  message: string;
-  detail?: string;
-}
-
-export interface DoctorReport {
-  ok: boolean;
-  mode?: AppConfig["mode"];
-  checks: DoctorCheck[];
-}
+import type { DoctorCheck, DoctorReport } from "./contracts/diagnostics";
+export type { DoctorCheck, DoctorReport } from "./contracts/diagnostics";
 
 function secureFile(path: string): boolean {
   if (process.platform === "win32") return true;
@@ -148,11 +138,11 @@ export async function runDoctor(): Promise<DoctorReport> {
     }
   }
 
-  const codex = inspectCodexIntegration();
+  const codex = inspectCodexIntegration({ readOnly: true });
   if (!codex.installed) {
-    checks.push({ id: "codex", status: "error", message: "Codex model route is not installed" });
+    checks.push({ id: "codex", status: "error", code: "codex_route_missing", message: "Codex model route is not installed" });
   } else if (codex.errors.length > 0) {
-    checks.push({ id: "codex", status: "error", message: "Codex integration is inconsistent", detail: codex.errors.join("; ") });
+    checks.push({ id: "codex", status: "error", code: "codex_configuration_conflict", message: "Codex integration is inconsistent", detail: codex.errors.join("\n"), findings: codex.conflicts.length ? codex.conflicts.map(({ path, message }) => ({ path, message })) : codex.errors.map(message => ({ message })) });
   } else {
     checks.push({ id: "codex", status: "ok", message: "Codex native model route is installed" });
   }

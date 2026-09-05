@@ -1,4 +1,6 @@
 import type { CodexRepairPreview, SubagentProtocol } from "../../src/contracts/codex-integration";
+import type { DoctorReport, DiagnosticProblem } from "../../src/contracts/diagnostics";
+export type { DoctorReport, DoctorCheck, DiagnosticProblem, RecoveryAction } from "../../src/contracts/diagnostics";
 export type { CodexRepairPreview, SubagentProtocol } from "../../src/contracts/codex-integration";
 export type Language = "en" | "zh-CN" | "ja";
 export type LauncherProfile = "production" | "development";
@@ -69,23 +71,11 @@ export interface LogRecord {
   detail: Record<string, unknown>;
 }
 
-export interface DoctorCheck {
-  id: string;
-  status: "ok" | "warning" | "error";
-  message: string;
-  detail?: string;
-}
-
-export interface DoctorReport {
-  ok: boolean;
-  mode?: "browser-only" | "full";
-  checks: DoctorCheck[];
-}
-
 export interface OperationState {
   name: string;
   status: "running" | "completed" | "failed";
   message: string;
+  problem?: DiagnosticProblem;
 }
 
 export type UpdateState =

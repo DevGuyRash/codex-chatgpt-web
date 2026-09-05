@@ -14,6 +14,7 @@ const {
 const { embeddedRuntimeInvocation, runtimeInvocation } = require("./runtime-command.cjs");
 const { redactText } = require("./logging.cjs");
 const { parseConfigurationPreview } = require("./configuration-review.cjs");
+const { problemFor, runtimeFailure, withRecovery } = require("./problems.cjs");
 const { DETACH_OWNED_CHILD, terminateOwnedProcessTree } = require("./process-tree.cjs");
 
 const MAX_CAPTURE_BYTES = 8 * 1024 * 1024;
@@ -25,9 +26,13 @@ const MAX_CHECKPOINT_FILE_BYTES = 16 * 1024 * 1024;
 const PASSKEY_LOGIN_TIMEOUT_MS = 10 * 60_000;
 const MAX_PASSKEY_STATE_FILE_BYTES = 16 * 1024 * 1024;
 const MAX_PASSKEY_MARKER_FILE_BYTES = 64 * 1024;
-function collect(stream, chunks, onLine, onError) {
+function collect(stream, chunks, onLine, onError, suppressPrefix) {
   let buffered = "";
   let bytes = 0;
+  let suppressing = false;
+  const emit = line => {
+    if (line && !suppressing && !(suppressPrefix && line.startsWith(suppressPrefix))) onLine(line);
+  };
   stream.on("data", (chunk) => {
     bytes += chunk.length;
     if (bytes <= MAX_CAPTURE_BYTES) chunks.push(chunk);
@@ -37,16 +42,18 @@ function collect(stream, chunks, onLine, onError) {
       if (newline < 0) break;
       const line = buffered.slice(0, newline).trimEnd();
       buffered = buffered.slice(newline + 1);
-      if (line) onLine(line);
+      emit(line);
+      suppressing = false;
     }
     if (buffered.length > MAX_RUNTIME_LOG_LINE_CHARS) {
-      onLine(`${buffered.slice(0, MAX_RUNTIME_LOG_LINE_CHARS)}…[truncated]`);
+      suppressing ||= Boolean(suppressPrefix && buffered.startsWith(suppressPrefix));
+      emit(`${buffered.slice(0, MAX_RUNTIME_LOG_LINE_CHARS)}…[truncated]`);
       buffered = "";
     }
   });
   stream.on("end", () => {
     const line = buffered.trim();
-    if (line) onLine(line);
+    emit(line);
   });
   stream.on("error", (error) => onError?.(error));
 }
@@ -586,6 +593,7 @@ class RuntimeHost {
           ? { ...options.environment }
           : { ...process.env };
         Object.assign(environment, {
+          CODEX_CHATGPT_WEB_STRUCTURED_ERRORS: "1",
           CODEX_CHATGPT_WEB_BROWSER_HOST_DESCRIPTOR: this.browserDescriptorPath,
           ...(options.env || {}),
         });
@@ -612,7 +620,7 @@ class RuntimeHost {
           if (options.privateOutput) return;
           this.logger.warn("runtime.stderr", { operation: name, line });
           this.publishOperation?.({ name, status: "running", message: redactText(line) });
-        }, recordPipeError("stderr"));
+        }, recordPipeError("stderr"), "CGW_ERROR_V1 ");
         let settled = false;
         let timedOut = null;
         let terminationTimeout = null;
@@ -700,18 +708,21 @@ class RuntimeHost {
       const acceptedExitCodes = options.acceptedExitCodes || [0];
       if (!acceptedExitCodes.includes(result.code)) {
         const detail = result.stderr.trim() || result.stdout.trim() || `exit ${result.code}`;
-        throw new Error(detail);
+        throw runtimeFailure(result.stderr, detail);
       }
       this.logger.info("runtime.operation_completed", { name });
       this.publishOperation?.({ name, status: "completed", message: options.successMessage || "Completed" });
       return result;
     } catch (error) {
       const message = options.privateOutput
-        ? "Configuration repair did not complete; review a fresh preview and ensure the runtime is stopped"
+        ? error?.code === "codex_configuration_conflict" ? "Codex configuration differs from this installation. Review the proposed repair before changing it."
+          : "The operation did not complete. Run Doctor or export diagnostic logs for more information."
         : redactText(error instanceof Error ? error.message : String(error));
+      const problem = problemFor(error, message);
+      if (options.privateOutput) problem.message = message;
       this.logger.error("runtime.operation_failed", { name, message });
-      this.publishOperation?.({ name, status: "failed", message });
-      throw new Error(message);
+      this.publishOperation?.({ name, status: "failed", message, problem });
+      throw Object.assign(new Error(message), { problem, code: problem.code, findings: problem.findings });
     } finally {
       this.active = null;
     }
@@ -722,15 +733,16 @@ class RuntimeHost {
     try {
       const result = await this.run("doctor", ["doctor", "--json"], {
         message: "Checking runtime",
+        privateOutput: true,
         timeoutMs: 75_000,
         acceptedExitCodes: [0, 1],
       });
-      return JSON.parse(result.stdout);
+      return withRecovery(JSON.parse(result.stdout));
     } catch (error) {
-      return {
+      return withRecovery({
         ok: false,
         checks: [{ id: "runtime", status: "error", message: error instanceof Error ? error.message : String(error) }],
-      };
+      });
     }
   }
 
@@ -1365,22 +1377,25 @@ class RuntimeHost {
     try {
       if (this.launcherProfile === "production") {
         if (!this.reviewConfiguration) throw new Error("Setup requires a configuration preview in the launcher");
-        for (;;) {
-          const result = await this.run(name, [...args, "--preview-json"], {
+        const preparePreview = async requestedArgs => {
+          const result = await this.run(name, [...requestedArgs, "--preview-json"], {
             ...options, privateOutput: true, message: "Preparing configuration changes for review",
             successMessage: "Configuration preview ready", timeoutMs: 15_000,
           });
-          const preview = parseConfigurationPreview(result.stdout);
-          const approved = await this.reviewConfiguration(preview);
-          if (approved && typeof approved === "object" && ["native", "compatibility-v1"].includes(approved.protocol)) {
-            const index = args.indexOf("--subagent-protocol");
-            args = [...(index < 0 ? args : [...args.slice(0, index), ...args.slice(index + 2)]), "--subagent-protocol", approved.protocol];
-            continue;
-          }
-          if (approved !== preview.approvalId || preview.status !== "ready") throw new Error("Exact setup preview approval is required");
-          args = [...args, "--approve-configuration", approved];
-          break;
-        }
+          return parseConfigurationPreview(result.stdout);
+        };
+        let preview = await preparePreview(args);
+        const approved = await this.reviewConfiguration(preview, async protocol => {
+          if (!["native", "compatibility-v1"].includes(protocol)) throw new Error("Choose a supported subagent protocol");
+          const index = args.indexOf("--subagent-protocol");
+          const nextArgs = [...(index < 0 ? args : [...args.slice(0, index), ...args.slice(index + 2)]), "--subagent-protocol", protocol];
+          const next = await preparePreview(nextArgs);
+          args = nextArgs;
+          preview = next;
+          return next;
+        });
+        if (approved !== preview.approvalId || preview.status !== "ready") throw new Error("Exact setup preview approval is required");
+        args = [...args, "--approve-configuration", approved];
         await this.run(name, [...args, "--preflight-only"], {
           ...options,
           privateOutput: true,
@@ -1450,9 +1465,11 @@ class RuntimeHost {
         primary,
         ...(rolledBack ? ["incomplete first-time setup was rolled back"] : []),
         ...failures,
-      ].join("; ");
-      this.publishOperation?.({ name, status: "failed", message });
+      ].join("\n");
+      const problem = error?.problem || problemFor(error, message);
+      this.publishOperation?.({ name, status: "failed", message, problem });
       const failure = new Error(message);
+      failure.problem = problem;
       if (!runtimeTransitionStarted) failure.code = "CONFIGURATION_REVIEW_REQUIRED";
       throw failure;
     } finally {

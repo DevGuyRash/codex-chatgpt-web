@@ -10,6 +10,7 @@ import {
 } from "react";
 import { createPortal } from "react-dom";
 import { ConfigurationRepair, SetupConfigurationReview } from "./ConfigurationRepair";
+import { DiagnosticChecks, ErrorToast, RecoveryContext, RecoveryDialog } from "./Recovery";
 import { copyFor, type Copy } from "./i18n";
 import { Icon, type IconName } from "./icons";
 import type {
@@ -23,6 +24,7 @@ import type {
   OperationState,
   Surface,
   CodexRepairPreview,
+  RecoveryAction,
 } from "./types";
 
 const api = window.codexWebLauncher;
@@ -41,6 +43,20 @@ export function App() {
   const [logs, setLogs] = useState<LogRecord[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [configurationPreview, setConfigurationPreview] = useState<CodexRepairPreview | null>(null);
+  const [recovery, setRecovery] = useState<{ action: "run-doctor" | "review-configuration"; request: number } | null>(null);
+  const [recoveryBusy, setRecoveryBusy] = useState(false);
+  const recover = (action: RecoveryAction) => {
+    if (!api || recoveryBusy || configurationPreview || operation?.status === "running") return;
+    setError(null);
+    if (action === "run-doctor" || action === "review-configuration") {
+      void api.setBrowserSurfaceActive(false).catch(cause => setError(messageOf(cause)));
+      setRecovery({ action, request: Date.now() });
+    } else if (action === "review-setup" || action === "export-logs") {
+      setRecovery(null);
+      setRecoveryBusy(true);
+      void (action === "review-setup" ? api.setupCore() : api.exportLogs()).catch(cause => setError(messageOf(cause))).finally(() => setRecoveryBusy(false));
+    }
+  };
   const documentLanguage = snapshot?.state.language ?? "en";
 
   useEffect(() => {
@@ -111,7 +127,7 @@ export function App() {
   const copy = copyFor(language);
 
   return (
-    <div
+    <RecoveryContext.Provider value={recover}><div
       className="app-root"
       data-language={language}
       data-platform={snapshot.platform}
@@ -129,7 +145,7 @@ export function App() {
           />
         ) : (
           <LauncherShell
-            configurationReviewOpen={configurationPreview !== null}
+            configurationReviewOpen={configurationPreview !== null || recovery !== null}
             browser={browser}
             copy={copy}
             key="launcher"
@@ -142,11 +158,12 @@ export function App() {
           />
         )}
       </AnimatePresence>
-      {configurationPreview ? <SetupConfigurationReview key={configurationPreview.approvalId} preview={configurationPreview} language={language} decide={(id, approved) => api!.decideConfiguration(id, approved)} /> : null}
+      {configurationPreview ? <SetupConfigurationReview preview={configurationPreview} language={language} decide={(id, approved) => api!.decideConfiguration(id, approved)} /> : null}
+      {recovery && !configurationPreview ? <RecoveryDialog key={recovery.request} action={recovery.action} api={api} language={language} devProfile={snapshot.profile === "development"} onClose={() => setRecovery(null)} onRepaired={updateState} /> : null}
       <AnimatePresence>
-        {error ? <ErrorToast copy={copy} message={error} onDismiss={() => setError(null)} /> : null}
+        {error ? <ErrorToast copy={copy} language={language} message={error} problem={operation?.status === "failed" && (error === operation.message || error.endsWith(`: ${operation.message}`)) ? operation.problem : undefined} disabled={recoveryBusy || operation?.status === "running" || configurationPreview !== null} onDismiss={() => setError(null)} /> : null}
       </AnimatePresence>
-    </div>
+    </div></RecoveryContext.Provider>
   );
 }
 
@@ -1489,7 +1506,7 @@ function McpSurface({
                     {copy.openConnectors}
                   </SecondaryButton>
                 </div>
-                {doctor ? <DoctorSummary copy={copy} report={doctor} /> : null}
+                {doctor ? <DoctorSummary copy={copy} report={doctor} language={snapshot.state.language ?? "en"} /> : null}
               </div>
             ) : null}
           </motion.section>
@@ -1751,7 +1768,7 @@ function SettingsSurface({
         </span>
         <Icon name="chevron" />
       </button> : null}
-      {doctor ? <DoctorSummary copy={copy} report={doctor} /> : null}
+      {doctor ? <DoctorSummary copy={copy} report={doctor} language={language} /> : null}
 
       <div className="about-row">
         <BrandMark small />
@@ -2131,7 +2148,7 @@ function FieldRow({ children, label }: { children: ReactNode; label: string }) {
   );
 }
 
-function DoctorSummary({ copy, report }: { copy: Copy; report: DoctorReport }) {
+function DoctorSummary({ copy, report, language }: { copy: Copy; report: DoctorReport; language: Language }) {
   const visibleChecks = report.ok
     ? report.checks.slice(-6)
     : report.checks.filter((check) => check.status !== "ok");
@@ -2141,14 +2158,7 @@ function DoctorSummary({ copy, report }: { copy: Copy; report: DoctorReport }) {
         <Icon name={report.ok ? "check" : "activity"} />
         <strong>{report.ok ? copy.healthy : copy.needsAttention}</strong>
       </header>
-      <div>
-        {visibleChecks.map((check) => (
-          <p key={check.id}>
-            <StateDot state={check.status === "ok" ? "ready" : check.status === "warning" ? "busy" : "error"} />
-            <span>{check.message}</span>
-          </p>
-        ))}
-      </div>
+      <DiagnosticChecks report={{ ...report, checks: visibleChecks }} language={language} />
     </div>
   );
 }
@@ -2368,25 +2378,6 @@ function BrandMark({ small = false }: { small?: boolean }) {
         />
       </svg>
     </span>
-  );
-}
-
-function ErrorToast({ copy, message, onDismiss }: { copy: Copy; message: string; onDismiss: () => void }) {
-  return (
-    <motion.div
-      animate={{ opacity: 1, y: 0 }}
-      className="error-toast"
-      exit={{ opacity: 0, y: 8 }}
-      initial={{ opacity: 0, y: 8 }}
-      transition={PANEL_TRANSITION}
-    >
-      <StateDot state="error" />
-      <span>
-        <strong>{copy.error}</strong>
-        <p>{message}</p>
-      </span>
-      <button onClick={onDismiss} type="button">{copy.dismiss}</button>
-    </motion.div>
   );
 }
 

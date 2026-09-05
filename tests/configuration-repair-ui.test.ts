@@ -66,7 +66,7 @@ test.skipIf(!process.env.CHATGPT_TEST_CHROME_EXECUTABLE)("repair UI requires exp
     ]);
     await page.evaluate(() => { (window as unknown as { preview: { status: string } }).preview.status = "blocked"; });
     await preview.click();
-    await page.getByRole("status").filter({ hasText: "Needs attention" }).waitFor();
+    await page.getByRole("status").filter({ hasText: "This preview cannot be applied" }).waitFor();
     expect(await apply.isDisabled()).toBe(true);
     expect(await page.getByRole("checkbox").count()).toBe(0);
     expect(errors).toEqual([]);

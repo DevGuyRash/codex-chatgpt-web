@@ -1,5 +1,6 @@
 #!/usr/bin/env bun
 import { createInterface } from "node:readline/promises";
+import { CodexConfigurationError } from "./codex-configuration-error";
 import { Writable } from "node:stream";
 import { timingSafeEqual } from "node:crypto";
 import { existsSync, rmSync } from "node:fs";
@@ -644,6 +645,9 @@ async function main(): Promise<void> {
 }
 
 main().catch(error => {
+  if (process.env.CODEX_CHATGPT_WEB_STRUCTURED_ERRORS === "1" && error instanceof CodexConfigurationError) {
+    process.stderr.write(`CGW_ERROR_V1 ${JSON.stringify({ version: 1, code: error.code, message: "Codex configuration differs from this installation", findings: error.conflicts.map(({ path, message }) => ({ path, message })) })}\n`);
+  } else
   process.stderr.write(`codex-chatgpt-web: ${error instanceof Error ? error.message : String(error)}\n`);
   process.exitCode = 1;
 });

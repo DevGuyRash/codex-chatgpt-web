@@ -1,6 +1,8 @@
 import { existsSync, mkdirSync, readFileSync } from "node:fs";
 import { dirname } from "node:path";
 import { inspectCodexConfigSource } from "./codex-config-source";
+import { CodexConfigurationError } from "./codex-configuration-error";
+import { prepareOwnedCodexConfiguration } from "./codex-owned-configuration";
 import type { AppConfig } from "./config";
 import { getConfigPath, loadConfig, preserveUtf8Bom, stripUtf8Bom } from "./config";
 import { installCodexInterruptHook, installCodexInterruptHookCommand } from "./codex-interrupt-hook";
@@ -176,15 +178,16 @@ export interface IntegrationInstallPlan {
   configWrite: { path: string; data: string };
   removals: string[];
   expected: FileSnapshot[];
+  conflicts?: CodexIntegrationConflict[];
 }
 
-export function prepareCodexIntegration(config: AppConfig, options: InstallCodexIntegrationOptions = {}): IntegrationInstallPlan {
+export function prepareCodexIntegration(config: AppConfig, options: InstallCodexIntegrationOptions & { reviewOwnedChanges?: boolean } = {}): IntegrationInstallPlan {
   const configPath = getCodexConfigPath();
   const expected = [configPath, getCodexJournalPath(), getCodexJournalRecoveryPath(), getCodexModelsCachePath()].map(snapshotFile);
   const configExists = expected[0]!.exists;
   const currentText = expected[0]!.data?.toString("utf8") ?? "";
   const sourceConflicts = inspectCodexConfigSource(currentText).conflicts;
-  if (sourceConflicts.length) throw new Error(sourceConflicts.map(conflict => conflict.message).join("; "));
+  if (sourceConflicts.length) throw new CodexConfigurationError(sourceConflicts);
   const existing = readJournal({ repair: false });
   const installedUrl = routeUrl(config);
   if (existing) assertJournalTargetsConfig(existing, configPath);
@@ -195,13 +198,17 @@ export function prepareCodexIntegration(config: AppConfig, options: InstallCodex
   }
 
   if (hasManagedJournal && existing && existing.version !== 2) {
+    const reviewed = options.reviewOwnedChanges && existing.version === 10 && existing.active
+      ? prepareOwnedCodexConfiguration(currentText, existing, config) : undefined;
+    const installed = reviewed?.journal ?? existing;
+    const workingText = reviewed?.text ?? currentText;
     let baseline: string;
     let preservePrevious = true;
     try {
-      verifyManagedJournalState(currentText, existing);
-      baseline = managedJournalIsActive(existing)
-        ? restoreManagedRoute(currentText, existing)
-        : currentText;
+      verifyManagedJournalState(workingText, installed);
+      baseline = managedJournalIsActive(installed)
+        ? restoreManagedRoute(workingText, installed)
+        : workingText;
     } catch (error) {
       if (options.replaceExistingRoute !== true) throw error;
       baseline = replacementBaseline(currentText, configExists, existing);
@@ -247,7 +254,7 @@ export function prepareCodexIntegration(config: AppConfig, options: InstallCodex
       } : {}),
       ...(existing.format ? { format: existing.format } : {}),
     };
-    return { journal: updated, configWrite: { path: configPath, data: patched.text }, removals: [getCodexModelsCachePath()], expected };
+    return { journal: updated, configWrite: { path: configPath, data: patched.text }, removals: [getCodexModelsCachePath()], expected, conflicts: reviewed?.conflicts };
   }
 
   let baseline = currentText;

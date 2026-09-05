@@ -259,7 +259,10 @@ test("failed doctor reports retain every failed check", () => {
     appSource,
     /report\.ok\s*\?\s*report\.checks\.slice\(-6\)\s*:\s*report\.checks\.filter\(\(check\) => check\.status !== "ok"\)/,
   );
-  assert.match(appSource, /visibleChecks\.map\(\(check\) =>/);
+  assert.match(appSource, /<DiagnosticChecks report=\{\{ \.\.\.report, checks: visibleChecks \}\}/);
+  const recoverySource = fs.readFileSync(path.join(launcherRoot, "src", "Recovery.tsx"), "utf8");
+  assert.match(recoverySource, /report\.checks\.map\(check =>/);
+  assert.match(recoverySource, /check\.findings\?\.length[\s\S]*?check\.detail/);
 });
 
 test("launcher shares only privacy-safe exported diagnostics", () => {

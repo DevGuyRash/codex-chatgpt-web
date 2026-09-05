@@ -117,6 +117,7 @@ function send(channel, value) {
 }
 
 function publishOperation(operation) {
+  if (operation.status === "failed" && !operation.problem) operation = { ...operation, problem: require("./problems.cjs").problemFor(operation) };
   lastOperation = operation;
   send("launcher:operation", operation);
 }
@@ -426,7 +427,13 @@ function smokePassedForCurrentVersion(state) {
 }
 
 function registerIpc({ logger, stateStore }) {
-  const handle = (channel, handler) => registerLoggedIpc(ipcMain, logger, channel, handler);
+  const handle = (channel, handler) => registerLoggedIpc(ipcMain, logger, channel, async (...args) => {
+    try { return await handler(...args); }
+    catch (error) {
+      publishOperation({ name: channel, status: "failed", message: error instanceof Error ? error.message : String(error), problem: error?.problem });
+      throw error;
+    }
+  });
   handle("launcher:snapshot", async () => ({
     profile: LAUNCHER_PROFILE.kind,
     profilePaths: {
@@ -1014,7 +1021,7 @@ async function start() {
     publishOperation,
     supervisor: runtimeSupervisor,
     getBrowserInteractionMode: () => stateStore.read().browserInteractionMode,
-    reviewConfiguration: preview => configurationReview.request(preview),
+    reviewConfiguration: (preview, refresh) => configurationReview.request(preview, refresh),
   });
   const configuredInteractionMode = runtimeHost.runtimeConfigSnapshot().config?.browserInteractionMode;
   if ((configuredInteractionMode === "automatic" || configuredInteractionMode === "manual")
@@ -1252,14 +1259,14 @@ async function start() {
     const routeRecovery = error?.code === "CONFIGURATION_REVIEW_REQUIRED"
       ? {} : await restoreCodexRouteAfterRuntimeFailure({ logger, stateStore });
     const message = routeRecovery.error
-      ? `${primary}; restoring the previous Codex route also failed: ${routeRecovery.error}`
+      ? `${primary}\nRestoring the previous Codex route also failed: ${routeRecovery.error}`
       : routeRecovery.restored
-        ? `${primary}; the previous Codex route was restored, restart Codex once`
+        ? `${primary}\nThe previous Codex route was restored; restart Codex once.`
         : primary;
     logger.error("runtime.startup_failed", { message });
     const state = stateStore.update({ coreSetupComplete: false, codexCatalogVerified: false });
     send("launcher:state-changed", state);
-    publishOperation({ name: "runtime-start", status: "failed", message });
+    publishOperation({ name: "runtime-start", status: "failed", message, problem: error?.problem });
   });
 
   app.on("activate", () => showMainWindow());

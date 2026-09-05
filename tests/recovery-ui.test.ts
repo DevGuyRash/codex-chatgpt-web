@@ -1,0 +1,41 @@
+import { expect, test } from "bun:test";
+import { chromium } from "playwright-core";
+import { resolve } from "node:path";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+
+test.skipIf(!process.env.CHATGPT_TEST_CHROME_EXECUTABLE)("notification recovery opens Doctor findings and the approved repair owner with readable narrow layouts", async () => {
+  const output = mkdtempSync(resolve(tmpdir(), "codex-recovery-ui-"));
+  const browser = await chromium.launch({ executablePath: process.env.CHATGPT_TEST_CHROME_EXECUTABLE, headless: true });
+  try {
+    const bundle = Bun.spawnSync([process.execPath, "build", "tests/fixtures/recovery.tsx", "--target", "browser", "--outdir", output], { cwd: resolve("launcher") });
+    if (bundle.exitCode !== 0) throw new Error(bundle.stderr.toString());
+    const page = await browser.newPage({ viewport: { width: 360, height: 900 } });
+    page.setDefaultTimeout(5_000);
+    const errors: string[] = [];
+    page.on("pageerror", error => errors.push(error.message));
+    await page.setContent('<div id="root"></div>');
+    await page.addStyleTag({ content: readFileSync(resolve(output, "recovery.css"), "utf8") });
+    await page.addScriptTag({ content: readFileSync(resolve(output, "recovery.js"), "utf8") });
+    expect(errors).toEqual([]);
+    const toast = page.locator(".error-toast");
+    await toast.waitFor();
+    expect(await toast.locator("li").count()).toBe(2);
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+    expect(await toast.locator("li p").last().evaluate(element => getComputedStyle(element).whiteSpace)).toBe("pre-wrap");
+    await toast.getByRole("button", { name: "Run Doctor", exact: true }).click();
+    const dialog = page.getByRole("dialog");
+    await dialog.getByRole("heading", { name: "Codex integration is inconsistent" }).waitFor();
+    expect(await dialog.locator("li").count()).toBe(2);
+    if (process.env.CHATGPT_TEST_RECOVERY_SCREENSHOT) await page.screenshot({ path: process.env.CHATGPT_TEST_RECOVERY_SCREENSHOT });
+    await dialog.getByRole("button", { name: "Review configuration repair", exact: true }).click();
+    await dialog.getByRole("heading", { name: "Repair Codex connection" }).waitFor();
+    expect(await dialog.getByRole("radio").count()).toBe(2);
+    expect(await dialog.getByRole("button", { name: "Preview changes", exact: true }).isDisabled()).toBe(true);
+    await page.keyboard.press("Escape");
+    expect(await dialog.count()).toBe(0);
+    await toast.getByRole("button", { name: "Dismiss", exact: true }).click();
+    await page.getByRole("status").filter({ hasText: "Dismissed" }).waitFor();
+    expect(errors).toEqual([]);
+  } finally { await browser.close(); rmSync(output, { recursive: true, force: true }); }
+}, 30_000);

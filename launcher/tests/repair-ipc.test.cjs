@@ -8,12 +8,14 @@ const { ConfigurationReview } = require("../electron/configuration-review.cjs");
 test("repair preload arguments reach the registered main handlers without the Electron event", async () => {
   const handlers = new Map();
   const calls = [];
+  const operations = [];
   const main = fs.readFileSync(require.resolve("../electron/main.cjs"), "utf8");
   const registration = main.slice(main.indexOf("function registerIpc("), main.indexOf("async function requestQuit("));
   const state = { codexRestartRequired: true };
   const context = {
     configurationReview: new ConfigurationReview({ publish() {} }),
     registerLoggedIpc,
+    publishOperation: operation => operations.push(operation),
     ipcMain: { handle: (name, handler) => handlers.set(name, handler), on() {} },
     runtimeHost: {
       previewIntegrationRepair: async protocol => { assert.equal(protocol, "native"); calls.push(["preview", protocol]); return { protocol }; },
@@ -36,4 +38,8 @@ test("repair preload arguments reach the registered main handlers without the El
   await api.decideConfiguration("current", true);
   assert.equal(await pending, "current");
   assert.equal(context.configurationReview.snapshot(), null);
+  const problem = { code: "codex_configuration_conflict", message: "Configuration differs", findings: [], actions: ["review-configuration"] };
+  context.runtimeHost.previewIntegrationRepair = async () => { throw Object.assign(new Error(problem.message), { problem }); };
+  await assert.rejects(api.previewIntegrationRepair("native"), /Configuration differs/);
+  assert.equal(operations.at(-1).problem, problem);
 });

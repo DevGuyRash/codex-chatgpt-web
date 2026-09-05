@@ -32,12 +32,12 @@ class ConfigurationReview {
     this.pending = null;
   }
   snapshot() { return this.pending?.preview ?? null; }
-  request(preview) {
+  request(preview, refresh) {
     if (this.pending) return Promise.reject(new Error("Another configuration preview is awaiting a decision"));
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => this.cancel("Configuration preview expired; start setup again for a fresh preview"), this.timeoutMs);
       timer.unref?.();
-      this.pending = { preview, resolve, reject, timer };
+      this.pending = { preview, refresh, resolve, reject, timer };
       this.publish(preview);
     });
   }
@@ -46,13 +46,28 @@ class ConfigurationReview {
     if (!this.pending || this.pending.preview.approvalId !== approvalId || (!protocolChange && typeof approved !== "boolean")) {
       throw new Error("This configuration preview is no longer current");
     }
+    if (approved !== false && this.pending.preview.refreshing) throw new Error("Configuration preview is refreshing; wait for the current comparison");
     if (approved === true && this.pending.preview.status !== "ready") throw new Error("Resolve configuration conflicts before approval");
     const pending = this.pending;
+    if (protocolChange) {
+      if (typeof pending.refresh !== "function") throw new Error("This configuration review cannot refresh its protocol");
+      pending.preview = { ...pending.preview, protocol: approved, approvalId: "", refreshing: true };
+      this.publish(pending.preview);
+      return Promise.resolve().then(() => this.pending === pending ? pending.refresh(approved) : undefined).then(next => {
+        if (this.pending !== pending) return;
+        pending.preview = parseConfigurationPreview(JSON.stringify(next), approved);
+        this.publish(pending.preview);
+      }).catch(error => {
+        if (this.pending !== pending) return;
+        pending.preview = { ...pending.preview, status: "blocked", approvalId: "", refreshing: false,
+          changes: [], textChanges: [], conflicts: [{ path: "preview", category: "ownership_conflict", message: error instanceof Error ? error.message : "The configuration preview could not be refreshed" }] };
+        this.publish(pending.preview);
+      });
+    }
     this.pending = null;
     clearTimeout(pending.timer);
     this.publish(null);
-    if (protocolChange) pending.resolve({ protocol: approved });
-    else if (approved) pending.resolve(approvalId);
+    if (approved) pending.resolve(approvalId);
     else pending.reject(new Error("Setup preview cancelled; no setup changes were applied"));
   }
   cancel(message = "Setup preview cancelled") {

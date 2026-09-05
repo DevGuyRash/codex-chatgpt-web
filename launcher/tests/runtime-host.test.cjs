@@ -5,6 +5,36 @@ const os = require("node:os");
 const path = require("node:path");
 const { CURRENT_CONNECTOR_NAME, DEV_CONNECTOR_NAME } = require("../electron/connector-identity.cjs");
 const { RuntimeHost } = require("../electron/runtime.cjs");
+const { ConfigurationReview } = require("../electron/configuration-review.cjs");
+
+test("real review refresh commits only the latest protocol after explicit approval", async () => {
+  const effects = [];
+  const review = new ConfigurationReview({ publish() {} });
+  const host = new RuntimeHost({
+    app: { getPath: () => os.tmpdir() }, logger: { info() {}, warn() {}, error() {} }, sourceRoot: "/source", browserDescriptorPath: "/unused",
+    supervisor: { readConfig: () => null, stopForSetup: async () => effects.push("stop"), startIfConfigured: async () => ({ status: "ready" }) },
+    reviewConfiguration: (preview, refresh) => review.request(preview, refresh),
+  });
+  host.captureSetupCheckpoint = () => null;
+  host.run = async (_name, args) => {
+    if (args.includes("--preview-json")) {
+      const protocol = args.includes("compatibility-v1") ? "compatibility-v1" : "native";
+      return { stdout: JSON.stringify({ version: 1, status: "ready", protocol, approvalId: (protocol === "native" ? "a" : "b").repeat(64), changes: [], conflicts: [], codexRestartRequired: true, launcherRestartRequired: false }) };
+    }
+    assert.ok(args.includes("compatibility-v1"));
+    assert.equal(args[args.indexOf("--approve-configuration") + 1], "b".repeat(64));
+    effects.push(args.includes("--preflight-only") ? "preflight" : "apply");
+    return { stdout: "" };
+  };
+  const setup = host.runSetup("setup", ["setup", "--browser-only"], {});
+  for (let count = 0; !review.snapshot() && count < 20; count++) await Promise.resolve();
+  await review.decide("a".repeat(64), "compatibility-v1");
+  assert.deepEqual(effects, []);
+  assert.throws(() => review.decide("a".repeat(64), true), /current/);
+  review.decide("b".repeat(64), true);
+  await setup;
+  assert.deepEqual(effects, ["preflight", "stop", "apply"]);
+});
 
 // Lifecycle fixtures substitute the user's explicit review decision and CLI preview;
 // separate tests exercise cancellation, stale approvals, and the real IPC boundary.
@@ -153,6 +183,32 @@ test("private operation failures do not publish raw output", async () => {
     return true;
   });
   assert.doesNotMatch(JSON.stringify(evidence), /PRIVATE_FAILURE/);
+});
+
+test("structured child conflicts survive private operations without logging source findings", async () => {
+  const { host } = hostFor(null);
+  const logs = [], events = [];
+  host.logger = { info: (...args) => logs.push(args), warn: (...args) => logs.push(args), error: (...args) => logs.push(args) };
+  host.publishOperation = value => events.push(value);
+  const envelope = { version: 1, code: "codex_configuration_conflict", message: "Configuration differs", findings: [{ path: "features.multi_agent_v2", message: "SOURCE_FINDING: enabled" }] };
+  host.command = () => ({ executable: process.execPath, args: ["-e", `console.error(${JSON.stringify(`CGW_ERROR_V1 ${JSON.stringify(envelope)}`)}); process.exitCode = 1`], cwd: os.tmpdir() });
+  await assert.rejects(host.run("setup", [], { privateOutput: true }), error => {
+    assert.equal(error.code, envelope.code);
+    assert.deepEqual(error.problem.actions, ["review-configuration", "run-doctor"]);
+    return true;
+  });
+  assert.deepEqual(events.at(-1).problem.findings, envelope.findings);
+  assert.doesNotMatch(JSON.stringify(logs), /SOURCE_FINDING/);
+});
+
+test("long structured stderr findings stay private across stream chunks while ordinary warnings remain visible", async () => {
+  const { host } = hostFor(null);
+  const logs = [];
+  host.logger = { info: (...args) => logs.push(args), warn: (...args) => logs.push(args), error: (...args) => logs.push(args) };
+  host.command = () => ({ executable: process.execPath, args: ["-e", 'const data = {version:1,code:"codex_configuration_conflict",message:"Configuration differs",findings:[{message:"PRIVATE_CHUNK".repeat(30000)}]}; process.stderr.write("CGW_ERROR_V1 " + JSON.stringify(data) + "\\n"); console.error("Ordinary diagnostic warning"); process.exitCode = 1;'], cwd: os.tmpdir() });
+  await assert.rejects(host.run("route", []), /Configuration differs/);
+  assert.doesNotMatch(JSON.stringify(logs), /PRIVATE_CHUNK/);
+  assert.match(JSON.stringify(logs), /Ordinary diagnostic warning/);
 });
 
 test("core setup preserves an existing full-harness installation", async () => {
@@ -457,6 +513,7 @@ test("production doctor parses its structured unhealthy report from exit status 
 
   const report = await fixture.host.doctor();
 
+  assert.equal(runOptions.privateOutput, true);
   assert.equal(report.ok, false);
   assert.equal(report.checks[0].message, "busy");
   assert.deepEqual(runOptions.acceptedExitCodes, [0, 1]);
@@ -917,7 +974,7 @@ test("failed first-time setup preserves changed files when checkpoint write owne
     approveSyntheticSetup(host);
     await assert.rejects(
       host.runSetup("core-setup", ["setup", "--browser-only"], {}),
-      /synthetic setup failure; first-time setup rollback failed:.*cannot prove write ownership/,
+      /synthetic setup failure\nfirst-time setup rollback failed:.*cannot prove write ownership/,
     );
     assert.deepEqual(calls.map((args) => args.join(" ")), [
       "setup --browser-only --preflight-only",
@@ -1168,7 +1225,7 @@ test("failed launcher update preserves current files and does not restart with a
     approveSyntheticSetup(host);
     await assert.rejects(
       host.runSetup("core-setup", ["setup", "--full"], {}),
-      /synthetic updated runtime startup failure;.*cannot prove write ownership/,
+      /synthetic updated runtime startup failure\n.*cannot prove write ownership/,
     );
     assert.equal(startAttempts, 1);
     assert.deepEqual(readConfig(), { ...oldConfig, releaseVersion: "0.2.0" });
@@ -1246,7 +1303,7 @@ test("failed terminal migration requires attention instead of recreating unprove
     approveSyntheticSetup(host);
     await assert.rejects(
       host.runSetup("core-setup", ["setup", "--full"], {}),
-      /synthetic launcher startup failure;.*cannot prove write ownership/,
+      /synthetic launcher startup failure\n.*cannot prove write ownership/,
     );
     assert.equal(startAttempts, 1);
     assert.deepEqual(readConfig(), { ...oldConfig, browserHost: "launcher", releaseVersion: "0.2.0" });

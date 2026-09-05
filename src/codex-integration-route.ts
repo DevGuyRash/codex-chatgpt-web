@@ -1,8 +1,10 @@
 import { existsSync } from "node:fs";
+import { boundCodexRouteSection, inspectCodexConfigSource, setTrackedCodexScalar } from "./codex-config-source";
 import { resolve } from "node:path";
 import { isDeepStrictEqual } from "node:util";
 import { inspectInstalledCodexConfig } from "./codex-integration-inspection";
 import { parseTomlValue, removeTomlComments, setTomlScalar } from "./toml-edit";
+import { ROUTES_BEGIN, ROUTES_END } from "./codex-config-markers";
 import {
   CODEX_REALTIME_WEBRTC_CALL_BASE_URL,
   MANAGED_COMMENT,
@@ -185,7 +187,6 @@ export function replacementBaseline(
       : currentText;
     const baseline = restoreOwnedManagedFeatures(withoutHook, journal);
     const document = parseDocument(baseline);
-    removeManagedComment(document);
     for (const [key, installedValue, previous] of [
       ["openai_base_url", journal.installed.openai_base_url, journal.previous.openai_base_url],
       [
@@ -252,16 +253,16 @@ export function installRoute(
   const previousRealtimeWebrtcCallBaseUrl = capture("experimental_realtime_webrtc_call_base_url");
   if (previous.openai_base_url.present && !replaceExistingRoute) throw new Error("Codex already configures model routing. Rerun with --replace-codex-route to replace it reversibly. Check whether another Codex extension or wrapper (for example, OpenCodex or Headroom) is replacing the bridge port.");
   if (previousRealtimeWebrtcCallBaseUrl.present && previousRealtimeWebrtcCallBaseUrl.value !== CODEX_REALTIME_WEBRTC_CALL_BASE_URL && !replaceExistingRealtimeRoute) throw new Error("Codex already configures its realtime WebRTC call route. Rerun with --replace-codex-route to replace it reversibly.");
-  let result = setTomlScalar(text, ["openai_base_url"], installedUrl);
-  result = setTomlScalar(result, ["experimental_realtime_webrtc_call_base_url"], CODEX_REALTIME_WEBRTC_CALL_BASE_URL);
-  result = removeTomlComments(result, [MANAGED_COMMENT, MANAGED_ROUTE_COMMENT]);
+  let result = setTrackedCodexScalar(text, ["openai_base_url"], installedUrl);
+  result = setTrackedCodexScalar(result, ["experimental_realtime_webrtc_call_base_url"], CODEX_REALTIME_WEBRTC_CALL_BASE_URL);
   // Retain the historical layout only as a rendering optimization, not a parser
   // or authority decision. Quoted keys and inline syntax use the semantic result.
   try {
-    const legacy = installLegacyRouteLayout(text, installedUrl);
-    if (isDeepStrictEqual(parsedConfig(legacy), parsedConfig(result))) result = legacy;
+    const legacy = installLegacyRouteLayout(result, installedUrl);
+    const tracked = inspectCodexConfigSource(text).sections.some(section => section.kind === "routes" || section.kind === "legacy-routes");
+    if (isDeepStrictEqual(parsedConfig(legacy), parsedConfig(result)) && !tracked) result = legacy;
   } catch { /* The verified syntax-aware edit is sufficient. */ }
-  return { text: result, previous, previousRealtimeWebrtcCallBaseUrl };
+  return { text: boundCodexRouteSection(result), previous, previousRealtimeWebrtcCallBaseUrl };
 }
 
 function installLegacyRouteLayout(
@@ -441,7 +442,7 @@ function verifySemanticRestoredRoute(text: string, journal: ModernRouteJournal):
 function restoreSemanticRoute(text: string, journal: ModernRouteJournal): string {
   let result = journal.version === 10 ? restoreCodexInterruptHook(text, journal.interruptHook) : text;
   for (const [path, value] of restoredValues(result, journal)) result = setTomlScalar(result, path, value);
-  result = removeTomlComments(result, [MANAGED_COMMENT, MANAGED_ROUTE_COMMENT]);
+  result = removeTomlComments(result, [MANAGED_COMMENT, MANAGED_ROUTE_COMMENT, ROUTES_BEGIN, ROUTES_END]);
   verifySemanticRestoredRoute(result, journal);
   return result;
 }

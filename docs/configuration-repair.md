@@ -1,4 +1,18 @@
-# Confirmed configuration repair
+# Reviewed setup and configuration repair
+
+Setup and repair share source inspection, prepared Codex changes, approval fingerprints, and the launcher's comparison view. Production setup—including setup-backed upgrades and settings changes—shows a modal before it stops the runtime or applies configuration. The view includes current/proposed settings, source line numbers, expandable exact Codex file changes, and the runtime/browser/tunnel actions that setup will perform. Credential values are not included in the runtime summary. Browser-derived capabilities and generated runtime credentials are resolved during the listed setup actions, not presented as predetermined file bytes.
+
+Changing the protocol requests a new preview and clears approval. Cancel, Escape, an expired preview, or changed inputs does not authorize setup. Setup rechecks the approval before stopping its current runtime owner and again before beginning its changes. The setup CLI prints the same structured preview and asks interactive users to approve; noninteractive callers must pass the ID from `setup --preview-json` using `--approve-configuration ID` with the same setup options. The unofficial-automation acknowledgement is separate; include `--acknowledge-unofficial` when previewing a new installation. The isolated DEV harness does not modify normal Codex configuration and does not use this production review.
+
+## Tracked source sections
+
+Source inspection distinguishes active, commented-out (inactive), and absent assignments using TOML parsing and actual table scope. Fake assignments or markers inside strings are not configuration. A unique commented scalar inside a tracked section can be reactivated by an approved edit; competing commented candidates require review. Unrelated comments are not ownership evidence.
+
+New and updated route sections use `# BEGIN codex-chatgpt-web: routes` and `# END codex-chatgpt-web: routes`. A single historical route header is supported for migration. Duplicate/nested sections, unmatched or missing end markers, root routes assigned outside a bounded section, duplicate TOML definitions, and route markers inside or across a table boundary prevent automatic changes—even when route replacement was requested. The preview identifies the affected lines. Resolve the ambiguous source, then request another preview; the application never guesses which duplicate block owns the configuration or treats the rest of a file as owned because an end marker is absent.
+
+Markers organize source; the installation journal remains the ownership authority. Creating a bounded section moves only the two root route assignments, not arbitrary content between markers. The Interrupt hook retains its separate bounded section. Disconnect, reconnect, repair, and setup share the same route layout support.
+
+## Repair
 
 In the production launcher's Settings, **Repair Codex connection** inspects configuration without changing it. Choose a subagent protocol explicitly, preview the current and proposed values, and approve that preview before applying it. Changing the protocol or encountering an apply failure discards the approval. DEV profiles do not own the normal Codex integration and cannot repair it.
 
@@ -32,3 +46,5 @@ Compatibility V1 setup and approved repair share feature acquisition: ordinary t
 During an interrupted additive journal upgrade, a matching newer recovery record can supersede an older primary record only when projecting it onto the older version preserves every existing ownership field and baseline. Different baselines remain ambiguous and are not automatically adopted.
 
 Preview values are shown only in the requested interface. Raw repair output and approval arguments are excluded from launcher activity logs. Treat a terminal preview as private configuration data; do not paste it into public issue reports without review.
+
+The launcher does not restore a pre-setup snapshot over files that changed during setup: it cannot prove whether those bytes belong to setup or another writer. The CLI's guarded configuration transaction owns its own compensation. If changed files remain after setup failure, the launcher reports that they need review and does not restart a previous runtime using an unproved configuration.

@@ -1,5 +1,6 @@
 import { existsSync, mkdirSync, readFileSync } from "node:fs";
 import { dirname } from "node:path";
+import { inspectCodexConfigSource } from "./codex-config-source";
 import type { AppConfig } from "./config";
 import { getConfigPath, loadConfig, preserveUtf8Bom, stripUtf8Bom } from "./config";
 import { installCodexInterruptHook, installCodexInterruptHookCommand } from "./codex-interrupt-hook";
@@ -119,7 +120,7 @@ export type {
 export function readCodexSubagentProtocol(
   fallback: AppConfig["subagentProtocol"] = "compatibility-v1",
 ): AppConfig["subagentProtocol"] {
-  const journal = readJournal();
+  const journal = readJournal({ repair: false });
   return journal?.version === 8 || journal?.version === 9 || journal?.version === 10
     ? journal.installed.subagent_protocol
     : fallback;
@@ -161,22 +162,29 @@ export function installCodexIntegration(
 ): CodexIntegrationJournal {
   mkdirSync(dirname(getCodexConfigPath()), { recursive: true, mode: 0o700 });
   const plan = prepareCodexIntegration(config, options);
+  return applyPreparedCodexIntegration(plan);
+}
+
+export function applyPreparedCodexIntegration(plan: IntegrationInstallPlan): CodexIntegrationJournal {
+  mkdirSync(dirname(plan.configWrite.path), { recursive: true, mode: 0o700 });
   writeIntegrationState(plan.journal, plan.configWrite, plan.removals, { expected: plan.expected });
   return plan.journal;
 }
 
-interface IntegrationInstallPlan {
+export interface IntegrationInstallPlan {
   journal: CodexIntegrationJournal;
   configWrite: { path: string; data: string };
   removals: string[];
   expected: FileSnapshot[];
 }
 
-function prepareCodexIntegration(config: AppConfig, options: InstallCodexIntegrationOptions = {}): IntegrationInstallPlan {
+export function prepareCodexIntegration(config: AppConfig, options: InstallCodexIntegrationOptions = {}): IntegrationInstallPlan {
   const configPath = getCodexConfigPath();
   const expected = [configPath, getCodexJournalPath(), getCodexJournalRecoveryPath(), getCodexModelsCachePath()].map(snapshotFile);
   const configExists = expected[0]!.exists;
   const currentText = expected[0]!.data?.toString("utf8") ?? "";
+  const sourceConflicts = inspectCodexConfigSource(currentText).conflicts;
+  if (sourceConflicts.length) throw new Error(sourceConflicts.map(conflict => conflict.message).join("; "));
   const existing = readJournal({ repair: false });
   const installedUrl = routeUrl(config);
   if (existing) assertJournalTargetsConfig(existing, configPath);

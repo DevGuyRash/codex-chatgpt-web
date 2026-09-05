@@ -26,6 +26,31 @@ async function runCli(args: string[], env: Record<string, string | undefined>) {
   return { exitCode, stdout, stderr };
 }
 
+test("setup CLI preview is read-only, noninteractive apply requires review, and stale approval cannot mutate files", async () => {
+  const root = mkdtempSync(join(tmpdir(), "codex-setup-cli-review-"));
+  const codexHome = join(root, "codex");
+  const appHome = join(root, "app");
+  const env = { ...process.env, CODEX_HOME: codexHome, CODEX_CHATGPT_WEB_HOME: appHome };
+  const args = ["setup", "--browser-only", "--browser-host-descriptor", join(root, "descriptor.json"), "--subagent-protocol", "native", "--acknowledge-unofficial"];
+  try {
+    const result = await runCli([...args, "--preview-json"], env);
+    expect(result.exitCode).toBe(0);
+    const preview = JSON.parse(result.stdout);
+    expect(preview.status).toBe("ready");
+    expect(existsSync(appHome)).toBe(false);
+    expect(existsSync(codexHome)).toBe(false);
+    expect((await runCli(args, env)).stderr).toContain("--approve-configuration");
+    expect(existsSync(appHome)).toBe(false);
+    mkdirSync(codexHome);
+    writeFileSync(join(codexHome, "config.toml"), "# independent edit\n");
+    const stale = await runCli([...args, "--approve-configuration", preview.approvalId], env);
+    expect(stale.exitCode).toBe(1);
+    expect(stale.stderr).toContain("changed since preview");
+    expect(readFileSync(join(codexHome, "config.toml"), "utf8")).toBe("# independent edit\n");
+    expect(existsSync(appHome)).toBe(false);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
 test("setup validates the port before performing runtime work", async () => {
   const root = mkdtempSync(join(tmpdir(), "codex-chatgpt-web-cli-"));
   try {

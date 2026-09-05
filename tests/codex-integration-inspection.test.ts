@@ -8,6 +8,25 @@ import { getCodexJournalPath, getCodexJournalRecoveryPath, installCodexIntegrati
 const cleanups: Array<() => void> = [];
 afterEach(() => { for (const cleanup of cleanups.splice(0).reverse()) cleanup(); });
 
+test("inspection distinguishes a disabled route from an absent assignment", () => {
+  const { configPath, text } = fixture();
+  const edited = text.replace(/^openai_base_url\s*=/m, "# openai_base_url =");
+  writeFileSync(configPath, edited);
+  expect(inspectCodexIntegration({ readOnly: true }).conflicts).toMatchObject([
+    { path: "openai_base_url", category: "commented_out", current: null },
+  ]);
+  expect(readFileSync(configPath, "utf8")).toBe(edited);
+});
+
+test("inspection does not mistake a multiline string for a disabled route", () => {
+  const { configPath, text } = fixture();
+  const edited = 'example = """\n# openai_base_url = "example"\n"""\n' + text.replace(/^openai_base_url\s*=.*\n/m, "");
+  writeFileSync(configPath, edited);
+  expect(inspectCodexIntegration({ readOnly: true }).conflicts).toMatchObject([
+    { path: "openai_base_url", category: "missing" },
+  ]);
+});
+
 function fixture() {
   const root = mkdtempSync(join(tmpdir(), "cgw-inspection-"));
   for (const [key, value] of Object.entries({ CODEX_HOME: join(root, "codex"), CODEX_CHATGPT_WEB_HOME: join(root, "app") })) {
@@ -25,7 +44,7 @@ function fixture() {
 
 test("read-only inspection accepts equivalent formatting without restoring managed comments", () => {
   const { configPath, text } = fixture();
-  const formatted = text.replaceAll(" = ", "          = ").replace(/# Managed by[^\r\n]*/g, "");
+  const formatted = text.replaceAll(" = ", "          = ").replace(/# (?:Managed by[^\r\n]*|End codex-chatgpt-web interrupt lifecycle hook\.)/g, "");
   writeFileSync(configPath, formatted);
   const result = inspectCodexIntegration({ readOnly: true });
   expect(result.errors).toEqual([]);

@@ -3,7 +3,6 @@ const fs = require("node:fs");
 const os = require("node:os");
 const { randomBytes } = require("node:crypto");
 const { spawn } = require("node:child_process");
-const { writePrivateFileAtomic } = require("./atomic-file.cjs");
 const {
   connectorNameForDevSetup,
   connectorNameForSetup,
@@ -14,6 +13,7 @@ const {
 } = require("./connector-identity.cjs");
 const { embeddedRuntimeInvocation, runtimeInvocation } = require("./runtime-command.cjs");
 const { redactText } = require("./logging.cjs");
+const { parseConfigurationPreview } = require("./configuration-review.cjs");
 const { DETACH_OWNED_CHILD, terminateOwnedProcessTree } = require("./process-tree.cjs");
 
 const MAX_CAPTURE_BYTES = 8 * 1024 * 1024;
@@ -94,15 +94,6 @@ function captureRegularFile(filePath) {
   };
 }
 
-function restoreRegularFile(snapshot, platform = process.platform) {
-  if (!snapshot.exists) {
-    fs.rmSync(snapshot.path, { force: true });
-    return;
-  }
-  writePrivateFileAtomic(snapshot.path, snapshot.data);
-  if (platform !== "win32") fs.chmodSync(snapshot.path, snapshot.mode);
-}
-
 function regularFileChanged(snapshot, platform = process.platform) {
   let stat;
   try {
@@ -155,6 +146,7 @@ class RuntimeHost {
     publishOperation,
     supervisor,
     getBrowserInteractionMode = () => "automatic",
+    reviewConfiguration,
   }) {
     this.app = app;
     this.logger = logger;
@@ -182,6 +174,7 @@ class RuntimeHost {
     this.publishOperation = publishOperation;
     this.supervisor = supervisor;
     this.getBrowserInteractionMode = getBrowserInteractionMode;
+    this.reviewConfiguration = reviewConfiguration;
     this.active = null;
     this.activeChild = null;
     this.lifecycleOperation = null;
@@ -492,16 +485,11 @@ class RuntimeHost {
 
   restoreSetupCheckpoint(checkpoint) {
     if (!checkpoint) return;
-    const failures = [];
-    for (const snapshot of [...checkpoint].reverse()) {
-      try {
-        restoreRegularFile(snapshot, this.platform);
-      } catch (error) {
-        failures.push(`${snapshot.path}: ${error instanceof Error ? error.message : String(error)}`);
-      }
-    }
-    if (failures.length > 0) {
-      throw new Error(`Setup checkpoint restoration failed: ${failures.join("; ")}`);
+    // A before-image is not evidence that this operation owns the current bytes.
+    // CLI transactions compensate their proven writes themselves; cross-process
+    // partial setup requires inspection, not blind restoration of a cold snapshot.
+    if (this.setupCheckpointChanged(checkpoint)) {
+      throw new Error("Setup files changed; automatic checkpoint restoration cannot prove write ownership. Review the current configuration before restarting the runtime");
     }
   }
 
@@ -826,24 +814,7 @@ class RuntimeHost {
       embedded: true, privateOutput: true, timeoutMs: 15_000,
       message: "Inspecting configuration repair", successMessage: "Repair preview ready",
     });
-    let preview;
-    try { preview = JSON.parse(result.stdout); } catch { throw new Error("The runtime returned an unreadable repair preview"); }
-    const scalar = value => value === null || typeof value === "boolean" || typeof value === "string" || (typeof value === "number" && Number.isFinite(value));
-    const text = value => typeof value === "string" && value.length <= 4096;
-    if (!preview || preview.version !== 1 || preview.protocol !== protocol
-      || !["ready", "blocked"].includes(preview.status)
-      || typeof preview.approvalId !== "string"
-      || (preview.status === "ready" && !/^[a-f0-9]{64}$/.test(preview.approvalId))
-      || !Array.isArray(preview.changes) || preview.changes.length > 32
-      || !preview.changes.every(change => change && text(change.path) && scalar(change.current) && scalar(change.proposed))
-      || !Array.isArray(preview.conflicts) || preview.conflicts.length > 32
-      || !preview.conflicts.every(conflict => conflict && text(conflict.path) && text(conflict.message)
-        && ["missing", "value_changed", "hook_changed", "invalid_config", "ownership_conflict"].includes(conflict.category)
-        && (conflict.current === undefined || scalar(conflict.current)) && (conflict.expected === undefined || scalar(conflict.expected)))
-      || typeof preview.codexRestartRequired !== "boolean" || typeof preview.launcherRestartRequired !== "boolean") {
-      throw new Error("The runtime repair preview is unsupported or malformed; refresh the local runtime build");
-    }
-    return preview;
+    return parseConfigurationPreview(result.stdout, protocol);
   }
 
   async applyIntegrationRepair(protocol, approvalId) {
@@ -1386,25 +1357,45 @@ class RuntimeHost {
 
   async runSetup(name, args, options) {
     if (this.currentOperation()) throw new Error(`Another launcher operation is active: ${this.currentOperation()}`);
-    const previousRuntime = this.runtimeConfigSnapshot();
-    const checkpoint = this.captureSetupCheckpoint(previousRuntime);
+    let previousRuntime = this.runtimeConfigSnapshot();
+    let checkpoint = this.captureSetupCheckpoint(previousRuntime);
     this.lifecycleOperation = name;
     let setupCommandStarted = false;
     let runtimeTransitionStarted = false;
     try {
       if (this.launcherProfile === "production") {
+        if (!this.reviewConfiguration) throw new Error("Setup requires a configuration preview in the launcher");
+        for (;;) {
+          const result = await this.run(name, [...args, "--preview-json"], {
+            ...options, privateOutput: true, message: "Preparing configuration changes for review",
+            successMessage: "Configuration preview ready", timeoutMs: 15_000,
+          });
+          const preview = parseConfigurationPreview(result.stdout);
+          const approved = await this.reviewConfiguration(preview);
+          if (approved && typeof approved === "object" && ["native", "compatibility-v1"].includes(approved.protocol)) {
+            const index = args.indexOf("--subagent-protocol");
+            args = [...(index < 0 ? args : [...args.slice(0, index), ...args.slice(index + 2)]), "--subagent-protocol", approved.protocol];
+            continue;
+          }
+          if (approved !== preview.approvalId || preview.status !== "ready") throw new Error("Exact setup preview approval is required");
+          args = [...args, "--approve-configuration", approved];
+          break;
+        }
         await this.run(name, [...args, "--preflight-only"], {
           ...options,
+          privateOutput: true,
           message: "Validating Codex configuration before changing the runtime",
           successMessage: "Codex configuration is ready for setup",
           timeoutMs: Math.min(options.timeoutMs || 15_000, 15_000),
         });
       }
+      previousRuntime = this.runtimeConfigSnapshot();
+      checkpoint = this.captureSetupCheckpoint(previousRuntime);
       runtimeTransitionStarted = true;
       if (previousRuntime.owner === "external") this.supervisor.prepareExternalMigration();
       else await this.supervisor.stopForSetup();
       setupCommandStarted = true;
-      const result = await this.run(name, args, options);
+      const result = await this.run(name, args, { ...options, privateOutput: this.launcherProfile === "production" });
       const runtime = await this.supervisor.startIfConfigured();
       if (runtime.status !== "ready") {
         throw new Error(`Setup completed, but the launcher-owned runtime is ${runtime.status}: ${runtime.detail || "not ready"}`);
@@ -1441,7 +1432,7 @@ class RuntimeHost {
         }
       }
       let recoveryError;
-      if (runtimeTransitionStarted) {
+      if (runtimeTransitionStarted && failures.length === 0) {
         try {
           await this.restorePreviousRuntime(previousRuntime, name, {
             repairExternal: previousRuntime.owner === "external" && checkpointChanged,
@@ -1461,7 +1452,9 @@ class RuntimeHost {
         ...failures,
       ].join("; ");
       this.publishOperation?.({ name, status: "failed", message });
-      throw new Error(message);
+      const failure = new Error(message);
+      if (!runtimeTransitionStarted) failure.code = "CONFIGURATION_REVIEW_REQUIRED";
+      throw failure;
     } finally {
       this.lifecycleOperation = null;
     }

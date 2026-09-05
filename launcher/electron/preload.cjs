@@ -34,6 +34,7 @@ contextBridge.exposeInMainWorld("codexWebLauncher", {
   smokeTest: () => ipcRenderer.invoke("launcher:browser-smoke"),
   verifyMcp: () => ipcRenderer.invoke("launcher:mcp-verify"),
   doctor: () => ipcRenderer.invoke("launcher:doctor"),
+  decideConfiguration: (approvalId, approved) => ipcRenderer.invoke("launcher:configuration-decision", approvalId, approved),
   previewIntegrationRepair: (protocol) => ipcRenderer.invoke("launcher:repair-preview", protocol),
   applyIntegrationRepair: (protocol, approvalId) => ipcRenderer.invoke("launcher:repair-apply", protocol, approvalId),
   cancelTurns: () => ipcRenderer.invoke("launcher:cancel-turns"),
@@ -56,6 +57,7 @@ contextBridge.exposeInMainWorld("codexWebLauncher", {
   onStateChanged: (listener) => subscription("launcher:state-changed", listener),
   onBrowserState: (listener) => subscription("launcher:browser-state", listener),
   onOperation: (listener) => subscription("launcher:operation", listener),
+  onConfigurationPreview: (listener) => subscription("launcher:configuration-preview", listener),
   onLog: (listener) => subscription("launcher:log", listener),
   onUpdateState: (listener) => subscription("launcher:update-state", listener),
 });

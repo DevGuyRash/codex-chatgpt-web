@@ -1,11 +1,11 @@
-import { useId, useState } from "react";
+import { useEffect, useId, useRef, useState } from "react";
 import type { CodexRepairPreview, Language, LauncherApi, LauncherState, SubagentProtocol } from "./types";
 
 const labels = {
   en: {
     title: "Repair Codex connection", body: "Review configuration differences before changing anything. Active work must finish before a repair can run.",
     protocol: "Subagent protocol", choose: "Choose a protocol…", compatibility: "Compatibility V1 (Native V2 disabled)", native: "Native (preserve newer feature choices)",
-    preview: "Preview changes", setting: "Setting", current: "Current", expected: "Installed expectation", proposed: "Proposed", absent: "Not set", unchanged: "Unchanged",
+    preview: "Preview changes", setting: "Setting", current: "Current", expected: "Installed expectation", proposed: "Proposed", absent: "Not set", unchanged: "Unchanged", commented: "Commented out (inactive)",
     blocked: "Needs attention: ownership could not be verified. Resolve the conflicts below, then request a fresh preview.",
     approve: "I approve these configuration changes and understand that Codex and the launcher will need restarting.",
     apply: "Apply approved repair", cancel: "Discard preview", working: "Working…", done: "Repair applied. Restart Codex and the launcher to use the repaired connection.",
@@ -13,7 +13,7 @@ const labels = {
   "zh-CN": {
     title: "修复 Codex 连接", body: "修改前先查看配置差异。修复前必须等待当前任务结束。",
     protocol: "子代理协议", choose: "选择协议…", compatibility: "兼容 V1（禁用 Native V2）", native: "Native（保留较新的功能选择）",
-    preview: "预览更改", setting: "设置", current: "当前值", expected: "安装时的预期值", proposed: "建议值", absent: "未设置", unchanged: "不变",
+    preview: "预览更改", setting: "设置", current: "当前值", expected: "安装时的预期值", proposed: "建议值", absent: "未设置", unchanged: "不变", commented: "已注释（未启用）",
     blocked: "需要处理：无法验证配置归属。请解决以下冲突，然后重新预览。",
     approve: "我同意这些配置更改，并了解需要重启 Codex 和启动器。",
     apply: "应用已批准的修复", cancel: "放弃预览", working: "处理中…", done: "修复已应用。请重启 Codex 和启动器以使用修复后的连接。",
@@ -21,7 +21,7 @@ const labels = {
   ja: {
     title: "Codex 接続を修復", body: "変更前に設定の差分を確認します。修復するには実行中のタスクが完了する必要があります。",
     protocol: "サブエージェントのプロトコル", choose: "プロトコルを選択…", compatibility: "互換 V1（Native V2 を無効化）", native: "Native（新しい機能の選択を保持）",
-    preview: "変更をプレビュー", setting: "設定", current: "現在の値", expected: "インストール時の想定値", proposed: "変更後", absent: "未設定", unchanged: "変更なし",
+    preview: "変更をプレビュー", setting: "設定", current: "現在の値", expected: "インストール時の想定値", proposed: "変更後", absent: "未設定", unchanged: "変更なし", commented: "コメントアウト（無効）",
     blocked: "要確認：設定の所有権を確認できませんでした。以下の競合を解決してから、再度プレビューしてください。",
     approve: "これらの設定変更を承認します。Codex とランチャーの再起動が必要であることを理解しています。",
     apply: "承認した修復を適用", cancel: "プレビューを破棄", working: "処理中…", done: "修復を適用しました。Codex とランチャーを再起動してください。",
@@ -68,8 +68,6 @@ export function ConfigurationRepair({ api, language, disabled, onBusyChange, onR
       onBusyChange(false);
     }
   };
-  const paths = [...new Set([...(preview?.changes.map((change) => change.path) ?? []), ...(preview?.conflicts.map((conflict) => conflict.path) ?? [])])];
-  const value = (item: string | number | boolean | null | undefined) => item == null ? copy.absent : String(item);
   return <section className="configuration-repair" aria-labelledby={`${id}-title`} aria-busy={busy}>
     <h3 id={`${id}-title`}>{copy.title}</h3>
     <p>{copy.body}</p>
@@ -85,16 +83,7 @@ export function ConfigurationRepair({ api, language, disabled, onBusyChange, onR
     <button type="button" className="button-secondary" disabled={!protocol || busy || disabled} onClick={() => void perform(false)}>{busy ? copy.working : copy.preview}</button>
     {preview ? <>
       {preview.status === "blocked" ? <p role="status">{copy.blocked}</p> : null}
-      <div className="repair-comparison" tabIndex={0} role="region" aria-label={copy.preview}>
-        <table><thead><tr><th>{copy.setting}</th><th>{copy.current}</th><th>{copy.expected}</th><th>{copy.proposed}</th></tr></thead>
-          <tbody>{paths.map((path) => {
-            const change = preview.changes.find((item) => item.path === path);
-            const conflict = preview.conflicts.find((item) => item.path === path);
-            return <tr key={path}><th scope="row"><code>{path}</code></th><td>{value(change ? change.current : conflict?.current)}</td><td>{conflict?.expected === undefined ? "—" : value(conflict.expected)}</td><td>{change ? value(change.proposed) : copy.unchanged}</td></tr>;
-          })}</tbody>
-        </table>
-      </div>
-      {preview.conflicts.length ? <ul>{preview.conflicts.map((conflict, index) => <li key={`${conflict.path}-${index}`}><code>{conflict.path}</code>: {conflict.message}</li>)}</ul> : null}
+      <ConfigurationChanges preview={preview} language={language} />
       {preview.status === "ready" ? <label className="repair-approval"><input type="checkbox" checked={approved} disabled={busy || disabled} onChange={(event) => setApproved(event.target.checked)} /><span>{copy.approve}</span></label> : null}
       <div className="repair-actions">
         <button type="button" className="button-primary" disabled={preview.status !== "ready" || !approved || busy || disabled} onClick={() => void perform(true)}>{copy.apply}</button>
@@ -103,4 +92,75 @@ export function ConfigurationRepair({ api, language, disabled, onBusyChange, onR
     </> : null}
     {done ? <p role="status">{copy.done}</p> : null}
   </section>;
+}
+
+export function ConfigurationChanges({ preview, language }: { preview: CodexRepairPreview; language: Language }) {
+  const copy = labels[language];
+  const paths = [...new Set([...preview.changes.map(change => change.path), ...preview.conflicts.map(conflict => conflict.path)])];
+  const value = (item: string | number | boolean | null | undefined) => item == null ? copy.absent : String(item);
+  return <>
+    <div className="repair-comparison" tabIndex={0} role="region" aria-label={copy.preview}>
+      <table><thead><tr><th>{copy.setting}</th><th>{copy.current}</th><th>{copy.expected}</th><th>{copy.proposed}</th></tr></thead>
+        <tbody>{paths.map(path => {
+          const change = preview.changes.find(item => item.path === path);
+          const conflict = preview.conflicts.find(item => item.path === path);
+          return <tr key={path}><th scope="row"><code>{path}</code></th>
+            <td>{conflict?.category === "commented_out" || change?.currentState === "commented_out" ? copy.commented : value(change ? change.current : conflict?.current)}
+              {change?.currentLines?.length ? <small className="configuration-source-lines">{language === "en" ? "Line" : language === "ja" ? "行" : "行"} {change.currentLines.join(", ")}</small> : null}</td>
+            <td>{conflict?.expected === undefined ? "—" : value(conflict.expected)}</td><td>{change ? value(change.proposed) : copy.unchanged}</td></tr>;
+        })}</tbody>
+      </table>
+    </div>
+    {preview.conflicts.length ? <ul>{preview.conflicts.map((conflict, index) => <li key={`${conflict.path}-${index}`}><code>{conflict.path}</code>: {conflict.message}</li>)}</ul> : null}
+    {preview.effects?.length ? <ul>{preview.effects.map(effect => <li key={effect}>{effect}</li>)}</ul> : null}
+    {preview.textChanges?.map(change => <details className="configuration-text-change" key={change.path}>
+      <summary>{language === "en" ? "Exact file changes" : language === "ja" ? "ファイルの変更内容" : "文件的具体更改"}: <code>{change.path}</code> ({change.startLine})</summary>
+      <div><section><h4>{copy.current}</h4><pre>{change.before || copy.absent}</pre></section><section><h4>{copy.proposed}</h4><pre>{change.after || copy.absent}</pre></section></div>
+    </details>)}
+  </>;
+}
+
+const setupLabels = {
+  en: { title: "Review setup changes", body: "These are the proposed Codex configuration changes. Setup has not stopped the runtime or applied these changes yet.", approve: "I approve these changes and the setup actions listed above.", apply: "Approve and continue setup", cancel: "Cancel setup" },
+  "zh-CN": { title: "查看设置更改", body: "以下是 Codex 配置的建议更改。设置尚未停止运行时或应用这些更改。", approve: "我同意这些更改及上述设置操作。", apply: "批准并继续设置", cancel: "取消设置" },
+  ja: { title: "セットアップの変更を確認", body: "Codex 設定の変更案です。ランタイムの停止や設定の適用はまだ行われていません。", approve: "これらの変更と上記のセットアップ操作を承認します。", apply: "承認してセットアップを続行", cancel: "セットアップをキャンセル" },
+};
+
+export function SetupConfigurationReview({ preview, language, decide }: {
+  preview: CodexRepairPreview; language: Language; decide: (id: string, decision: boolean | SubagentProtocol) => Promise<void>;
+}) {
+  const dialog = useRef<HTMLDialogElement>(null);
+  const id = useId();
+  const [approved, setApproved] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const copy = setupLabels[language];
+  useEffect(() => { const element = dialog.current!; element.showModal(); return () => element.close(); }, []);
+  const submit = async (accept: boolean | SubagentProtocol) => {
+    if (busy || (accept === true && (!approved || preview.status !== "ready"))) return;
+    setBusy(true);
+    try { await decide(preview.approvalId, accept); }
+    catch (cause) { setApproved(false); setError(cause instanceof Error ? cause.message : String(cause)); }
+    finally { setBusy(false); }
+  };
+  return <dialog ref={dialog} className="configuration-review-dialog" aria-labelledby={`${id}-title`} onCancel={event => { event.preventDefault(); void submit(false); }}>
+    <section className="configuration-repair">
+      <h2 id={`${id}-title`}>{copy.title}</h2><p>{copy.body}</p>
+      <fieldset className="repair-protocol" disabled={busy}>
+        <legend>{labels[language].protocol}</legend>
+        {(["compatibility-v1", "native"] as const).map(choice => <label key={choice}>
+          <input type="radio" name={`${id}-protocol`} checked={preview.protocol === choice} onChange={() => { setApproved(false); void submit(choice); }} />
+          <span>{choice === "native" ? labels[language].native : labels[language].compatibility}</span>
+        </label>)}
+      </fieldset>
+      {preview.status === "blocked" ? <p role="status">{labels[language].blocked}</p> : null}
+      <ConfigurationChanges preview={preview} language={language} />
+      {preview.status === "ready" ? <label className="repair-approval"><input type="checkbox" checked={approved} disabled={busy} onChange={event => setApproved(event.target.checked)} /><span>{copy.approve}</span></label> : null}
+      {error ? <p role="alert">{error}</p> : null}
+      <div className="repair-actions">
+        <button className="button-primary" disabled={!approved || busy || preview.status !== "ready"} onClick={() => void submit(true)}>{copy.apply}</button>
+        <button className="button-secondary" disabled={busy} onClick={() => void submit(false)}>{copy.cancel}</button>
+      </div>
+    </section>
+  </dialog>;
 }

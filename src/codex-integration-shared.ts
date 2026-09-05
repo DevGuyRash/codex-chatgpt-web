@@ -5,9 +5,7 @@ import { dirname, join, resolve } from "node:path";
 import type { AppConfig, SubagentProtocol } from "./config";
 import { atomicWriteFile, expandUserPath, getConfigDir } from "./config";
 
-export const MANAGED_COMMENT = "# Managed by codex-chatgpt-web; `codex-chatgpt-web uninstall` restores prior values.";
-export const MANAGED_ROUTE_COMMENT =
-  "# Managed by codex-chatgpt-web: Responses use the local bridge; Voice stays on ChatGPT.";
+export { MANAGED_COMMENT, MANAGED_ROUTE_COMMENT } from "./codex-config-markers";
 export const CODEX_REALTIME_WEBRTC_CALL_BASE_URL = "https://chatgpt.com/backend-api/codex";
 export const MANAGED_REMOTE_COMPACTION_LINE =
   "remote_compaction_v2 = false # Managed by codex-chatgpt-web: bounds retained Web image history.";

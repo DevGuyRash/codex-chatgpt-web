@@ -6,6 +6,39 @@ const path = require("node:path");
 const { CURRENT_CONNECTOR_NAME, DEV_CONNECTOR_NAME } = require("../electron/connector-identity.cjs");
 const { RuntimeHost } = require("../electron/runtime.cjs");
 
+// Lifecycle fixtures substitute the user's explicit review decision and CLI preview;
+// separate tests exercise cancellation, stale approvals, and the real IPC boundary.
+function approveSyntheticSetup(host) {
+  const approvalId = "a".repeat(64);
+  const run = host.run;
+  host.reviewConfiguration = async preview => preview.approvalId;
+  host.run = (name, args, options) => {
+    if (args.includes("--preview-json")) return Promise.resolve({ stdout: JSON.stringify({ version: 1, operation: "setup", status: "ready", protocol: "native", approvalId, changes: [], conflicts: [], codexRestartRequired: true, launcherRestartRequired: false }) });
+    if (args[0] !== "setup") return run(name, args, options);
+    const index = args.indexOf("--approve-configuration");
+    assert.notEqual(index, -1);
+    assert.equal(args[index + 1], approvalId);
+    return run(name, [...args.slice(0, index), ...args.slice(index + 2)], options);
+  };
+}
+
+test("production setup cancellation at preview leaves the runtime and configuration untouched", async () => {
+  const effects = [];
+  const host = new RuntimeHost({
+    app: { getPath: () => path.join(os.tmpdir(), "codex-web-gpt-preview-test") }, logger: { info() {}, warn() {}, error() {} }, sourceRoot: "/source",
+    browserDescriptorPath: "/runtime/launcher-browser.json",
+    reviewConfiguration: async () => { throw new Error("Setup preview cancelled"); },
+    supervisor: { readConfig: () => null, stopForSetup: async () => { effects.push("stop"); }, startIfConfigured: async () => ({ status: "ready" }) },
+  });
+  host.captureSetupCheckpoint = () => null;
+  host.run = async (_name, args) => {
+    if (!args.includes("--preview-json") && !args.includes("--preflight-only")) effects.push("write");
+    return { stdout: JSON.stringify({ version: 1, operation: "setup", status: "ready", protocol: "native", approvalId: "a".repeat(64), changes: [], conflicts: [], codexRestartRequired: true, launcherRestartRequired: false }) };
+  };
+  await assert.rejects(host.runSetup("setup", ["setup", "--browser-only"], {}), /preview cancelled/);
+  assert.deepEqual(effects, []);
+});
+
 function hostFor(existingConfig, interactionMode = "automatic") {
   const host = new RuntimeHost({
     app: {
@@ -834,7 +867,7 @@ test("launcher-controlled CLI operations use the live descriptor token", () => {
   }
 });
 
-test("failed first-time setup removes its route before restoring the unconfigured state", async () => {
+test("failed first-time setup preserves changed files when checkpoint write ownership is unknown", async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-web-gpt-first-setup-rollback-"));
   const coreHome = path.join(root, "core");
   const codexHome = path.join(root, "codex");
@@ -881,19 +914,20 @@ test("failed first-time setup removes its route before restoring the unconfigure
     throw new Error("synthetic setup failure");
   };
   try {
+    approveSyntheticSetup(host);
     await assert.rejects(
       host.runSetup("core-setup", ["setup", "--browser-only"], {}),
-      /synthetic setup failure; incomplete first-time setup was rolled back/,
+      /synthetic setup failure; first-time setup rollback failed:.*cannot prove write ownership/,
     );
     assert.deepEqual(calls.map((args) => args.join(" ")), [
       "setup --browser-only --preflight-only",
       "setup --browser-only",
     ]);
-    assert.equal(fs.existsSync(configPath), false);
-    assert.equal(fs.existsSync(journalPath), false);
-    assert.equal(fs.existsSync(recoveryJournalPath), false);
-    assert.equal(fs.readFileSync(codexConfigPath, "utf8"), "original codex config\n");
-    assert.equal(fs.readFileSync(codexModelsCachePath, "utf8"), "original codex models cache\n");
+    assert.equal(fs.existsSync(configPath), true);
+    assert.equal(fs.readFileSync(journalPath, "utf8"), "partial integration journal\n");
+    assert.equal(fs.readFileSync(recoveryJournalPath, "utf8"), "partial recovery journal\n");
+    assert.equal(fs.readFileSync(codexConfigPath, "utf8"), "partially changed codex config\n");
+    assert.equal(fs.existsSync(codexModelsCachePath), false);
     assert.equal(stops, 2);
     assert.equal(cleared, 1);
   } finally {
@@ -927,6 +961,7 @@ test("a failed setup preflight leaves the previous runtime running and untouched
     throw new Error("multi_agent_v2 in Codex [features] is unsupported");
   };
   try {
+    approveSyntheticSetup(host);
     await assert.rejects(
       host.runSetup("runtime-upgrade", ["setup", "--browser-only"], {}),
       /multi_agent_v2 in Codex \[features\] is unsupported$/,
@@ -971,6 +1006,7 @@ test("a browser-mode commit failure restores the previous runtime inside setup",
   host.restorePreviousRuntime = async () => { runtimeRestores += 1; };
   host.run = async () => ({ code: 0, stdout: "", stderr: "" });
 
+  approveSyntheticSetup(host);
   await assert.rejects(
     host.runSetup("browser-interaction-mode", ["setup", "--full"], {
       afterRuntimeReady: async () => { throw new Error("surface ownership failed"); },
@@ -1015,6 +1051,7 @@ test("launcher delegates an existing terminal-managed installation to the migrat
     return { code: 0, stdout: "", stderr: "" };
   };
 
+  approveSyntheticSetup(host);
   await host.runSetup("core-setup", ["setup", "--full"], {});
   assert.equal(prepared, 1);
   assert.equal(launcherStops, 0);
@@ -1046,6 +1083,7 @@ test("failed terminal migration verifies the unchanged previous runtime instead 
     return { code: 0, stdout: '{"ok":true}', stderr: "" };
   };
 
+  approveSyntheticSetup(host);
   await assert.rejects(
     host.runSetup("core-setup", ["setup", "--browser-only"], {}),
     /synthetic migration failure$/,
@@ -1057,7 +1095,7 @@ test("failed terminal migration verifies the unchanged previous runtime instead 
   ]);
 });
 
-test("failed launcher update restores every mutable setup file before restarting the previous runtime", async () => {
+test("failed launcher update preserves current files and does not restart with an unproved checkpoint", async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-web-gpt-setup-checkpoint-"));
   const coreHome = path.join(root, "core");
   const codexHome = path.join(root, "codex");
@@ -1127,24 +1165,25 @@ test("failed launcher update restores every mutable setup file before restarting
   };
 
   try {
+    approveSyntheticSetup(host);
     await assert.rejects(
       host.runSetup("core-setup", ["setup", "--full"], {}),
-      /synthetic updated runtime startup failure$/,
+      /synthetic updated runtime startup failure;.*cannot prove write ownership/,
     );
-    assert.equal(startAttempts, 2);
-    assert.deepEqual(readConfig(), oldConfig);
-    assert.equal(fs.readFileSync(journalPath, "utf8"), "old journal\n");
-    assert.equal(fs.readFileSync(recoveryJournalPath, "utf8"), "old recovery journal\n");
-    assert.equal(fs.readFileSync(keyPath, "utf8"), "old key\n");
-    assert.equal(fs.readFileSync(profilePath, "utf8"), "old profile\n");
-    assert.equal(fs.readFileSync(codexConfigPath, "utf8"), "old codex config\n");
-    assert.equal(fs.readFileSync(codexModelsCachePath, "utf8"), "old codex models cache\n");
+    assert.equal(startAttempts, 1);
+    assert.deepEqual(readConfig(), { ...oldConfig, releaseVersion: "0.2.0" });
+    assert.equal(fs.readFileSync(journalPath, "utf8"), "new journal\n");
+    assert.equal(fs.readFileSync(recoveryJournalPath, "utf8"), "new recovery journal\n");
+    assert.equal(fs.readFileSync(keyPath, "utf8"), "new key\n");
+    assert.equal(fs.readFileSync(profilePath, "utf8"), "new profile\n");
+    assert.equal(fs.readFileSync(codexConfigPath, "utf8"), "new codex config\n");
+    assert.equal(fs.existsSync(codexModelsCachePath), false);
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }
 });
 
-test("failed terminal migration restores removed launchd ownership before verifying the old runtime", async () => {
+test("failed terminal migration requires attention instead of recreating unproved launchd ownership", async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-web-gpt-terminal-checkpoint-"));
   const coreHome = path.join(root, "core");
   const codexHome = path.join(root, "codex");
@@ -1204,20 +1243,18 @@ test("failed terminal migration restores removed launchd ownership before verify
   };
 
   try {
+    approveSyntheticSetup(host);
     await assert.rejects(
       host.runSetup("core-setup", ["setup", "--full"], {}),
-      /synthetic launcher startup failure$/,
+      /synthetic launcher startup failure;.*cannot prove write ownership/,
     );
     assert.equal(startAttempts, 1);
-    assert.deepEqual(readConfig(), oldConfig);
-    assert.equal(fs.readFileSync(daemonPlist, "utf8"), "old daemon plist\n");
-    assert.equal(fs.readFileSync(tunnelPlist, "utf8"), "old tunnel plist\n");
+    assert.deepEqual(readConfig(), { ...oldConfig, browserHost: "launcher", releaseVersion: "0.2.0" });
+    assert.equal(fs.existsSync(daemonPlist), false);
+    assert.equal(fs.existsSync(tunnelPlist), false);
     assert.deepEqual(calls, [
       "setup --full --preflight-only",
       "setup --full",
-      "service install",
-      "tunnel start",
-      "doctor --json",
     ]);
   } finally {
     fs.rmSync(root, { recursive: true, force: true });

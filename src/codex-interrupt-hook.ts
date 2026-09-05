@@ -7,10 +7,8 @@ import { getConfigDir } from "./config";
 import { parseTomlValue, removeTomlComments, removeTomlPath } from "./toml-edit";
 import type { InstalledCodexInterruptHook } from "./codex-integration-shared";
 
-export const MANAGED_INTERRUPT_HOOK_START =
-  "# Managed by codex-chatgpt-web: release the exact Responses request when its Codex turn is interrupted.";
-export const MANAGED_INTERRUPT_HOOK_END =
-  "# End codex-chatgpt-web interrupt lifecycle hook.";
+import { MANAGED_INTERRUPT_HOOK_START, MANAGED_INTERRUPT_HOOK_END } from "./codex-config-markers";
+export { MANAGED_INTERRUPT_HOOK_START, MANAGED_INTERRUPT_HOOK_END } from "./codex-config-markers";
 
 function canonicalJson(value: unknown): unknown {
   if (Array.isArray(value)) return value.map(canonicalJson);

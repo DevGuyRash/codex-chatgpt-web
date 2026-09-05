@@ -9,6 +9,7 @@ import {
   defaultConfig,
   getConfigPath,
   loadConfigForSetup,
+  preserveUtf8Bom,
   resolveInteractionConnectorIdentities,
   resolveDevSetupConnectorName,
   saveConfig,
@@ -21,7 +22,8 @@ import {
   storedBrowserLoginCapabilities,
 } from "./browser-login";
 import {
-  installCodexIntegration,
+  applyPreparedCodexIntegration,
+  prepareCodexIntegration,
   preflightCodexIntegration,
   readCodexSubagentProtocol,
 } from "./codex-integration";
@@ -42,6 +44,10 @@ import {
 import { connectTunnel, createTunnelConfig, installRuntimeKey, installRuntimeKeyBytes, installTunnelClient, managedRuntimeKeyPath, stopTunnel, waitForTunnelReady } from "./tunnel";
 import { getTunnelServiceStatus, installTunnelService, restartTunnelService, stopTunnelService, tunnelServiceDefinitionMatches, uninstallTunnelService } from "./tunnel-service";
 import { VERSION } from "./version";
+import { configurationApprovalId, describeCodexConfigurationChanges, describeCodexSourceChange } from "./codex-configuration-plan";
+import { getCodexConfigPath, serializeJournal, snapshotFile, writeFilesWithCompensation } from "./codex-integration-shared";
+import { inspectCodexConfigSource } from "./codex-config-source";
+import type { CodexRepairPreview } from "./contracts/codex-integration";
 
 export interface SetupOptions {
   mode: RuntimeMode;
@@ -62,6 +68,7 @@ export interface SetupOptions {
   tunnelId?: string;
   runtimeKeyFile?: string;
   runtimeKeyValue?: string;
+  configurationApproval?: string;
 }
 
 export interface SetupResult {
@@ -426,6 +433,12 @@ function prepareSetup(options: SetupOptions): PreparedSetup {
 }
 
 export function preflightSetup(options: SetupOptions): void {
+  if (options.configurationApproval) {
+    const preview = previewSetupConfiguration(options);
+    if (preview.status !== "ready" || preview.approvalId !== options.configurationApproval) {
+      throw new Error("Setup configuration changed since preview; review a fresh preview before continuing");
+    }
+  }
   const { existing, config } = prepareSetup(options);
   if (config.mode === "full") {
     const saved = existing?.mode === "full"
@@ -463,11 +476,63 @@ export function preflightSetup(options: SetupOptions): void {
   });
 }
 
+function prepareSetupConfiguration(options: SetupOptions) {
+  const runtimeInput = snapshotFile(getConfigPath());
+  const prepared = prepareSetup(options);
+  const integrationPlan = prepareCodexIntegration(prepared.config, { replaceExistingRoute: options.replaceCodexRoute });
+  const original = integrationPlan.expected.find(file => file.path === getCodexConfigPath())?.data?.toString("utf8") ?? "";
+  const changes = describeCodexConfigurationChanges(original, integrationPlan.configWrite.data);
+  const configKeys = ["mode", "subagentProtocol", "releaseVersion", "host", "port", "browserHost", "browserInteractionMode", "appName", "experimentalBiggerContext", "zeroRiskProEnabled", "autoApproveToolCalls"] as const;
+  for (const key of configKeys) {
+    const current = prepared.existing?.[key] ?? null;
+    const proposed = prepared.config[key];
+    if (current !== proposed) changes.push({ path: `runtime.${key}`, current, proposed });
+  }
+  const { configurationApproval: _approval, ...intent } = options;
+  const preview: CodexRepairPreview = {
+    version: 1, operation: "setup", protocol: prepared.config.subagentProtocol, status: "ready",
+    approvalId: configurationApprovalId({ operation: "setup", options: intent }, [...integrationPlan.expected, runtimeInput], [
+      integrationPlan.configWrite, { path: "installation-journal", data: serializeJournal(integrationPlan.journal) },
+    ], integrationPlan.removals),
+    changes, conflicts: inspectCodexConfigSource(original).conflicts,
+    textChanges: describeCodexSourceChange(getCodexConfigPath(), original, integrationPlan.configWrite.data),
+    codexRestartRequired: true, launcherRestartRequired: false,
+    effects: [
+      "Apply the listed Codex configuration changes and update their installation ownership records; invalidate the cached Codex model catalog.",
+      "Set up or update the runtime, safely stop its existing owner when needed, and start the selected runtime after configuration succeeds.",
+      ...(prepared.config.browserInteractionMode === "automatic" ? ["Inspect the signed-in browser's available models; setup does not submit a model message."] : []),
+      ...(prepared.config.mode === "full" ? ["Configure the selected MCP tunnel using the supplied or saved credentials; credential values are not shown in this preview."] : []),
+    ],
+  };
+  return { ...prepared, integrationPlan, preview, runtimeInput };
+}
+
+export function previewSetupConfiguration(options: SetupOptions): CodexRepairPreview {
+  // Preflight is non-mutating; approval is omitted to avoid recursively validating itself.
+  try {
+    preflightSetup({ ...options, configurationApproval: undefined });
+    return prepareSetupConfiguration(options).preview;
+  } catch (error) {
+    const input = snapshotFile(getCodexConfigPath()).data?.toString("utf8") ?? "";
+    const conflicts = inspectCodexConfigSource(input).conflicts;
+    return { version: 1, operation: "setup", status: "blocked", approvalId: "",
+      protocol: options.subagentProtocol ?? "compatibility-v1", changes: [],
+      conflicts: conflicts.length ? conflicts : [{ path: "setup", category: "ownership_conflict", message: error instanceof Error ? error.message : "Setup inputs need attention" }],
+      codexRestartRequired: true, launcherRestartRequired: false,
+    };
+  }
+}
+
 export async function setup(options: SetupOptions): Promise<SetupResult> {
-  const { existing, config, launcherOwned } = prepareSetup(options);
-  preflightCodexIntegration(config, {
-    replaceExistingRoute: options.replaceCodexRoute,
-  });
+  const prepared = prepareSetupConfiguration(options);
+  if (options.configurationApproval && prepared.preview.approvalId !== options.configurationApproval) {
+    throw new Error("Setup configuration changed since preview; review a fresh preview before continuing");
+  }
+  const { existing, config, launcherOwned, integrationPlan, runtimeInput } = prepared;
+  const saveSetupConfig = () => writeFilesWithCompensation([{
+    path: runtimeInput.path,
+    data: preserveUtf8Bom(`${JSON.stringify(config, null, 2)}\n`, runtimeInput.data?.toString("utf8") ?? ""),
+  }], [], { expected: [...integrationPlan.expected, runtimeInput] });
   const refreshTunnelWorker = tunnelWorkerRuntimeChanged(existing, config);
   if (existing && options.restartService) config.controlToken = randomBytes(32).toString("base64url");
   const beforeService = getServiceStatus();
@@ -554,7 +619,7 @@ export async function setup(options: SetupOptions): Promise<SetupResult> {
   if (!beforeService.loaded) await assertPortAvailable(config.host, config.port);
 
   if (!launcherOwned) {
-    saveConfig(config);
+    saveSetupConfig();
     installService(config);
     if (changedWhileLoaded && options.restartService && existing) await restartService(existing);
     await waitForProxy(config);
@@ -594,16 +659,14 @@ export async function setup(options: SetupOptions): Promise<SetupResult> {
   if (launcherOwned && (beforeService.installed || beforeService.loaded)) {
     await uninstallService(existing!);
   }
-  if (launcherOwned) saveConfig(config);
+  if (launcherOwned) saveSetupConfig();
   // Keep the previous terminal runtime intact through the ownership handoff. A later launcher
   // setup removes it once the launcher-owned configuration is already the established baseline.
   const migratingTerminalRuntime = Boolean(
     launcherOwned && existing && existing.browserHost !== "launcher",
   );
   if (!migratingTerminalRuntime) removeLegacyRuntimeArtifacts(config);
-  installCodexIntegration(config, {
-    replaceExistingRoute: options.replaceCodexRoute,
-  });
+  applyPreparedCodexIntegration(integrationPlan);
 
   return {
     mode: config.mode,

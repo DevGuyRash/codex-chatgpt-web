@@ -915,7 +915,7 @@ describe("reversible native Codex route integration", () => {
     delete legacy.previousRealtimeWebrtcCallBaseUrl;
     const legacyJournal = `${JSON.stringify(legacy, null, 2)}\n`;
     const legacyConfig = readFileSync(configPath, "utf8").replace(interruptFragment, "")
-      .replace(MANAGED_ROUTE_COMMENT, MANAGED_COMMENT)
+      .replace("# BEGIN codex-chatgpt-web: routes", MANAGED_COMMENT).replace("# END codex-chatgpt-web: routes\n", "")
       .replace(/^experimental_realtime_webrtc_call_base_url\s*=.*$/m, customVoiceLine);
     writeFileSync(configPath, legacyConfig);
     writeFileSync(getCodexJournalPath(), legacyJournal);
@@ -978,7 +978,7 @@ describe("reversible native Codex route integration", () => {
     const previous = JSON.parse(readFileSync(getCodexJournalPath(), "utf8"));
     const interruptFragment = previous.interruptHook.fragment as string;
     const legacyInstalled = readFileSync(configPath, "utf8").replace(interruptFragment, "")
-      .replace(MANAGED_ROUTE_COMMENT, MANAGED_COMMENT)
+      .replace("# BEGIN codex-chatgpt-web: routes", MANAGED_COMMENT).replace("# END codex-chatgpt-web: routes\n", "")
       .replace(/^experimental_realtime_webrtc_call_base_url\s*=.*\n/gm, "")
       .replace(/^(?:remote_compaction_v2 = false|multi_agent = true|multi_agent_v2 = false).*\n/gm, "");
     writeFileSync(configPath, legacyInstalled);
@@ -1026,7 +1026,7 @@ describe("reversible native Codex route integration", () => {
     writeFileSync(
       configPath,
       readFileSync(configPath, "utf8").replace(interruptFragment, "")
-        .replace(MANAGED_ROUTE_COMMENT, MANAGED_COMMENT)
+        .replace("# BEGIN codex-chatgpt-web: routes", MANAGED_COMMENT).replace("# END codex-chatgpt-web: routes\n", "")
         .replace(/^experimental_realtime_webrtc_call_base_url\s*=.*\n/gm, "")
         .replace(/^(?:remote_compaction_v2 = false|multi_agent = true|multi_agent_v2 = false).*\n/gm, ""),
     );

@@ -1,6 +1,7 @@
 import { existsSync, readFileSync } from "node:fs";
 import { isDeepStrictEqual } from "node:util";
 import { stripUtf8Bom } from "./config";
+import { ROUTES_BEGIN, ROUTES_END } from "./codex-config-markers";
 import { parseTomlValue, setTomlScalar } from "./toml-edit";
 import {
   MANAGED_COMMENT,
@@ -216,7 +217,7 @@ export function removeDocumentLine(document: CodexConfigDocument, index: number)
 
 export function removeManagedComment(document: CodexConfigDocument): void {
   for (let index = document.lines.length - 1; index >= 0; index -= 1) {
-    if (document.lines[index] === MANAGED_COMMENT || document.lines[index] === MANAGED_ROUTE_COMMENT) {
+    if ([MANAGED_COMMENT, MANAGED_ROUTE_COMMENT, ROUTES_BEGIN, ROUTES_END].includes(document.lines[index]!)) {
       removeDocumentLine(document, index);
     }
   }

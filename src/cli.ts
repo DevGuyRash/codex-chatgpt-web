@@ -25,7 +25,7 @@ import { runChatGptMcpMain } from "./adapters/chatgpt-web/mcp-main";
 import { runCommand } from "./process";
 import { startServer } from "./server";
 import { assertServiceIdle, cancelActiveTurns, getServiceStatus, installService, interruptActiveTurn, restartService, startService, stopService, uninstallService } from "./service";
-import { existingFullSetupCredentials, preflightSetup, setup, type SetupOptions } from "./setup";
+import { existingFullSetupCredentials, preflightSetup, previewSetupConfiguration, setup, type SetupOptions } from "./setup";
 import { installRuntimeKeyBytes, managedRuntimeKeyPath, stopTunnel, tunnelStatus, waitForTunnelReady } from "./tunnel";
 import { getTunnelServiceStatus, restartTunnelService, startTunnelService, stopTunnelService, uninstallTunnelService } from "./tunnel-service";
 import { VERSION } from "./version";
@@ -84,6 +84,8 @@ Setup options:
   --bigger-context             Enable experimental adaptive 1/2/3-message context
   --standard-context           Disable experimental multi-message context
   --acknowledge-unofficial     Accept the one-time unofficial-browser-automation notice
+  --preview-json              Inspect setup changes without changing configuration or runtime
+  --approve-configuration ID   Apply only the matching reviewed setup preview
 
 Global:
   --home PATH                  Override ~/.codex-chatgpt-web
@@ -264,6 +266,9 @@ async function loginCommand(args: string[]): Promise<void> {
 
 async function setupCommand(args: string[]): Promise<void> {
   const preflightOnly = takeFlag(args, "--preflight-only");
+  const previewOnly = takeFlag(args, "--preview-json");
+  const configurationApproval = takeOption(args, "--approve-configuration");
+  if (previewOnly && (preflightOnly || configurationApproval)) throw new Error("Setup preview cannot also apply or validate an approval");
   const browserOnly = takeFlag(args, "--browser-only");
   const full = takeFlag(args, "--full");
   if (browserOnly === full) throw new Error("Choose exactly one setup mode: --browser-only or --full");
@@ -317,7 +322,14 @@ async function setupCommand(args: string[]): Promise<void> {
   if (zeroRiskPro || zeroRiskDefault) options.zeroRiskProEnabled = zeroRiskPro;
   options.replaceCodexRoute = takeFlag(args, "--replace-codex-route");
   options.restartService = takeFlag(args, "--restart-service");
+  if (configurationApproval) options.configurationApproval = configurationApproval;
   assertNoArgs(args);
+
+  if (previewOnly) {
+    options.acknowledgedUnofficial = acknowledged;
+    stdout.write(`${JSON.stringify(previewSetupConfiguration(options), null, 2)}\n`);
+    return;
+  }
 
   if (!acknowledged) {
     stdout.write(
@@ -353,6 +365,14 @@ async function setupCommand(args: string[]): Promise<void> {
     }
   }
 
+  if (!configurationApproval) {
+    const preview = previewSetupConfiguration(options);
+    stdout.write(`${JSON.stringify(preview, null, 2)}\n`);
+    if (preview.status !== "ready") throw new Error(preview.conflicts.map(conflict => conflict.message).join("; ") || "Resolve setup configuration conflicts before continuing");
+    if (!stdin.isTTY) throw new Error("Review setup --preview-json and pass its --approve-configuration ID to apply these changes");
+    if (!await confirm("Apply these configuration changes and continue setup?")) throw new Error("Setup cancelled; no configuration changes were applied");
+    options.configurationApproval = preview.approvalId;
+  }
   const result = await setup(options);
   stdout.write(`Setup complete: ${result.mode}\n`);
   stdout.write(`Config: ${result.configPath}\n`);

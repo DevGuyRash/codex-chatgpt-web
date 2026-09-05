@@ -118,6 +118,7 @@ export interface LauncherSnapshot {
   version: string;
   smokePassed: boolean;
   operation: OperationState | null;
+  configurationPreview?: CodexRepairPreview | null;
   update: UpdateState;
 }
 
@@ -145,6 +146,8 @@ export interface LauncherApi {
   smokeTest(): Promise<{ ok: boolean; effort: string; response: string }>;
   verifyMcp(): Promise<DoctorReport>;
   doctor(): Promise<DoctorReport>;
+  decideConfiguration(approvalId: string, decision: boolean | SubagentProtocol): Promise<void>;
+  onConfigurationPreview(listener: (preview: CodexRepairPreview | null) => void): () => void;
   previewIntegrationRepair(protocol: SubagentProtocol): Promise<CodexRepairPreview>;
   applyIntegrationRepair(protocol: SubagentProtocol, approvalId: string): Promise<{ state: LauncherState }>;
   cancelTurns(): Promise<{ stdout: string }>;

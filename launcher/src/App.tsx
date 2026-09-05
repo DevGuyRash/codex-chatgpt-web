@@ -9,7 +9,7 @@ import {
   type ReactNode,
 } from "react";
 import { createPortal } from "react-dom";
-import { ConfigurationRepair } from "./ConfigurationRepair";
+import { ConfigurationRepair, SetupConfigurationReview } from "./ConfigurationRepair";
 import { copyFor, type Copy } from "./i18n";
 import { Icon, type IconName } from "./icons";
 import type {
@@ -22,6 +22,7 @@ import type {
   LogRecord,
   OperationState,
   Surface,
+  CodexRepairPreview,
 } from "./types";
 
 const api = window.codexWebLauncher;
@@ -39,6 +40,7 @@ export function App() {
   const [operation, setOperation] = useState<OperationState | null>(null);
   const [logs, setLogs] = useState<LogRecord[]>([]);
   const [error, setError] = useState<string | null>(null);
+  const [configurationPreview, setConfigurationPreview] = useState<CodexRepairPreview | null>(null);
   const documentLanguage = snapshot?.state.language ?? "en";
 
   useEffect(() => {
@@ -48,12 +50,14 @@ export function App() {
   useEffect(() => {
     if (!api) return;
     let cancelled = false;
+    let previewEventSeen = false;
     void api.snapshot().then((next) => {
       if (cancelled) return;
       setSnapshot(next);
       setBrowser(next.browser);
       setLogs(next.logs);
       setOperation(next.operation);
+      if (!previewEventSeen) setConfigurationPreview(next.configurationPreview ?? null);
       if (next.operation?.status === "failed" && next.operation.name !== "mcp-verification") {
         setError(next.operation.message);
       }
@@ -69,6 +73,7 @@ export function App() {
         : current);
     });
     const unsubscribeBrowser = api.onBrowserState(setBrowser);
+    const unsubscribeConfiguration = api.onConfigurationPreview(preview => { previewEventSeen = true; setConfigurationPreview(preview); });
     const unsubscribeOperation = api.onOperation((next) => {
       setOperation(next);
       if (next.status === "failed" && next.name !== "mcp-verification") setError(next.message);
@@ -81,6 +86,7 @@ export function App() {
       cancelled = true;
       unsubscribeState();
       unsubscribeBrowser();
+      unsubscribeConfiguration();
       unsubscribeOperation();
       unsubscribeLog();
       unsubscribeUpdate();
@@ -123,6 +129,7 @@ export function App() {
           />
         ) : (
           <LauncherShell
+            configurationReviewOpen={configurationPreview !== null}
             browser={browser}
             copy={copy}
             key="launcher"
@@ -135,6 +142,7 @@ export function App() {
           />
         )}
       </AnimatePresence>
+      {configurationPreview ? <SetupConfigurationReview key={configurationPreview.approvalId} preview={configurationPreview} language={language} decide={(id, approved) => api!.decideConfiguration(id, approved)} /> : null}
       <AnimatePresence>
         {error ? <ErrorToast copy={copy} message={error} onDismiss={() => setError(null)} /> : null}
       </AnimatePresence>
@@ -324,6 +332,7 @@ function Onboarding({
 }
 
 function LauncherShell({
+  configurationReviewOpen,
   browser,
   copy,
   language,
@@ -333,6 +342,7 @@ function LauncherShell({
   snapshot,
   updateState,
 }: {
+  configurationReviewOpen: boolean;
   browser: BrowserState | null;
   copy: Copy;
   language: Language;
@@ -366,6 +376,7 @@ function LauncherShell({
   const [biggerContextRecommendationBusy, setBiggerContextRecommendationBusy] = useState(false);
   const browserSlotRef = useCallback((node: HTMLDivElement | null) => setBrowserSlot(node), []);
   const browserSurfaceActive = surface === "browser"
+    && !configurationReviewOpen
     && !(compactSidebar && sidebarOpen)
     && !biggerContextRecommendationOpen;
   const needsBrowser = snapshot.state.browserInteractionMode === "automatic"
@@ -386,12 +397,12 @@ function LauncherShell({
   }, [snapshot.state.browserInteractionMode]);
 
   useEffect(() => {
-    if (!selectedManualTab) return;
+    if (!selectedManualTab || configurationReviewOpen) return;
     setSurface("browser");
     setSidebarOpen(false);
     setBiggerContextRecommendationOpen(false);
     void api!.setBrowserSurfaceActive(true).catch((cause) => setError(messageOf(cause)));
-  }, [selectedManualTab?.id, selectedManualTab?.manualState, setError]);
+  }, [selectedManualTab?.id, selectedManualTab?.manualState, configurationReviewOpen, setError]);
 
   useLayoutEffect(() => {
     let cancelled = false;

@@ -6,10 +6,12 @@ import { installCompatibilityV1Features } from "./codex-integration-document";
 import {
   CODEX_REALTIME_WEBRTC_CALL_BASE_URL, getCodexConfigPath, getCodexJournalPath,
   getCodexJournalRecoveryPath, getCodexModelsCachePath, routeUrl, serializeJournal,
-  sha256, snapshotFile, writeFilesWithCompensation, type CodexIntegrationJournal,
+  snapshotFile, writeFilesWithCompensation, type CodexIntegrationJournal,
   type FileSnapshot,
 } from "./codex-integration-shared";
-import { parseTomlValue, setTomlScalar } from "./toml-edit";
+import { parseTomlValue } from "./toml-edit";
+import { boundCodexRouteSection, setTrackedCodexScalar } from "./codex-config-source";
+import { configurationApprovalId, describeCodexConfigurationChanges, describeCodexSourceChange } from "./codex-configuration-plan";
 import type { CodexRepairPreview } from "./contracts/codex-integration";
 export type { CodexRepairPreview, CodexRepairChange } from "./contracts/codex-integration";
 
@@ -55,14 +57,13 @@ function materialize(protocol: SubagentProtocol): MaterializedRepair {
   const original = snapshots[0]!.data?.toString("utf8");
   if (original === undefined) return blocked("Codex configuration is missing; restore or review it before repair");
   preview.conflicts = inspectInstalledCodexConfig(original, journal);
-  if (preview.conflicts.some(conflict => !["missing", "value_changed"].includes(conflict.category))) return { preview, snapshots, writes: [] };
+  if (preview.conflicts.some(conflict => !["missing", "commented_out", "value_changed"].includes(conflict.category))) return { preview, snapshots, writes: [] };
   let text = original;
   const next = structuredClone(journal);
   const edit = (path: string[], value: Scalar | undefined): void => {
     const current = at(parseTomlValue(text), path);
     if (current === value) return;
-    text = setTomlScalar(text, path, value);
-    preview.changes.push({ path: path.join("."), current: scalar(current), proposed: value ?? null });
+    text = setTrackedCodexScalar(text, path, value);
   };
   try {
     edit(["openai_base_url"], routeUrl(config));
@@ -99,10 +100,13 @@ function materialize(protocol: SubagentProtocol): MaterializedRepair {
       delete next.previousAgentMaxDepth;
       delete next.installed.agent_max_depth;
     }
+    text = boundCodexRouteSection(text);
   } catch { return blocked("The proposed setting edit cannot preserve this document safely; review its structure before repair"); }
+  preview.textChanges = describeCodexSourceChange(getCodexConfigPath(), original, text);
   next.installed.openai_base_url = routeUrl(config);
   next.installed.experimental_realtime_webrtc_call_base_url = CODEX_REALTIME_WEBRTC_CALL_BASE_URL;
   next.installed.subagent_protocol = protocol;
+  preview.changes = describeCodexConfigurationChanges(original, text);
   if (journal.installed.subagent_protocol !== protocol) preview.changes.push({ path: "integration.subagent_protocol", current: journal.installed.subagent_protocol, proposed: protocol });
   const remaining = inspectInstalledCodexConfig(text, next);
   if (remaining.length) { preview.conflicts.push(...remaining); return { preview, snapshots, writes: [] }; }
@@ -119,10 +123,7 @@ function materialize(protocol: SubagentProtocol): MaterializedRepair {
   }
   writes.push({ path: getCodexJournalPath(), data: journalData });
   preview.status = "ready";
-  preview.approvalId = sha256(JSON.stringify({ version: 1, protocol,
-    inputs: snapshots.map(file => [file.path, file.exists, file.data ? sha256(file.data) : null]),
-    outputs: writes.map(file => [file.path, sha256(file.data)]),
-  }));
+  preview.approvalId = configurationApprovalId({ operation: "repair", protocol }, snapshots, writes, [getCodexModelsCachePath()]);
   return { preview, snapshots, writes, journal: next };
 }
 

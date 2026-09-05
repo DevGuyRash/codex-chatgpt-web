@@ -25,6 +25,7 @@ const {
   registerLoggedIpc,
 } = require("./logging.cjs");
 const { RuntimeHost } = require("./runtime.cjs");
+const { ConfigurationReview } = require("./configuration-review.cjs");
 const { ensurePackagedRuntime, waitForPackagedRuntimeSource } = require("./runtime-install.cjs");
 const { RuntimeSupervisor } = require("./runtime-supervisor.cjs");
 const { DEVELOPMENT_PROFILE, resolveLauncherProfile } = require("./profile.cjs");
@@ -91,6 +92,10 @@ let lastOperation = null;
 let catalogVerificationTimer = null;
 let catalogVerificationInFlight = false;
 let updateController = null;
+const configurationReview = new ConfigurationReview({ publish: preview => {
+  if (preview) browserHost?.setSurfaceActive(false);
+  send("launcher:configuration-preview", preview);
+} });
 
 function findFreePort() {
   return new Promise((resolve, reject) => {
@@ -444,6 +449,7 @@ function registerIpc({ logger, stateStore }) {
     version: app.getVersion(),
     smokePassed: smokePassedThisSession || smokePassedForCurrentVersion(stateStore.read()),
     operation: lastOperation,
+    configurationPreview: configurationReview.snapshot(),
     update: updateController?.getState() ?? { status: "disabled" },
   }));
 
@@ -486,7 +492,7 @@ function registerIpc({ logger, stateStore }) {
     browserHost?.setBounds(validateBounds(bounds), event.sender.getZoomFactor());
     return true;
   });
-  handle("launcher:browser-surface-active", (_event, active) => browserHost.setSurfaceActive(active === true));
+  handle("launcher:browser-surface-active", (_event, active) => browserHost.setSurfaceActive(active === true && !configurationReview.snapshot()));
   handle("launcher:browser-show", () => browserHost.reveal(
     stateStore.read().browserInteractionMode === "automatic",
   ));
@@ -623,6 +629,7 @@ function registerIpc({ logger, stateStore }) {
   });
 
   handle("launcher:doctor", () => IS_DEV_PROFILE ? runtimeHost.devDoctor() : runtimeHost.doctor());
+  handle("launcher:configuration-decision", (_event, approvalId, approved) => configurationReview.decide(approvalId, approved));
   handle("launcher:repair-preview", (_event, protocol) => runtimeHost.previewIntegrationRepair(protocol));
   handle("launcher:repair-apply", async (_event, protocol, approvalId) => {
     await runtimeHost.applyIntegrationRepair(protocol, approvalId);
@@ -1007,6 +1014,7 @@ async function start() {
     publishOperation,
     supervisor: runtimeSupervisor,
     getBrowserInteractionMode: () => stateStore.read().browserInteractionMode,
+    reviewConfiguration: preview => configurationReview.request(preview),
   });
   const configuredInteractionMode = runtimeHost.runtimeConfigSnapshot().config?.browserInteractionMode;
   if ((configuredInteractionMode === "automatic" || configuredInteractionMode === "manual")
@@ -1241,7 +1249,8 @@ async function start() {
     }
   }).catch(async (error) => {
     const primary = error instanceof Error ? error.message : String(error);
-    const routeRecovery = await restoreCodexRouteAfterRuntimeFailure({ logger, stateStore });
+    const routeRecovery = error?.code === "CONFIGURATION_REVIEW_REQUIRED"
+      ? {} : await restoreCodexRouteAfterRuntimeFailure({ logger, stateStore });
     const message = routeRecovery.error
       ? `${primary}; restoring the previous Codex route also failed: ${routeRecovery.error}`
       : routeRecovery.restored

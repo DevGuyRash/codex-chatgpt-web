@@ -3,6 +3,7 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const vm = require("node:vm");
 const { registerLoggedIpc } = require("../electron/logging.cjs");
+const { ConfigurationReview } = require("../electron/configuration-review.cjs");
 
 test("repair preload arguments reach the registered main handlers without the Electron event", async () => {
   const handlers = new Map();
@@ -11,6 +12,7 @@ test("repair preload arguments reach the registered main handlers without the El
   const registration = main.slice(main.indexOf("function registerIpc("), main.indexOf("async function requestQuit("));
   const state = { codexRestartRequired: true };
   const context = {
+    configurationReview: new ConfigurationReview({ publish() {} }),
     registerLoggedIpc,
     ipcMain: { handle: (name, handler) => handlers.set(name, handler), on() {} },
     runtimeHost: {
@@ -30,4 +32,8 @@ test("repair preload arguments reach the registered main handlers without the El
   assert.equal((await api.previewIntegrationRepair("native")).protocol, "native");
   assert.equal((await api.applyIntegrationRepair("native", "approved-preview")).state, state);
   assert.deepEqual(calls, [["preview", "native"], ["apply", "native", "approved-preview"]]);
+  const pending = context.configurationReview.request({ approvalId: "current", status: "ready" });
+  await api.decideConfiguration("current", true);
+  assert.equal(await pending, "current");
+  assert.equal(context.configurationReview.snapshot(), null);
 });

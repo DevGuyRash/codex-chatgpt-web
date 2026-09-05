@@ -14,6 +14,8 @@ just ci
 
 Set `CODEX_CHATGPT_WEB_BUN` to an absolute Bun executable to use a particular installed runtime. Set `CHATGPT_TEST_CHROME_EXECUTABLE` to use another compatible Chromium installation. Neither override belongs in tracked files. An explicitly selected missing or unusable browser fails verification instead of silently skipping browser tests.
 
+Verification uses temporary build directories and removes them on exit. If the default temporary filesystem has a space or user-quota limit, set the standard `TMPDIR` environment variable to an existing writable temporary directory with sufficient space. Keep this machine-specific choice outside tracked files; do not delete unrelated caches to satisfy a build.
+
 For shorter feedback loops, use `just test` and `just typecheck`. Run `just ci` before integrating a batch into main.
 
 ## Native packaging

@@ -3,6 +3,17 @@ const assert = require("node:assert/strict");
 const path = require("node:path");
 const { resolveLauncherProfile } = require("../electron/profile.cjs");
 
+test("named profile windows isolate native browser partitions and durable launcher data", () => {
+  const options = { env: {}, homeDir: path.resolve("/Users/tester"), appData: path.resolve("/tmp/cgw-profile-appdata") };
+  const base = resolveLauncherProfile({ ...options, argv: ["electron", "."] });
+  const a = resolveLauncherProfile({ ...options, argv: ["electron", ".", "--codex-profile", "native"] });
+  const b = resolveLauncherProfile({ ...options, argv: ["electron", ".", "--codex-profile", "compatibility"] });
+  for (const field of ["coreHome", "userData", "browserPartition"]) assert.equal(new Set([base[field], a[field], b[field]]).size, 3, field);
+  assert.equal(a.codexHome, b.codexHome);
+  assert.equal(a.integrationTarget.profile, "native");
+  assert.throws(() => resolveLauncherProfile({ ...options, argv: ["electron", ".", "--dev-profile", "--codex-profile", "native"] }), /target|profile/i);
+});
+
 test("DEV launcher profile isolates every durable home from production", () => {
   const homeDir = path.resolve("/Users/tester");
   const production = resolveLauncherProfile({

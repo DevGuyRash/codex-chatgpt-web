@@ -7,6 +7,7 @@ import {
   cancelAllStructuredCompactions,
   cancelStructuredCompactionNativeTurn,
   cancelStructuredCompactionTrace,
+  structuredCompactionSettlementForNativeTurn,
 } from "./adapters/chatgpt-web/compaction-handoff";
 import { chatGptBrowserTabClosedError } from "./adapters/chatgpt-web/adapter-error";
 import {
@@ -24,6 +25,8 @@ import { readJsonRequestBody } from "./http-body";
 import { httpStatusFromTerminalError } from "./lib/errors";
 import { createHash } from "node:crypto";
 import { augmentNativeModelCatalog } from "./model-catalog";
+import { profileCatalogRefreshCheck } from "./profile-model-catalog";
+import type { InterruptCleanupClaims } from "./interrupt-cleanup";
 import {
   readCodexModelContextOverride,
   readCodexSubagentProtocol,
@@ -140,7 +143,7 @@ export class HttpTurnCounter {
     }
   }
 
-  constructor(private readonly reportStreamFailure: HttpStreamFailureReporter = reportHttpStreamFailure) {}
+  constructor(private readonly reportStreamFailure: HttpStreamFailureReporter = reportHttpStreamFailure, private readonly cleanupClaims?: InterruptCleanupClaims, private readonly physicalSettlement?: (identity: NativeCodexTurnIdentity) => Promise<void>) {}
 
   count(): number {
     return this.active.size;
@@ -202,12 +205,19 @@ export class HttpTurnCounter {
     } = { abort, done, finish };
     this.active.set(id, tracked);
     let released = false;
+    let releaseClaim: (() => void) | undefined;
+    let claimUncertain = false;
     let clientAbortListener: (() => void) | undefined;
     let streamAbortListener: (() => void) | undefined;
     const release = () => {
       if (released) return;
       released = true;
       this.active.delete(id);
+      if (!abort.signal.aborted && !claimUncertain && releaseClaim) {
+        const confirm = () => { try { releaseClaim?.(); } catch { console.error("[chatgpt-web] cleanup ownership receipt could not be released"); } };
+        if (tracked.identity && this.physicalSettlement) void this.physicalSettlement(tracked.identity).then(confirm, () => { console.error("[chatgpt-web] physical cleanup remains unconfirmed after HTTP completion"); });
+        else confirm();
+      }
       if (clientSignal && clientAbortListener) {
         clientSignal.removeEventListener("abort", clientAbortListener);
         clientAbortListener = undefined;
@@ -228,10 +238,12 @@ export class HttpTurnCounter {
           && (tracked.identity.threadId !== identity.threadId || tracked.identity.turnId !== identity.turnId)) {
           throw new Error("An HTTP request cannot change its native Codex turn identity");
         }
+        if (!tracked.identity) releaseClaim = this.cleanupClaims?.begin(identity);
         tracked.identity = identity;
         const interruptedReason = this.interrupted.get(this.identityKey(identity));
         if (interruptedReason !== undefined && !abort.signal.aborted) abort.abort(interruptedReason);
       });
+      claimUncertain = !response.ok;
       if (!response.body) {
         release();
         return response;
@@ -267,6 +279,7 @@ export class HttpTurnCounter {
               bytes += chunk.value.byteLength;
               controller.enqueue(chunk.value);
             } catch (error) {
+              claimUncertain = true;
               if (!abort.signal.aborted) {
                 emitHttpStreamFailure(reportStreamFailure, streamFailureEvidence(
                   error,
@@ -283,6 +296,7 @@ export class HttpTurnCounter {
             }
           },
           async cancel(reason) {
+            claimUncertain = true;
             try {
               await reader.cancel(reason);
             } finally {
@@ -322,6 +336,7 @@ export class HttpTurnCounter {
             // Consume eagerly so the lifecycle branch never backpressures the client branch.
           }
         } catch (error) {
+          claimUncertain = true;
           if (!abort.signal.aborted) {
             emitHttpStreamFailure(this.reportStreamFailure, streamFailureEvidence(
               error,
@@ -344,6 +359,7 @@ export class HttpTurnCounter {
         headers: response.headers,
       });
     } catch (error) {
+      claimUncertain = true;
       release();
       throw error;
     }
@@ -753,12 +769,13 @@ export async function compactRequest(
 
 export function startServer(
   config: AppConfig,
-  dependencies: { fetchUpstream?: NativeFetch; adapterFactory?: ChatGptWebAdapterFactory } = {},
+  dependencies: { fetchUpstream?: NativeFetch; adapterFactory?: ChatGptWebAdapterFactory; cleanupClaims?: InterruptCleanupClaims } = {},
 ): ReturnType<typeof Bun.serve> {
   if (config.purpose === "dev-harness") {
     throw new Error("DEV harness configuration cannot start a Responses listener");
   }
   const startedAt = Date.now();
+  const checkProfileCatalog = profileCatalogRefreshCheck(config);
   const turnBroker = config.mode === "full" ? TurnBroker.forSocket(config.brokerSocketPath) : undefined;
   if (config.mode === "full") {
     void turnBroker!.listen().catch(error => {
@@ -771,7 +788,10 @@ export function startServer(
   let shutdownPromise: Promise<void> | undefined;
   let successfulModelCatalogRequests = 0;
   let lastSuccessfulModelCatalogRequestAt: string | null = null;
-  const httpTurns = new HttpTurnCounter();
+  const httpTurns = new HttpTurnCounter(undefined, dependencies.cleanupClaims, identity => Promise.all([
+    chatGptTurnSessions.physicalSettlementForNativeTurn(identity.threadId, identity.turnId),
+    structuredCompactionSettlementForNativeTurn(identity.threadId, identity.turnId),
+  ]).then(() => undefined));
   const activity = () => ({
     active_http_turns: httpTurns.count(),
     active_browser_turns: chatGptTurnSessions.activeCount() + (turnBroker?.externalOwnerActiveCount() ?? 0),
@@ -788,6 +808,7 @@ export function startServer(
     idleTimeout: 0,
     async fetch(req) {
       const url = new URL(req.url);
+      const profileCatalog = checkProfileCatalog();
       if (req.method === "GET" && url.pathname === "/healthz") {
         return Response.json({
           status: "ok",
@@ -797,9 +818,10 @@ export function startServer(
           pid: process.pid,
           port: config.port,
           uptime: (Date.now() - startedAt) / 1_000,
-          accepting_turns: !draining,
+          accepting_turns: !draining && profileCatalog?.ready !== false,
           successful_model_catalog_requests: successfulModelCatalogRequests,
           last_successful_model_catalog_request_at: lastSuccessfulModelCatalogRequestAt,
+          profile_model_catalog: profileCatalog,
           ...activity(),
         });
       }
@@ -859,6 +881,7 @@ export function startServer(
           );
         }
         const reason = new DOMException("Codex turn interrupted", "AbortError");
+        const releaseClaims = dependencies.cleanupClaims?.captureSettlement(identity);
         const browserCancellation = chatGptTurnSessions.cancelNativeTurn(
           identity.threadId,
           identity.turnId,
@@ -876,6 +899,9 @@ export function startServer(
           httpCancellation.settlement,
         ]);
         void settlement.then(results => {
+          if (httpCancellation.cancelled + browserCancellation.cancelled > 0 && compactionCancellation.cancelled === 0 && results.every(result => result.status === "fulfilled")) {
+            try { releaseClaims?.(); } catch { console.error("[chatgpt-web] interrupted cleanup ownership receipt could not be released"); }
+          }
           for (const result of results) {
             if (result.status === "rejected") {
               console.error(
@@ -884,11 +910,16 @@ export function startServer(
             }
           }
         });
+        const cleanupStatus = await Promise.race([
+          settlement.then(results => results.every(result => result.status === "fulfilled") ? compactionCancellation.cancelled > 0 ? "pending" : "completed" : "failed"),
+          Bun.sleep(100).then(() => "pending"),
+        ]);
         return Response.json({
           status: "ok",
           cancelled_http_turns: httpCancellation.cancelled,
           cancelled_browser_turns: browserCancellation.cancelled,
           cancelled_compaction_runs: compactionCancellation.cancelled,
+          cleanup_status: httpCancellation.cancelled + browserCancellation.cancelled + compactionCancellation.cancelled === 0 ? "armed" : cleanupStatus,
         });
       }
       if (req.method === "POST" && url.pathname === "/admin/cancel-turns") {
@@ -940,7 +971,7 @@ export function startServer(
           try {
             catalogConfig = {
               ...config,
-              subagentProtocol: readCodexSubagentProtocol(config.subagentProtocol),
+              subagentProtocol: readCodexSubagentProtocol(config.subagentProtocol, config.integrationTarget),
             };
           } catch (error) {
             return formatErrorResponse(
@@ -953,7 +984,7 @@ export function startServer(
             new Request(req, { signal }),
             catalogConfig,
             dependencies.fetchUpstream,
-            readCodexModelContextOverride,
+            () => readCodexModelContextOverride(config.integrationTarget),
           );
           if (response.ok) {
             successfulModelCatalogRequests += 1;
@@ -962,6 +993,7 @@ export function startServer(
           return response;
         }, req.signal, process.platform, "models");
       }
+      if (profileCatalog?.ready === false && url.pathname.startsWith("/v1/")) return formatErrorResponse(409, "invalid_request_error", `Profile configuration needs attention: ${profileCatalog.error ?? "catalog is unavailable"}`);
       if (req.method === "GET" && url.pathname === "/v1/responses") {
         return new Response("Responses WebSocket transport is not enabled on this local route", {
           status: 426,

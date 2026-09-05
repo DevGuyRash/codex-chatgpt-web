@@ -43,6 +43,25 @@ test("repair previews every conflicting setting without writing any file", () =>
   expect(readFileSync(path, "utf8")).toBe(original);
 }));
 
+test("guided duplicate resolution binds exact source choices and preserves disabled alternatives", () => fixture((path, original) => {
+  const duplicated = original.replace('multi_agent_v2 = true', 'multi_agent_v2 = true\nmulti_agent_v2 = false # alternate');
+  writeFileSync(path, duplicated);
+  const blocked = previewCodexIntegrationRepair("native");
+  expect(blocked.status).toBe("blocked");
+  const setting = blocked.groups!.flatMap(group => group.settings).find(item => item.path === "features.multi_agent_v2")!;
+  expect(setting.occurrences).toHaveLength(2);
+  const resolutions = [{ occurrenceId: setting.occurrences[0]!.id }];
+  const preview = previewCodexIntegrationRepair("native", { resolutions });
+  expect(preview.status).toBe("ready");
+  expect(readFileSync(path, "utf8")).toBe(duplicated);
+  expect(() => applyCodexIntegrationRepair("native", preview.approvalId)).toThrow("changed");
+  applyCodexIntegrationRepair("native", preview.approvalId, { resolutions });
+  const result = readFileSync(path, "utf8");
+  expect(result).toContain('multi_agent_v2 = true');
+  expect(result).toContain('# multi_agent_v2 = false # alternate');
+  expect(inspectCodexIntegration({ readOnly: true }).conflicts).toEqual([]);
+}));
+
 test("repair needs the exact preview approval and rejects subsequent edits", () => fixture((path, original) => {
   const preview = previewCodexIntegrationRepair("compatibility-v1");
   expect(() => applyCodexIntegrationRepair("compatibility-v1", "wrong")).toThrow("approval");

@@ -393,6 +393,10 @@ const structuredCompactionOwners = new Map<string, Promise<void>>();
 const structuredCompactionInterruptions = new Map<string, StructuredCompactionInterruption>();
 const STRUCTURED_COMPACTION_RUN_TTL_MS = 30 * 60_000;
 
+export function structuredCompactionSettlementForNativeTurn(threadId: string, turnId: string): Promise<void> {
+  return Promise.all([...structuredCompactionRuns.values()].filter(run => run.active && run.nativeThreadId === threadId && run.nativeTurnId === turnId).map(run => run.promise)).then(() => undefined);
+}
+
 function nativeTurnIdentityKey(threadId: string, turnId: string): string {
   if (!threadId.trim() || !turnId.trim()) {
     throw new Error("Structured compaction requires non-empty native thread and turn ids");

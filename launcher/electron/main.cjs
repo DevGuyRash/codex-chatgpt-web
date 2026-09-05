@@ -1,7 +1,7 @@
 const fs = require("node:fs");
 const net = require("node:net");
 const path = require("node:path");
-const { spawnSync } = require("node:child_process");
+const { spawn, spawnSync } = require("node:child_process");
 const { pathToFileURL } = require("node:url");
 const {
   app,
@@ -29,6 +29,8 @@ const { ConfigurationReview } = require("./configuration-review.cjs");
 const { ensurePackagedRuntime, waitForPackagedRuntimeSource } = require("./runtime-install.cjs");
 const { RuntimeSupervisor } = require("./runtime-supervisor.cjs");
 const { DEVELOPMENT_PROFILE, resolveLauncherProfile } = require("./profile.cjs");
+const { RuntimeRegistry } = require("./runtime-registry.cjs");
+const { resolveIntegrationTarget } = require("./integration-target.cjs");
 const { runtimeBundlePaths } = require("./runtime-command.cjs");
 const { createUpdateController } = require("./update.cjs");
 const {
@@ -47,6 +49,8 @@ const SOURCE_ROOT = path.resolve(__dirname, "../..");
 const LAUNCHER_PROFILE = resolveLauncherProfile({ appData: app.getPath("appData") });
 const IS_DEV_PROFILE = LAUNCHER_PROFILE.kind === DEVELOPMENT_PROFILE;
 const CORE_HOME = LAUNCHER_PROFILE.coreHome;
+const IS_CODEX_PROFILE = LAUNCHER_PROFILE.integrationTarget?.kind === "profile";
+const runtimeRegistry = IS_DEV_PROFILE ? null : new RuntimeRegistry({ runtimeRoot: LAUNCHER_PROFILE.runtimeRoot });
 const BROWSER_DESCRIPTOR_PATH = path.join(CORE_HOME, "runtime", "launcher-browser.json");
 const BROWSER_HELPER_PATH = app.isPackaged
   ? path.join(process.resourcesPath, "runtime", "app", "browser-helper.cjs")
@@ -140,6 +144,14 @@ function startCatalogVerificationMonitor({ logger, stateStore }) {
     try {
       const config = runtimeSupervisor.readConfig();
       const health = await runtimeSupervisor.proxyHealthPayload(config);
+      if (config.integrationTarget?.kind === "profile") {
+        if (health?.profile_model_catalog?.ready !== true) return;
+        const state = stateStore.update({ codexCatalogVerified: true });
+        logger.info("codex.profile_catalog_ready", { target: config.integrationTarget.id });
+        send("launcher:state-changed", state);
+        stopCatalogVerificationMonitor();
+        return;
+      }
       if (!Number.isInteger(health?.successful_model_catalog_requests)
         || health.successful_model_catalog_requests < 1) return;
       const state = stateStore.update({
@@ -436,6 +448,7 @@ function registerIpc({ logger, stateStore }) {
   });
   handle("launcher:snapshot", async () => ({
     profile: LAUNCHER_PROFILE.kind,
+    integrationTarget: LAUNCHER_PROFILE.integrationTarget,
     profilePaths: {
       coreHome: CORE_HOME,
       codexHome: LAUNCHER_PROFILE.codexHome,
@@ -446,7 +459,7 @@ function registerIpc({ logger, stateStore }) {
     connectorName: runtimeHost.browserConnectorName(),
     connectorNames: {
       automatic: runtimeHost.setupConnectorName(),
-      manual: "Codex Zero Risk",
+      manual: require("./integration-target.cjs").integrationConnectorNames(LAUNCHER_PROFILE.integrationTarget).manual,
     },
     mcpCredentialsConfigured: runtimeHost?.mcpCredentialsConfigured() ?? false,
     logs: logger.recent(),
@@ -464,6 +477,32 @@ function registerIpc({ logger, stateStore }) {
     const state = stateStore.update({ language: validateLanguage(language) });
     updateTrayMenu(state.language);
     return state;
+  });
+  handle("launcher:integration-targets", async () => {
+    if (!runtimeRegistry) throw new Error("DEV does not own Codex integration targets");
+    const result = await runtimeHost.run("target-inspection", ["targets", "inspect"], { embedded: true, privateOutput: true, timeoutMs: 15_000 });
+    const inspected = JSON.parse(result.stdout);
+    return { selected: LAUNCHER_PROFILE.integrationTarget, targets: runtimeRegistry.list(LAUNCHER_PROFILE.codexHome), launchCommand: inspected.launchCommand, capabilityError: inspected.capabilityError };
+  });
+  handle("launcher:target-open", async (_event, input) => {
+    if (!runtimeRegistry || !input || typeof input !== "object" || (input.profile !== undefined && typeof input.profile !== "string") || typeof input.codexHome !== "string") throw new Error("Select an explicit Codex home and optional profile name");
+    const target = resolveIntegrationTarget({ codexHome: input.codexHome, profile: input.profile, runtimeRoot: runtimeRegistry.runtimeRoot });
+    runtimeRegistry.assertBaseOwner(target);
+    if (target.id === LAUNCHER_PROFILE.integrationTarget.id) { mainWindow?.show(); mainWindow?.focus(); return { target }; }
+    if (target.kind === "profile") await runtimeRegistry.ensure(target);
+    const env = { ...process.env, CODEX_HOME: target.codexHome, CODEX_CHATGPT_WEB_HOME: runtimeRegistry.runtimeRoot };
+    for (const key of ["CODEX_CHATGPT_WEB_BROWSER_HOST_DESCRIPTOR", "CODEX_WEB_GPT_LAUNCHER_CONTROL_TOKEN", "ELECTRON_RUN_AS_NODE", "OPENAI_API_KEY", "CODEX_API_KEY"]) delete env[key];
+    const child = spawn(process.execPath, [...(app.isPackaged ? [] : [path.join(SOURCE_ROOT, "launcher")]), "--codex-home", target.codexHome, ...(target.profile ? ["--codex-profile", target.profile] : [])], { env, cwd: SOURCE_ROOT, detached: true, stdio: "ignore", windowsHide: false });
+    await new Promise((resolve, reject) => { child.once("spawn", resolve); child.once("error", reject); });
+    child.unref();
+    return { target };
+  });
+  handle("launcher:target-check", async () => {
+    if (!IS_CODEX_PROFILE) throw new Error("Select a named profile before checking its Codex capabilities");
+    const choice = await dialog.showOpenDialog(mainWindow, { title: "Select the Codex CLI binary (not your wrapper)", properties: ["openFile"] });
+    if (choice.canceled || choice.filePaths.length !== 1) return { cancelled: true };
+    await runtimeHost.run("profile-capability-check", ["targets", "check", "--codex-binary", choice.filePaths[0]], { embedded: true, privateOutput: true, timeoutMs: 60_000, message: "Checking profile precedence, catalog isolation, and hook trust using offline fixtures" });
+    return { cancelled: false };
   });
   handle("launcher:open-social", async (_event, target) => {
     const url = target === "github" ? GITHUB_URL : target === "x" ? X_URL : null;
@@ -637,9 +676,9 @@ function registerIpc({ logger, stateStore }) {
 
   handle("launcher:doctor", () => IS_DEV_PROFILE ? runtimeHost.devDoctor() : runtimeHost.doctor());
   handle("launcher:configuration-decision", (_event, approvalId, approved) => configurationReview.decide(approvalId, approved));
-  handle("launcher:repair-preview", (_event, protocol) => runtimeHost.previewIntegrationRepair(protocol));
-  handle("launcher:repair-apply", async (_event, protocol, approvalId) => {
-    await runtimeHost.applyIntegrationRepair(protocol, approvalId);
+  handle("launcher:repair-preview", (_event, protocol, resolutions) => runtimeHost.previewIntegrationRepair(protocol, undefined, resolutions));
+  handle("launcher:repair-apply", async (_event, protocol, approvalId, resolutions) => {
+    await runtimeHost.applyIntegrationRepair(protocol, approvalId, resolutions);
     const state = stateStore.update({ codexRestartRequired: true, codexCatalogVerified: false });
     send("launcher:state-changed", state);
     stopCatalogVerificationMonitor();
@@ -683,7 +722,9 @@ function registerIpc({ logger, stateStore }) {
     stopCatalogVerificationMonitor();
     return { cancelled: false, state };
   });
-  handle("launcher:setup-core", async () => {
+  handle("launcher:setup-core", async (_event, options = {}) => {
+    if (!options || Object.keys(options).some(key => key !== "migrateBase") || (options.migrateBase !== undefined && typeof options.migrateBase !== "boolean")) throw new Error("Unsupported setup options");
+    if (options.migrateBase && (IS_DEV_PROFILE || !IS_CODEX_PROFILE)) throw new Error("Migration requires a production profile window");
     const setupState = stateStore.read();
     if (setupState.browserInteractionMode === "automatic") {
       const browser = await browserHost.probeAuthentication();
@@ -704,7 +745,7 @@ function registerIpc({ logger, stateStore }) {
           : "Run the browser smoke test before installing the Codex integration",
       );
     }
-    const result = IS_DEV_PROFILE ? await runtimeHost.setupDevCore() : await runtimeHost.setupCore();
+    const result = IS_DEV_PROFILE ? await runtimeHost.setupDevCore() : await runtimeHost.setupCore(options);
     stateStore.update({
       coreSetupComplete: true,
       codexCatalogVerified: IS_DEV_PROFILE ? true : false,
@@ -770,6 +811,7 @@ function registerIpc({ logger, stateStore }) {
 
   handle("launcher:autostart", (_event, enabled) => {
     if (IS_DEV_PROFILE) throw new Error("The isolated DEV launcher is started explicitly from the repository CLI");
+    if (IS_CODEX_PROFILE) throw new Error("Named profile launchers are started explicitly; changing the desktop-wide login item from a profile is not supported");
     const desired = enabled === true;
     const autostart = setAutostart(app, desired);
     return {
@@ -952,6 +994,9 @@ async function start() {
   app.commandLine.appendSwitch("remote-debugging-port", String(cdpPort));
 
   await app.whenReady();
+  if (runtimeRegistry) runtimeRegistry.assertBaseOwner(LAUNCHER_PROFILE.integrationTarget);
+
+  const targetReservation = IS_CODEX_PROFILE ? await runtimeRegistry.ensure(LAUNCHER_PROFILE.integrationTarget) : null;
 
   const stateStore = createStateStore(path.join(app.getPath("userData"), "launcher-state.json"));
   if (IS_DEV_PROFILE && !stateStore.read().onboardingComplete) {
@@ -972,8 +1017,8 @@ async function start() {
       codexRestartRequired: false,
     });
   }
-  const autostart = IS_DEV_PROFILE ? { supported: false, enabled: false } : getAutostart(app);
-  if (!IS_DEV_PROFILE
+  const autostart = IS_DEV_PROFILE || IS_CODEX_PROFILE ? { supported: false, enabled: false } : getAutostart(app);
+  if (!IS_DEV_PROFILE && !IS_CODEX_PROFILE
     && stateStore.read().onboardingComplete
     && autostart.supported
     && stateStore.read().autoStart !== autostart.enabled) {
@@ -1004,6 +1049,7 @@ async function start() {
     installedRuntimeRoot,
     runtimeRootProvider,
     coreHome: CORE_HOME,
+    integrationTarget: LAUNCHER_PROFILE.integrationTarget,
     browserDescriptorPath: BROWSER_DESCRIPTOR_PATH,
     launcherProfile: LAUNCHER_PROFILE.kind,
     publishOperation,
@@ -1017,6 +1063,8 @@ async function start() {
     browserDescriptorPath: BROWSER_DESCRIPTOR_PATH,
     coreHome: CORE_HOME,
     codexHome: LAUNCHER_PROFILE.codexHome,
+    integrationTarget: LAUNCHER_PROFILE.integrationTarget,
+    runtimePort: targetReservation?.port,
     launcherProfile: LAUNCHER_PROFILE.kind,
     publishOperation,
     supervisor: runtimeSupervisor,

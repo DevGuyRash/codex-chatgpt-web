@@ -1,5 +1,7 @@
 import { existsSync, readFileSync } from "node:fs";
 import { isDeepStrictEqual } from "node:util";
+import { join } from "node:path";
+import type { IntegrationTarget } from "./contracts/codex-integration";
 import { stripUtf8Bom } from "./config";
 import { ROUTES_BEGIN, ROUTES_END } from "./codex-config-markers";
 import { parseTomlValue, setTomlScalar } from "./toml-edit";
@@ -123,12 +125,17 @@ function findTopLevelPositiveInteger(lines: string[], key: string): number | und
   return value;
 }
 
-export function readCodexModelContextOverride(): CodexModelContextOverride | undefined {
-  const path = getCodexConfigPath();
-  if (!existsSync(path)) return undefined;
-  const text = readFileSync(path, "utf8");
-  const lines = splitLines(text);
-  const contextWindow = findTopLevelPositiveInteger(lines, "model_context_window");
+export function readCodexModelContextOverride(target?: IntegrationTarget, proposedSource?: string): CodexModelContextOverride | undefined {
+  const paths = [...(target?.kind === "profile" ? [join(target.codexHome, "config.toml")] : []), getCodexConfigPath(target)];
+  let contextWindow: number | undefined;
+  for (const path of paths) {
+    const proposed = path === getCodexConfigPath(target) ? proposedSource : undefined;
+    if (proposed === undefined && !existsSync(path)) continue;
+    const value = parseTomlValue(proposed ?? readFileSync(path, "utf8")).model_context_window;
+    if (value === undefined) continue;
+    if (typeof value !== "number" || !Number.isSafeInteger(value) || value <= 0) throw new Error("model_context_window in Codex config must be a positive integer");
+    contextWindow = value;
+  }
   return contextWindow === undefined ? undefined : { contextWindow };
 }
 

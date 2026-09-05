@@ -63,3 +63,14 @@ test("competing commented tracked assignments are not automatically consolidated
   const text = `${ROUTES_BEGIN}\n# openai_base_url="one"\n# openai_base_url="two"\n${ROUTES_END}\n`;
   expect(() => setTrackedCodexScalar(text, ["openai_base_url"], "new")).toThrow("Multiple commented assignments");
 });
+
+test("invalid duplicate definitions retain every scalar occurrence without choosing a winner", () => {
+  const source = inspectCodexConfigSource('openai_base_url="one"\n"openai_base_url"="two"\n[features]\nmulti_agent=true\nmulti_agent=false\n');
+  expect(source.conflicts.length).toBeGreaterThan(0);
+  expect(source.assignments.map(({ path, value, line }) => ({ path, value, line }))).toEqual([
+    { path: ["openai_base_url"], value: "one", line: 1 },
+    { path: ["openai_base_url"], value: "two", line: 2 },
+    { path: ["features", "multi_agent"], value: true, line: 4 },
+    { path: ["features", "multi_agent"], value: false, line: 5 },
+  ]);
+});

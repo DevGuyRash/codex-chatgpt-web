@@ -13,6 +13,7 @@ import {
   readLauncherBrowserHostDescriptor,
 } from "./launcher-browser-host";
 import { processRunning } from "./process";
+import type { IntegrationTarget } from "./contracts/codex-integration";
 
 export type CheckStatus = "ok" | "warning" | "error";
 
@@ -87,12 +88,13 @@ async function proxyCheck(config: AppConfig): Promise<DoctorCheck> {
   }
 }
 
-export async function runDoctor(): Promise<DoctorReport> {
+export async function runDoctor(target?: IntegrationTarget): Promise<DoctorReport> {
   const checks: DoctorCheck[] = [];
   let config: AppConfig;
   try {
-    config = loadConfig();
-    checks.push({ id: "config", status: "ok", message: `Configuration is valid (${getConfigPath()})` });
+    config = loadConfig(target?.runtimeHome);
+    target ??= config.integrationTarget;
+    checks.push({ id: "config", status: "ok", message: `Configuration is valid (${getConfigPath(target?.runtimeHome)})` });
   } catch (error) {
     checks.push({ id: "config", status: "error", message: "Configuration is invalid", detail: error instanceof Error ? error.message : String(error) });
     return { ok: false, checks };
@@ -138,7 +140,7 @@ export async function runDoctor(): Promise<DoctorReport> {
     }
   }
 
-  const codex = inspectCodexIntegration({ readOnly: true });
+  const codex = inspectCodexIntegration({ readOnly: true, target });
   if (!codex.installed) {
     checks.push({ id: "codex", status: "error", code: "codex_route_missing", message: "Codex model route is not installed" });
   } else if (codex.errors.length > 0) {

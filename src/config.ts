@@ -9,6 +9,7 @@ import {
 } from "./chatgpt-web-models";
 import type { CodexProviderConfig } from "./types";
 import { VERSION } from "./version";
+import { validateIntegrationTarget, integrationConnectorNames } from "./codex-integration-target";
 
 export type RuntimeMode = "browser-only" | "full";
 export type BrowserHostMode = "managed-chrome" | "launcher";
@@ -71,21 +72,24 @@ export function resolveDevSetupConnectorName(existingName?: string, requestedNam
 export interface InteractionConnectorIdentities {
   appName: string;
   automaticAppName: string;
-  manualAppName: typeof ZERO_RISK_CHATGPT_CONNECTOR_NAME;
+  manualAppName: string;
 }
 
 export function resolveInteractionConnectorIdentities(
   existing: Pick<AppConfig, "appName" | "automaticAppName" | "browserInteractionMode"> | undefined,
   interactionMode: BrowserInteractionMode,
   requestedAutomaticName?: string,
+  target?: AppConfig["integrationTarget"],
 ): InteractionConnectorIdentities {
   const previousAutomaticName = existing?.automaticAppName
     || (existing?.browserInteractionMode !== "manual" ? existing?.appName : undefined);
-  const automaticAppName = resolveSetupConnectorName(previousAutomaticName, requestedAutomaticName);
+  const names = integrationConnectorNames(target);
+  const automaticAppName = resolveSetupConnectorName(target?.kind === "profile" && previousAutomaticName === CHATGPT_CONNECTOR_NAME ? names.automatic : previousAutomaticName ?? names.automatic, requestedAutomaticName);
+  if (automaticAppName === names.manual) throw new Error("Automatic and Zero Risk connector names must differ");
   return {
-    appName: interactionMode === "manual" ? ZERO_RISK_CHATGPT_CONNECTOR_NAME : automaticAppName,
+    appName: interactionMode === "manual" ? names.manual : automaticAppName,
     automaticAppName,
-    manualAppName: ZERO_RISK_CHATGPT_CONNECTOR_NAME,
+    manualAppName: names.manual,
   };
 }
 
@@ -100,6 +104,7 @@ export interface TunnelConfig {
 
 export interface AppConfig {
   version: 3;
+  integrationTarget?: import("./contracts/codex-integration").IntegrationTarget;
   purpose?: "dev-harness";
   releaseVersion: string;
   mode: RuntimeMode;
@@ -109,7 +114,7 @@ export interface AppConfig {
   contextWindow: number;
   appName: string;
   automaticAppName: string;
-  manualAppName: typeof ZERO_RISK_CHATGPT_CONNECTOR_NAME;
+  manualAppName: string;
   browserHost: BrowserHostMode;
   browserInteractionMode: BrowserInteractionMode;
   browserHostDescriptorPath?: string;
@@ -156,8 +161,8 @@ export function getConfigDir(): string {
   return resolve(expandUserPath(configured || join(homedir(), ".codex-chatgpt-web")));
 }
 
-export function getConfigPath(): string {
-  return join(getConfigDir(), "config.json");
+export function getConfigPath(home = getConfigDir()): string {
+  return join(home, "config.json");
 }
 
 export function isWindowsPipeEndpoint(value: string): boolean {
@@ -220,8 +225,7 @@ export function preserveUtf8Bom(text: string, original: string): string {
   return original.startsWith("\uFEFF") ? `\uFEFF${stripUtf8Bom(text)}` : stripUtf8Bom(text);
 }
 
-export function defaultConfig(mode: RuntimeMode = "browser-only"): AppConfig {
-  const home = getConfigDir();
+export function defaultConfig(mode: RuntimeMode = "browser-only", home = getConfigDir()): AppConfig {
   return {
     version: 3,
     releaseVersion: VERSION,
@@ -365,14 +369,14 @@ export function defaultChromeExecutable(
   return "/usr/bin/google-chrome";
 }
 
-export function loadConfig(): AppConfig {
-  const path = getConfigPath();
+export function loadConfig(home?: string): AppConfig {
+  const path = getConfigPath(home);
   if (!existsSync(path)) throw new Error(`Configuration is missing: ${path}. Run codex-chatgpt-web setup first.`);
   return parseConfig(JSON.parse(stripUtf8Bom(readFileSync(path, "utf8"))), path);
 }
 
-export function loadConfigForSetup(): AppConfig {
-  const path = getConfigPath();
+export function loadConfigForSetup(home?: string): AppConfig {
+  const path = getConfigPath(home);
   if (!existsSync(path)) throw new Error(`Configuration is missing: ${path}. Run codex-chatgpt-web setup first.`);
   const raw = JSON.parse(stripUtf8Bom(readFileSync(path, "utf8"))) as Record<string, unknown>;
   if (raw.version === 1 && raw.mode === "pro-only") {
@@ -396,6 +400,7 @@ export function loadConfigForSetup(): AppConfig {
 function parseConfig(value: unknown, path: string): AppConfig {
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error(`Invalid configuration object in ${path}`);
   const parsed = value as Partial<AppConfig>;
+  if (parsed.integrationTarget !== undefined) validateIntegrationTarget(parsed.integrationTarget, dirname(path));
   if (parsed.version !== 3) throw new Error(`Unsupported configuration version in ${path}; rerun setup to migrate it`);
   if (parsed.purpose !== undefined && parsed.purpose !== "dev-harness") {
     throw new Error(`Invalid configuration purpose in ${path}`);
@@ -437,12 +442,13 @@ function parseConfig(value: unknown, path: string): AppConfig {
   if (parsed.appName!.length > 80) throw new Error(`appName is too long in ${path}`);
   const automaticAppName = parsed.automaticAppName
     ?? (browserInteractionMode === "automatic" ? parsed.appName : CHATGPT_CONNECTOR_NAME);
-  const manualAppName = parsed.manualAppName ?? ZERO_RISK_CHATGPT_CONNECTOR_NAME;
+  const expectedManualName = integrationConnectorNames(parsed.integrationTarget).manual;
+  const manualAppName = parsed.manualAppName ?? expectedManualName;
   if (typeof automaticAppName !== "string" || !automaticAppName.trim() || automaticAppName.length > 80) {
     throw new Error(`Invalid automaticAppName in ${path}`);
   }
-  if (manualAppName !== ZERO_RISK_CHATGPT_CONNECTOR_NAME) {
-    throw new Error(`manualAppName must be ${JSON.stringify(ZERO_RISK_CHATGPT_CONNECTOR_NAME)} in ${path}`);
+  if (manualAppName !== expectedManualName && !(parsed.integrationTarget?.kind === "profile" && browserInteractionMode === "automatic" && manualAppName === ZERO_RISK_CHATGPT_CONNECTOR_NAME)) {
+    throw new Error(`manualAppName must be ${JSON.stringify(expectedManualName)} in ${path}`);
   }
   if (automaticAppName === manualAppName) {
     throw new Error(`Automatic and Zero Risk connector names must differ in ${path}; rerun setup`);
@@ -552,7 +558,8 @@ function parseConfig(value: unknown, path: string): AppConfig {
 }
 
 export function saveConfig(config: AppConfig): void {
-  const path = getConfigPath();
+  if (config.integrationTarget !== undefined) validateIntegrationTarget(config.integrationTarget);
+  const path = getConfigPath(config.integrationTarget?.runtimeHome);
   const original = existsSync(path) ? readFileSync(path, "utf8") : "";
   atomicWriteFile(path, preserveUtf8Bom(`${JSON.stringify(config, null, 2)}\n`, original));
 }
@@ -594,8 +601,8 @@ export function providerConfig(config: AppConfig): CodexProviderConfig {
       storageStatePath: config.storageStatePath,
       chromeExecutablePath: config.chromeExecutablePath,
       brokerSocketPath: config.brokerSocketPath,
-      threadEnvironmentStatePath: join(getConfigDir(), "runtime", "thread-environments.json"),
-      lunaCheckpointStatePath: join(getConfigDir(), "runtime", "luna-checkpoints.json"),
+      threadEnvironmentStatePath: join(config.integrationTarget?.runtimeHome ?? getConfigDir(), "runtime", "thread-environments.json"),
+      lunaCheckpointStatePath: join(config.integrationTarget?.runtimeHome ?? getConfigDir(), "runtime", "luna-checkpoints.json"),
       headed: config.headed,
       localToolsEnabled: config.mode === "full",
       solAvailable: manual ? false : config.solAvailable,

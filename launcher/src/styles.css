@@ -2747,6 +2747,30 @@ code {
   }
 }
 
+.configuration-review-title:focus { outline: none; }
+.integration-targets label { display: grid; gap: 8px; margin-block: 12px; }
+.integration-targets input, .integration-targets select { min-width: 0; width: 100%; }
+.integration-targets code, .integration-targets pre { white-space: pre-wrap; overflow-wrap: anywhere; }
+.configuration-groups { display: grid; gap: 22px; min-width: 0; }
+.configuration-target { display: grid; gap: 5px; }
+.configuration-target code, .configuration-groups code { white-space: pre-wrap; overflow-wrap: anywhere; word-break: break-word; }
+.configuration-group { min-width: 0; }
+.configuration-group > h3 { margin: 0 0 5px; }
+.configuration-group > p { margin: 0 0 12px; line-height: 1.5; }
+.configuration-change-card { min-width: 0; border: 1px solid var(--color-border); border-radius: 10px; padding: 14px; margin-top: 10px; }
+.configuration-change-card h4 { margin: 0 0 12px; font-size: 13px; overflow-wrap: anywhere; }
+.configuration-value-pair { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 16px; }
+.configuration-value-pair h5 { margin: 0 0 6px; font-size: 11px; font-weight: 600; }
+.configuration-value-pair p { margin: 0; line-height: 1.5; }
+.configuration-value-pair small { display: block; margin-top: 5px; }
+.configuration-change-card details { margin-top: 12px; min-width: 0; }
+.configuration-change-card summary { cursor: pointer; font-size: 12px; }
+.configuration-occurrences ul { padding-left: 18px; }
+.configuration-occurrences li { margin: 12px 0; min-width: 0; }
+.configuration-occurrences li > code { font-size: 11px; }
+.configuration-occurrences li > button { display: block; margin-top: 8px; }
+@media (max-width: 560px) { .configuration-value-pair { grid-template-columns: minmax(0, 1fr); gap: 12px; } }
+
 @media (prefers-reduced-motion: reduce) {
   *,
   *::before,

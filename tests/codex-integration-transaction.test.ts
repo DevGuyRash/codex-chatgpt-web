@@ -3,19 +3,32 @@ import { mkdtempSync, readFileSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { snapshotFile, writeFilesWithCompensation } from "../src/codex-integration-shared";
+import { withConfigurationWriteLocks } from "../src/configuration-write-lock";
+
+test("overlapping writers cannot commit while approval inputs are locked", () => {
+  const dir = mkdtempSync(join(tmpdir(), "integration-writer-"));
+  const config = join(dir, "config.toml");
+  try {
+    writeFileSync(config, "original");
+    withConfigurationWriteLocks([config], () => {
+      expect(() => writeFilesWithCompensation([{ path: config, data: "competitor" }])).toThrow("writer is busy");
+      expect(readFileSync(config, "utf8")).toBe("original");
+    });
+    writeFilesWithCompensation([{ path: config, data: "reviewed" }]);
+    expect(readFileSync(config, "utf8")).toBe("reviewed");
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
 
 test("failed integration preserves edits made after a successful transaction write", () => {
   const dir = mkdtempSync(join(tmpdir(), "integration-transaction-"));
   try {
     const config = join(dir, "config.toml");
-    const obstruction = join(dir, "not-a-directory");
     writeFileSync(config, "original");
-    writeFileSync(obstruction, "file");
     expect(() => writeFilesWithCompensation([
       { path: config, data: "transaction" },
-      { path: join(obstruction, "journal"), get data() {
+      { path: join(dir, "journal"), get data(): string {
         writeFileSync(config, "new user edit");
-        return "journal";
+        throw new Error("injected second-write failure");
       } },
     ])).toThrow("preserved for manual recovery");
     expect(readFileSync(config, "utf8")).toBe("new user edit");
@@ -26,13 +39,11 @@ test("rollback does not touch a file whose transaction write was never reached",
   const dir = mkdtempSync(join(tmpdir(), "integration-transaction-"));
   try {
     const untouched = join(dir, "untouched");
-    const obstruction = join(dir, "not-a-directory");
     writeFileSync(untouched, "original");
-    writeFileSync(obstruction, "file");
     expect(() => writeFilesWithCompensation([
-      { path: join(obstruction, "journal"), get data() {
+      { path: join(dir, "journal"), get data(): string {
         writeFileSync(untouched, "external edit");
-        return "journal";
+        throw new Error("injected first-write failure");
       } },
       { path: untouched, data: "never written" },
     ])).toThrow();
@@ -44,12 +55,10 @@ test("failed integration restores its own unchanged write", () => {
   const dir = mkdtempSync(join(tmpdir(), "integration-transaction-"));
   try {
     const config = join(dir, "config.toml");
-    const obstruction = join(dir, "not-a-directory");
     writeFileSync(config, "original");
-    writeFileSync(obstruction, "file");
     expect(() => writeFilesWithCompensation([
       { path: config, data: "transaction" },
-      { path: join(obstruction, "journal"), data: "journal" },
+      { path: join(dir, "journal"), get data(): string { throw new Error("injected second-write failure"); } },
     ])).toThrow();
     expect(readFileSync(config, "utf8")).toBe("original");
   } finally { rmSync(dir, { recursive: true, force: true }); }

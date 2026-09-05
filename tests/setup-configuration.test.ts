@@ -56,6 +56,44 @@ test("setup and repair share commented source and ambiguous-section detection", 
   expect(blocked.conflicts.some(conflict => conflict.message.includes("no end marker"))).toBe(true);
 }));
 
+test("setup previews guided resolution of duplicates without changing source", () => fixture(options => {
+  const text = 'openai_base_url="one"\nopenai_base_url="two" # preserve\n';
+  writeFileSync(getCodexConfigPath(), text);
+  const blocked = previewSetupConfiguration({ ...options, replaceCodexRoute: true });
+  const setting = blocked.groups!.flatMap(group => group.settings).find(item => item.path === "openai_base_url")!;
+  expect(setting.occurrences).toHaveLength(2);
+  const resolutions = [{ occurrenceId: setting.occurrences[0]!.id }];
+  const preview = previewSetupConfiguration({ ...options, replaceCodexRoute: true, resolutions });
+  expect(preview.status).toBe("ready");
+  expect(preview.textChanges![0]!.after).toContain('# openai_base_url="two" # preserve');
+  expect(readFileSync(getCodexConfigPath(), "utf8")).toBe(text);
+  expect(() => preflightSetup({ ...options, replaceCodexRoute: true, configurationApproval: preview.approvalId })).toThrow("changed since preview");
+}));
+
+test("setup exposes bounded duplicate table consolidation alongside assignment choices", () => fixture(options => {
+  const original = '[features]\nmulti_agent=true\n[other]\nkeep="unchanged"\n[features]\nmulti_agent_v2=true\n';
+  writeFileSync(getCodexConfigPath(), original);
+  const blocked = previewSetupConfiguration(options);
+  const table = blocked.groups!.flatMap(group => group.settings).find(setting => setting.resolutionKind === "table")!;
+  expect(table.occurrences).toHaveLength(2);
+  const preview = previewSetupConfiguration({ ...options, resolutions: [{ occurrenceId: table.occurrences[0]!.id }] });
+  expect(preview.status).toBe("ready");
+  expect(preview.textChanges![0]!.after).toContain('# [features]\n# multi_agent_v2=true');
+  expect(readFileSync(getCodexConfigPath(), "utf8")).toBe(original);
+}));
+
+test("setup offers bounded route-section consolidation without acquiring unrelated contents", () => fixture(options => {
+  const original = `${ROUTES_BEGIN}\nopenai_base_url="one"\n${ROUTES_END}\n${ROUTES_BEGIN}\nexperimental_realtime_webrtc_call_base_url="voice"\nkeep="untouched"\n${ROUTES_END}\n`;
+  writeFileSync(getCodexConfigPath(), original);
+  const blocked = previewSetupConfiguration({ ...options, replaceCodexRoute: true });
+  const section = blocked.groups!.flatMap(group => group.settings).find(setting => setting.resolutionKind === "route-section")!;
+  expect(section.occurrences).toHaveLength(2);
+  const preview = previewSetupConfiguration({ ...options, replaceCodexRoute: true, resolutions: [{ occurrenceId: section.occurrences[0]!.id }] });
+  expect(preview.status).toBe("ready");
+  expect(preview.textChanges![0]!.after).toContain('keep="untouched"');
+  expect(readFileSync(getCodexConfigPath(), "utf8")).toBe(original);
+}));
+
 test("existing-install setup reactivates tracked comments and explicit replacement cannot bypass broken boundaries", () => fixture(options => {
   const config = defaultConfig("browser-only");
   saveConfig(config);

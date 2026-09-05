@@ -89,8 +89,9 @@ export function installCodexInterruptHook(
   text: string,
   configPath: string,
   config: Pick<AppConfig, "runtimeCommand">,
+  runtimeHome?: string,
 ): { text: string; installed: InstalledCodexInterruptHook } {
-  return installCodexInterruptHookCommand(text, configPath, codexInterruptHookCommand(config));
+  return installCodexInterruptHookCommand(text, configPath, codexInterruptHookCommand(config, runtimeHome));
 }
 
 export function installCodexInterruptHookCommand(

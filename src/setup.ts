@@ -7,6 +7,7 @@ import {
   currentRuntimeCommand,
   defaultBrokerEndpoint,
   defaultConfig,
+  getConfigDir,
   getConfigPath,
   loadConfigForSetup,
   preserveUtf8Bom,
@@ -34,6 +35,7 @@ import {
 } from "./dev-chat/constants";
 import {
   assertServiceIdle,
+  assertRuntimeEndpointClosed,
   getServiceStatus,
   installService,
   removeLegacyRuntimeArtifacts,
@@ -47,9 +49,14 @@ import { configurationApprovalId, describeCodexConfigurationChanges, describeCod
 import { getCodexConfigPath, serializeJournal, snapshotFile, writeFilesWithCompensation } from "./codex-integration-shared";
 import { inspectCodexConfigSource } from "./codex-config-source";
 import { CodexConfigurationError } from "./codex-configuration-error";
-import type { CodexRepairPreview } from "./contracts/codex-integration";
+import type { CodexRepairPreview, IntegrationTarget, ConfigurationResolutionSelection } from "./contracts/codex-integration";
+import { configurationReviewContext, withConfigurationReview } from "./codex-configuration-review";
+import { canonicalConfigurationPath, resolveIntegrationTarget, validateIntegrationTarget } from "./codex-integration-target";
 
 export interface SetupOptions {
+  migrateBase?: boolean;
+  target?: IntegrationTarget;
+  resolutions?: ConfigurationResolutionSelection[];
   mode: RuntimeMode;
   browserInteractionMode?: BrowserInteractionMode;
   subagentProtocol?: SubagentProtocol;
@@ -125,9 +132,9 @@ export function existingFullSetupCredentials(
   };
 }
 
-function loadExistingConfig(): AppConfig | undefined {
-  if (!existsSync(getConfigPath())) return undefined;
-  return loadConfigForSetup();
+function loadExistingConfig(target?: IntegrationTarget): AppConfig | undefined {
+  if (!existsSync(getConfigPath(target?.runtimeHome))) return undefined;
+  return loadConfigForSetup(target?.runtimeHome);
 }
 
 function meaningfulRuntimeChange(before: AppConfig, after: AppConfig): boolean {
@@ -245,13 +252,14 @@ async function waitForProxy(config: AppConfig, timeoutMs = 10_000): Promise<void
 }
 
 function baseConfig(existing: AppConfig | undefined, options: SetupOptions): AppConfig {
-  const config = existing ? structuredClone(existing) : defaultConfig(options.mode);
+  const config = existing ? structuredClone(existing) : defaultConfig(options.mode, options.target?.runtimeHome);
   config.mode = options.mode;
   if (options.browserInteractionMode) config.browserInteractionMode = options.browserInteractionMode;
   Object.assign(config, resolveInteractionConnectorIdentities(
     existing,
     config.browserInteractionMode,
     options.appName,
+    options.target,
   ));
   if (options.subagentProtocol) config.subagentProtocol = options.subagentProtocol;
   config.releaseVersion = VERSION;
@@ -365,7 +373,7 @@ async function configureTunnel(config: AppConfig, existing: AppConfig | undefine
     : "codex-chatgpt-web";
   const profileName = config.purpose === DEV_CONFIG_PURPOSE
     ? interactionMode === "manual" ? `${DEV_TUNNEL_BASE_NAME}-zero-risk` : DEV_TUNNEL_BASE_NAME
-    : productionProfileName;
+    : config.integrationTarget?.kind === "profile" ? `${productionProfileName}-${config.integrationTarget.id}` : productionProfileName;
   const configuredTunnel = createTunnelConfig({
     binaryPath: installedBinary,
     tunnelId,
@@ -412,16 +420,19 @@ async function bootstrapTunnelProfile(config: AppConfig): Promise<void> {
 }
 
 function prepareSetup(options: SetupOptions): PreparedSetup {
-  const existing = loadExistingConfig();
+  if (options.target) validateIntegrationTarget(options.target);
+  const existing = loadExistingConfig(options.target);
+  if (existing?.integrationTarget && options.target && (existing.integrationTarget.id !== options.target.id || existing.integrationTarget.runtimeHome !== options.target.runtimeHome)) throw new Error("Setup target does not match this runtime's recorded integration target");
   if (existing?.purpose === DEV_CONFIG_PURPOSE) {
     throw new Error("A DEV harness configuration cannot be installed into Codex");
   }
   const config = baseConfig(existing, {
     ...options,
     subagentProtocol: options.subagentProtocol
-      ?? readCodexSubagentProtocol(existing?.subagentProtocol ?? "compatibility-v1"),
+      ?? readCodexSubagentProtocol(existing?.subagentProtocol ?? "compatibility-v1", options.target),
   });
   delete config.purpose;
+  if (options.target) config.integrationTarget = options.target;
   const launcherOwned = config.browserHost === "launcher";
   if (!launcherOwned && process.platform !== "darwin") {
     throw new Error(
@@ -474,14 +485,16 @@ export function preflightSetup(options: SetupOptions): void {
   prepareCodexIntegration(config, {
     replaceExistingRoute: options.replaceCodexRoute,
     reviewOwnedChanges: true,
+    target: options.target, resolutions: options.resolutions,
+    migrateBase: options.migrateBase,
   });
 }
 
 function prepareSetupConfiguration(options: SetupOptions) {
-  const runtimeInput = snapshotFile(getConfigPath());
+  const runtimeInput = snapshotFile(getConfigPath(options.target?.runtimeHome));
   const prepared = prepareSetup(options);
-  const integrationPlan = prepareCodexIntegration(prepared.config, { replaceExistingRoute: options.replaceCodexRoute, reviewOwnedChanges: true });
-  const original = integrationPlan.expected.find(file => file.path === getCodexConfigPath())?.data?.toString("utf8") ?? "";
+  const integrationPlan = prepareCodexIntegration(prepared.config, { target: options.target, resolutions: options.resolutions, replaceExistingRoute: options.replaceCodexRoute, reviewOwnedChanges: true, migrateBase: options.migrateBase });
+  const original = integrationPlan.expected.find(file => file.path === getCodexConfigPath(options.target))?.data?.toString("utf8") ?? "";
   const changes = describeCodexConfigurationChanges(original, integrationPlan.configWrite.data);
   const configKeys = ["mode", "subagentProtocol", "releaseVersion", "host", "port", "browserHost", "browserInteractionMode", "appName", "experimentalBiggerContext", "zeroRiskProEnabled", "autoApproveToolCalls"] as const;
   for (const key of configKeys) {
@@ -494,18 +507,27 @@ function prepareSetupConfiguration(options: SetupOptions) {
     version: 1, operation: "setup", protocol: prepared.config.subagentProtocol, status: "ready",
     approvalId: configurationApprovalId({ operation: "setup", options: intent }, [...integrationPlan.expected, runtimeInput], [
       integrationPlan.configWrite, { path: "installation-journal", data: serializeJournal(integrationPlan.journal) },
+      ...(integrationPlan.additionalWrites ?? []),
     ], integrationPlan.removals),
     changes, conflicts: integrationPlan.conflicts ?? [],
-    textChanges: describeCodexSourceChange(getCodexConfigPath(), original, integrationPlan.configWrite.data),
+    textChanges: [...describeCodexSourceChange(getCodexConfigPath(options.target), original, integrationPlan.configWrite.data), ...(integrationPlan.migration ? describeCodexSourceChange(integrationPlan.migration.base.configPath, integrationPlan.migration.original, integrationPlan.migration.restored) : [])],
+    resolutions: options.resolutions ?? [],
     codexRestartRequired: true, launcherRestartRequired: false,
     effects: [
-      "Apply the listed Codex configuration changes and update their installation ownership records; invalidate the cached Codex model catalog.",
+      options.target?.kind === "profile" ? "Update only this profile's configuration, ownership records, and generated model catalog; leave the shared native model cache unchanged." : "Apply the listed Codex configuration changes and update their installation ownership records; invalidate the cached Codex model catalog.",
+      ...(integrationPlan.migration ? [`Also restore still-owned base routing, protocol settings, and Interrupt cleanup in ${integrationPlan.migration.base.configPath}. Preserve original restoration records in ${integrationPlan.migration.archive}. Quit the base launcher and stop its service before applying; migration does not stop or restart that runtime.`] : []),
       "Set up or update the runtime, safely stop its existing owner when needed, and start the selected runtime after configuration succeeds.",
       ...(prepared.config.browserInteractionMode === "automatic" ? ["Inspect the signed-in browser's available models; setup does not submit a model message."] : []),
       ...(prepared.config.mode === "full" ? ["Configure the selected MCP tunnel using the supplied or saved credentials; credential values are not shown in this preview."] : []),
     ],
   };
-  return { ...prepared, integrationPlan, preview, runtimeInput };
+  const target = options.target ?? resolveIntegrationTarget();
+  if (integrationPlan.migration) {
+    const migration = integrationPlan.migration;
+    const baseReview = withConfigurationReview({ ...preview, changes: describeCodexConfigurationChanges(migration.original, migration.restored), conflicts: [] }, migration.base, migration.original, configurationReviewContext(migration.base, migration.expected));
+    preview.additionalTargets = [{ target: migration.base, groups: baseReview.groups! }];
+  }
+  return { ...prepared, integrationPlan, preview: withConfigurationReview(preview, target, original, { ...configurationReviewContext(target, integrationPlan.expected), proposedBaseSource: integrationPlan.migration?.restored }), runtimeInput };
 }
 
 export function previewSetupConfiguration(options: SetupOptions): CodexRepairPreview {
@@ -514,25 +536,27 @@ export function previewSetupConfiguration(options: SetupOptions): CodexRepairPre
     preflightSetup({ ...options, configurationApproval: undefined });
     return prepareSetupConfiguration(options).preview;
   } catch (error) {
-    const input = snapshotFile(getCodexConfigPath()).data?.toString("utf8") ?? "";
+    const input = snapshotFile(getCodexConfigPath(options.target)).data?.toString("utf8") ?? "";
     const conflicts = error instanceof CodexConfigurationError ? error.conflicts : inspectCodexConfigSource(input).conflicts;
-    return { version: 1, operation: "setup", status: "blocked", approvalId: "",
-      protocol: options.subagentProtocol ?? "compatibility-v1", changes: [],
+    return withConfigurationReview({ version: 1, operation: "setup", status: "blocked", approvalId: "",
+      protocol: options.subagentProtocol ?? "compatibility-v1", changes: [], resolutions: options.resolutions ?? [],
       conflicts: conflicts.length ? conflicts : [{ path: "setup", category: "ownership_conflict", message: error instanceof Error ? error.message : "Setup inputs need attention" }],
       codexRestartRequired: true, launcherRestartRequired: false,
-    };
+    }, options.target ?? resolveIntegrationTarget(), input, configurationReviewContext(options.target ?? resolveIntegrationTarget()));
   }
 }
 
 export async function setup(options: SetupOptions): Promise<SetupResult> {
+  if (options.target && canonicalConfigurationPath(getConfigDir()) !== options.target.runtimeHome) throw new Error("Setup must execute in the selected runtime's owning process; use --codex-home and --codex-profile to launch a target-bound CLI invocation");
   const prepared = prepareSetupConfiguration(options);
-  if (prepared.integrationPlan.conflicts?.length && !options.configurationApproval) {
+  if ((prepared.integrationPlan.conflicts?.length || options.migrateBase) && !options.configurationApproval) {
     throw new Error("Setup includes configuration repair; approve its exact preview before continuing");
   }
   if (options.configurationApproval && prepared.preview.approvalId !== options.configurationApproval) {
     throw new Error("Setup configuration changed since preview; review a fresh preview before continuing");
   }
   const { existing, config, launcherOwned, integrationPlan, runtimeInput } = prepared;
+  if (integrationPlan.migration) await assertRuntimeEndpointClosed(integrationPlan.migration.endpoint);
   const saveSetupConfig = () => writeFilesWithCompensation([{
     path: runtimeInput.path,
     data: preserveUtf8Bom(`${JSON.stringify(config, null, 2)}\n`, runtimeInput.data?.toString("utf8") ?? ""),
@@ -670,11 +694,12 @@ export async function setup(options: SetupOptions): Promise<SetupResult> {
     launcherOwned && existing && existing.browserHost !== "launcher",
   );
   if (!migratingTerminalRuntime) removeLegacyRuntimeArtifacts(config);
+  if (integrationPlan.migration) await assertRuntimeEndpointClosed(integrationPlan.migration.endpoint);
   applyPreparedCodexIntegration(integrationPlan);
 
   return {
     mode: config.mode,
-    configPath: getConfigPath(),
+    configPath: getConfigPath(config.integrationTarget?.runtimeHome),
     loginCreated,
     serviceLoaded: launcherOwned ? false : getServiceStatus().loaded,
     tunnelReady,

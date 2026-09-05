@@ -4,6 +4,7 @@ import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import type { AppConfig, SubagentProtocol } from "./config";
 import { atomicWriteFile, expandUserPath, getConfigDir } from "./config";
+import { withConfigurationWriteLocks } from "./configuration-write-lock";
 
 export { MANAGED_COMMENT, MANAGED_ROUTE_COMMENT } from "./codex-config-markers";
 export const CODEX_REALTIME_WEBRTC_CALL_BASE_URL = "https://chatgpt.com/backend-api/codex";
@@ -55,6 +56,8 @@ export interface CodexIntegrationJournal {
   installed: {
     openai_base_url: string;
     experimental_realtime_webrtc_call_base_url: string;
+    model_catalog_json?: string;
+    model_provider?: "openai";
     subagent_protocol: SubagentProtocol;
     agent_max_depth?: number;
   };
@@ -224,6 +227,8 @@ export interface FileSnapshot {
 
 export interface InstallCodexIntegrationOptions {
   replaceExistingRoute?: boolean;
+  target?: import("./contracts/codex-integration").IntegrationTarget;
+  resolutions?: import("./contracts/codex-integration").ConfigurationResolutionSelection[];
 }
 
 export interface UninstallCodexIntegrationResult {
@@ -244,20 +249,24 @@ export function getCodexHome(): string {
   return resolve(expandUserPath(configured || join(homedir(), ".codex")));
 }
 
-export function getCodexConfigPath(): string {
-  return join(getCodexHome(), "config.toml");
+export function getCodexConfigPath(target?: import("./contracts/codex-integration").IntegrationTarget): string {
+  return target?.configPath ?? join(getCodexHome(), "config.toml");
 }
 
 export function getCodexModelsCachePath(): string {
   return join(getCodexHome(), "models_cache.json");
 }
 
-export function getCodexJournalPath(): string {
-  return join(getConfigDir(), "codex", "integration-journal.json");
+export function getCodexJournalPath(target?: import("./contracts/codex-integration").IntegrationTarget): string {
+  return join(target?.runtimeHome ?? getConfigDir(), "codex", "integration-journal.json");
 }
 
-export function getCodexJournalRecoveryPath(): string {
-  return join(getConfigDir(), "codex", "integration-journal.recovery.json");
+export function getCodexJournalRecoveryPath(target?: import("./contracts/codex-integration").IntegrationTarget): string {
+  return join(target?.runtimeHome ?? getConfigDir(), "codex", "integration-journal.recovery.json");
+}
+
+export function codexModelCacheInvalidations(target?: import("./contracts/codex-integration").IntegrationTarget): string[] {
+  return target?.kind === "profile" ? [] : [target ? join(target.codexHome, "models_cache.json") : getCodexModelsCachePath()];
 }
 
 export function routeUrl(config: AppConfig): string {
@@ -287,6 +296,14 @@ export function writeFilesWithCompensation(
   writes: Array<{ path: string; data: string | Uint8Array }>,
   removals: string[] = [],
   options: { expected?: readonly FileSnapshot[]; verify?: () => void } = {},
+): void {
+  return withConfigurationWriteLocks([...writes.map(write => write.path), ...removals, ...(options.expected ?? []).map(file => file.path)], () => writeLockedFilesWithCompensation(writes, removals, options));
+}
+
+function writeLockedFilesWithCompensation(
+  writes: Array<{ path: string; data: string | Uint8Array }>,
+  removals: string[],
+  options: { expected?: readonly FileSnapshot[]; verify?: () => void },
 ): void {
   const paths = [...new Set([...writes.map(write => write.path), ...removals])];
   const snapshots = paths.map(snapshotFile);
@@ -354,15 +371,15 @@ export function writeIntegrationState(
   journal: AnyCodexIntegrationJournal,
   configWrite?: { path: string; data: string },
   removals: string[] = [],
-  options: { expected?: readonly FileSnapshot[]; additionalWrites?: Array<{ path: string; data: string }>; verify?: () => void } = {},
+  options: { target?: import("./contracts/codex-integration").IntegrationTarget; expected?: readonly FileSnapshot[]; additionalWrites?: Array<{ path: string; data: string }>; verify?: () => void } = {},
 ): void {
   const data = serializeJournal(journal);
   // The recovery copy records intent and the primary copy records commit. If the process stops
   // between those writes, the physical config unambiguously selects the completed state.
   writeFilesWithCompensation([
-    { path: getCodexJournalRecoveryPath(), data },
+    { path: getCodexJournalRecoveryPath(options.target), data },
     ...(configWrite ? [configWrite] : []),
     ...(options.additionalWrites ?? []),
-    { path: getCodexJournalPath(), data },
+    { path: getCodexJournalPath(options.target), data },
   ], removals, options);
 }

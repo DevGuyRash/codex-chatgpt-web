@@ -8,6 +8,9 @@ function subscription(channel, listener) {
 
 contextBridge.exposeInMainWorld("codexWebLauncher", {
   snapshot: () => ipcRenderer.invoke("launcher:snapshot"),
+  integrationTargets: () => ipcRenderer.invoke("launcher:integration-targets"),
+  openIntegrationTarget: (target) => ipcRenderer.invoke("launcher:target-open", target),
+  checkTargetCapabilities: () => ipcRenderer.invoke("launcher:target-check"),
   setLanguage: (language) => ipcRenderer.invoke("launcher:set-language", language),
   openSocial: (target) => ipcRenderer.invoke("launcher:open-social", target),
   completeOnboarding: (language, browserInteractionMode) => ipcRenderer.invoke(
@@ -35,11 +38,11 @@ contextBridge.exposeInMainWorld("codexWebLauncher", {
   verifyMcp: () => ipcRenderer.invoke("launcher:mcp-verify"),
   doctor: () => ipcRenderer.invoke("launcher:doctor"),
   decideConfiguration: (approvalId, approved) => ipcRenderer.invoke("launcher:configuration-decision", approvalId, approved),
-  previewIntegrationRepair: (protocol) => ipcRenderer.invoke("launcher:repair-preview", protocol),
-  applyIntegrationRepair: (protocol, approvalId) => ipcRenderer.invoke("launcher:repair-apply", protocol, approvalId),
+  previewIntegrationRepair: (protocol, resolutions) => ipcRenderer.invoke("launcher:repair-preview", protocol, resolutions),
+  applyIntegrationRepair: (protocol, approvalId, resolutions) => ipcRenderer.invoke("launcher:repair-apply", protocol, approvalId, resolutions),
   cancelTurns: () => ipcRenderer.invoke("launcher:cancel-turns"),
   uninstallIntegration: () => ipcRenderer.invoke("launcher:uninstall-integration"),
-  setupCore: () => ipcRenderer.invoke("launcher:setup-core"),
+  setupCore: (options) => ipcRenderer.invoke("launcher:setup-core", options),
   setupMcp: (input) => ipcRenderer.invoke("launcher:setup-mcp", input),
   setMcpStep: (step) => ipcRenderer.invoke("launcher:set-mcp-step", step),
   setAutostart: (enabled) => ipcRenderer.invoke("launcher:autostart", enabled),

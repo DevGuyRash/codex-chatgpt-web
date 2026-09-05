@@ -6,7 +6,8 @@ import type { AppConfig } from "./config";
 import { assertDurableRuntimeCommand, atomicWriteFile, getConfigDir } from "./config";
 import { runCommand, runChecked } from "./process";
 
-const LABEL = "io.github.codex-chatgpt-web.daemon";
+import { runtimeServiceLabel } from "./runtime-service-label";
+const serviceLabel = () => runtimeServiceLabel("io.github.codex-chatgpt-web.daemon");
 
 export interface ServiceStatus {
   supported: boolean;
@@ -48,7 +49,7 @@ function xml(value: string): string {
 }
 
 function plistPath(): string {
-  return join(homedir(), "Library", "LaunchAgents", `${LABEL}.plist`);
+  return join(homedir(), "Library", "LaunchAgents", `${serviceLabel()}.plist`);
 }
 
 function launchDomain(): string {
@@ -56,7 +57,7 @@ function launchDomain(): string {
 }
 
 function serviceTarget(): string {
-  return `${launchDomain()}/${LABEL}`;
+  return `${launchDomain()}/${serviceLabel()}`;
 }
 
 async function bootstrapService(path: string, timeoutMs = 20_000): Promise<void> {
@@ -76,7 +77,7 @@ async function waitForServiceUnloaded(timeoutMs = 20_000): Promise<void> {
   while (getServiceStatus().loaded && Date.now() < deadline) {
     await new Promise(resolveWait => setTimeout(resolveWait, 50));
   }
-  if (getServiceStatus().loaded) throw new Error(`launchd did not unload ${LABEL} after ${timeoutMs}ms`);
+  if (getServiceStatus().loaded) throw new Error(`launchd did not unload ${serviceLabel()} after ${timeoutMs}ms`);
 }
 
 function plist(config: AppConfig): string {
@@ -87,7 +88,7 @@ function plist(config: AppConfig): string {
 <plist version="1.0">
 <dict>
   <key>Label</key>
-  <string>${LABEL}</string>
+  <string>${serviceLabel()}</string>
   <key>ProgramArguments</key>
   <array>
 ${args.map(arg => `    <string>${xml(arg)}</string>`).join("\n")}
@@ -124,14 +125,14 @@ function assertMacOs(): void {
 }
 
 export function getServiceStatus(): ServiceStatus {
-  if (process.platform !== "darwin") return { supported: false, installed: false, loaded: false, label: LABEL };
+  if (process.platform !== "darwin") return { supported: false, installed: false, loaded: false, label: serviceLabel() };
   const path = plistPath();
   const result = runCommand("launchctl", ["print", serviceTarget()]);
   return {
     supported: true,
     installed: existsSync(path),
     loaded: result.status === 0,
-    label: LABEL,
+    label: serviceLabel(),
     definitionPath: path,
   };
 }
@@ -181,7 +182,7 @@ async function control(config: AppConfig, action: "drain" | "resume" | "cancel-t
 export async function interruptActiveTurn(
   config: AppConfig,
   identity: { threadId: string; turnId: string },
-): Promise<{ cancelledHttpTurns: number; cancelledBrowserTurns: number }> {
+): Promise<{ cancelledHttpTurns: number; cancelledBrowserTurns: number; cleanupStatus?: string }> {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 2_000);
   try {
@@ -206,6 +207,7 @@ export async function interruptActiveTurn(
     return {
       cancelledHttpTurns: cancelledHttpTurns as number,
       cancelledBrowserTurns: cancelledBrowserTurns as number,
+      cleanupStatus: typeof result.cleanup_status === "string" ? result.cleanup_status : undefined,
     };
   } finally {
     clearTimeout(timeout);

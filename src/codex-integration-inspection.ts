@@ -48,6 +48,8 @@ export function inspectInstalledCodexConfig(text: string, journal: InspectableJo
     });
   };
   check(["openai_base_url"], journal.installed.openai_base_url);
+  if (journal.version === 10 && journal.installed.model_catalog_json) check(["model_catalog_json"], journal.installed.model_catalog_json);
+  if (journal.version === 10 && journal.installed.model_provider) check(["model_provider"], journal.installed.model_provider);
   if (journal.version === 9 || journal.version === 10) {
     check(["experimental_realtime_webrtc_call_base_url"], journal.installed.experimental_realtime_webrtc_call_base_url);
   }

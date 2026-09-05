@@ -1,5 +1,5 @@
 import { existsSync, readFileSync } from "node:fs";
-import { resolve } from "node:path";
+import { join, resolve } from "node:path";
 import { isDeepStrictEqual } from "node:util";
 import { atomicWriteFile, stripUtf8Bom } from "./config";
 import {
@@ -130,6 +130,8 @@ function parseJournal(path: string): AnyCodexIntegrationJournal {
     && value.previous
     && isPreviousAssignment(value.previousRealtimeWebrtcCallBaseUrl)
     && isInstalledInterruptHook(value.interruptHook)
+    && (installed.model_catalog_json === undefined || (typeof installed.model_catalog_json === "string" && installed.model_catalog_json.length > 0))
+    && (installed.model_provider === undefined || installed.model_provider === "openai")
     && typeof value.configPath === "string") {
     return value as unknown as CodexIntegrationJournal;
   }
@@ -205,9 +207,9 @@ function parseJournal(path: string): AnyCodexIntegrationJournal {
   }
   throw new Error(`Invalid Codex integration journal: ${path}`);
 }
-function journalMatchesConfig(journal: AnyCodexIntegrationJournal): boolean {
+function journalMatchesConfig(journal: AnyCodexIntegrationJournal, target?: import("./contracts/codex-integration").IntegrationTarget): boolean {
   try {
-    assertJournalTargetsConfig(journal, getCodexConfigPath());
+    assertJournalTargetsConfig(journal, getCodexConfigPath(target));
     if (!existsSync(journal.configPath)) return false;
     const text = readFileSync(journal.configPath, "utf8");
     if (journal.version === 2) return text.includes(journal.providerBlock);
@@ -235,9 +237,9 @@ function additiveRecoveryUpgrade(primary: AnyCodexIntegrationJournal, recovery: 
   return isDeepStrictEqual(projected, primary);
 }
 
-export function readJournal({ repair = true }: { repair?: boolean } = {}): AnyCodexIntegrationJournal | undefined {
-  const primaryPath = getCodexJournalPath();
-  const recoveryPath = getCodexJournalRecoveryPath();
+export function readJournal({ repair = true, target }: { repair?: boolean; target?: import("./contracts/codex-integration").IntegrationTarget } = {}): AnyCodexIntegrationJournal | undefined {
+  const primaryPath = getCodexJournalPath(target);
+  const recoveryPath = getCodexJournalRecoveryPath(target);
   let primary: AnyCodexIntegrationJournal | undefined;
   let recovery: AnyCodexIntegrationJournal | undefined;
   let primaryError: unknown;
@@ -247,6 +249,15 @@ export function readJournal({ repair = true }: { repair?: boolean } = {}): AnyCo
   }
   if (existsSync(recoveryPath)) {
     try { recovery = parseJournal(recoveryPath); } catch (error) { recoveryError = error; }
+  }
+  for (const journal of [primary, recovery]) {
+    if (!journal || !target) continue;
+    assertJournalTargetsConfig(journal, target.configPath);
+    if (target.kind === "profile" && (journal.version !== 10
+      || journal.installed.model_catalog_json !== join(target.runtimeHome, "codex", "model-catalog.json")
+      || journal.installed.model_provider !== "openai")) {
+      throw new Error("Profile journal does not own the selected runtime's catalog and provider");
+    }
   }
   if (!primary && !recovery) {
     if (primaryError) throw primaryError;
@@ -259,15 +270,15 @@ export function readJournal({ repair = true }: { repair?: boolean } = {}): AnyCo
     return primary;
   }
   if (recovery && !primary && !primaryError) {
-    if (!journalMatchesConfig(recovery)) {
+    if (!journalMatchesConfig(recovery, target)) {
       throw new Error("Codex integration recovery journal does not match the active config");
     }
     if (repair) atomicWriteFile(primaryPath, serializeJournal(recovery));
     return recovery;
   }
 
-  const primaryMatches = primary ? journalMatchesConfig(primary) : false;
-  const recoveryMatches = recovery ? journalMatchesConfig(recovery) : false;
+  const primaryMatches = primary ? journalMatchesConfig(primary, target) : false;
+  const recoveryMatches = recovery ? journalMatchesConfig(recovery, target) : false;
   const upgrade = primaryMatches && recoveryMatches && primary && recovery && additiveRecoveryUpgrade(primary, recovery);
   if (primaryMatches === recoveryMatches && !upgrade) {
     throw new Error(

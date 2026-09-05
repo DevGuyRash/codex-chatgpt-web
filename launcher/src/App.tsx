@@ -10,6 +10,7 @@ import {
 } from "react";
 import { createPortal } from "react-dom";
 import { ConfigurationRepair, SetupConfigurationReview } from "./ConfigurationRepair";
+import { IntegrationTargets } from "./IntegrationTargets";
 import { DiagnosticChecks, ErrorToast, RecoveryContext, RecoveryDialog } from "./Recovery";
 import { copyFor, type Copy } from "./i18n";
 import { Icon, type IconName } from "./icons";
@@ -1686,7 +1687,7 @@ function SettingsSurface({
     <ContentSurface narrow title={devProfile ? copy.devSettingsTitle : copy.settingsTitle}>
       <SectionHeading label={copy.general} />
       <div className="settings-list">
-        {!devProfile ? <SettingRow body={copy.launchAtLoginBody} flushAfter label={copy.launchAtLogin}>
+        {!devProfile && snapshot.integrationTarget?.kind !== "profile" ? <SettingRow body={copy.launchAtLoginBody} flushAfter label={copy.launchAtLogin}>
           <Switch
             checked={snapshot.state.autoStart}
             onChange={(checked) => void api!.setAutostart(checked)
@@ -1743,6 +1744,7 @@ function SettingsSurface({
       ) : null}
 
       <SectionHeading label={copy.diagnostics} spaced />
+      {!devProfile && api?.integrationTargets ? <IntegrationTargets api={api} language={language} disabled={busy} /> : null}
       {!devProfile && api ? <ConfigurationRepair api={api} language={language} disabled={busy} onBusyChange={setBusy} onRepaired={updateState} onError={setError} /> : null}
       <button className="diagnostic-row" disabled={busy} onClick={() => void runDoctor()} type="button">
         <Icon name="activity" />

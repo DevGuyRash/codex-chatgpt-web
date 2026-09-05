@@ -3,8 +3,8 @@ import { createInterface } from "node:readline/promises";
 import { CodexConfigurationError } from "./codex-configuration-error";
 import { Writable } from "node:stream";
 import { timingSafeEqual } from "node:crypto";
-import { existsSync, rmSync } from "node:fs";
-import { isAbsolute } from "node:path";
+import { existsSync, readFileSync, rmSync } from "node:fs";
+import { dirname, isAbsolute, join } from "node:path";
 import { stdin, stdout } from "node:process";
 import { captureSystemBrowserLoginToFile, checkBrowserEngine, loginToChatGpt } from "./browser-login";
 import { CHATGPT_CONNECTOR_NAME, defaultConfig, getConfigDir, getConfigPath, loadConfig, loadConfigForSetup } from "./config";
@@ -33,6 +33,13 @@ import { VERSION } from "./version";
 import { applyCodexIntegrationRepair, previewCodexIntegrationRepair } from "./codex-integration-repair";
 import { assertRuntimeEndpointClosed } from "./service";
 import { runDevCommand } from "./dev-chat/cli";
+import { integrationLaunch, integrationLaunchCommand, listIntegrationTargets, resolveIntegrationTarget } from "./codex-integration-target";
+import { withConfigurationReview } from "./codex-configuration-review";
+import type { IntegrationTarget } from "./contracts/codex-integration";
+import { assertProfileCapabilities, probeCodexProfileCapabilities, saveProfileCapabilities } from "./codex-profile-capabilities";
+import { refreshProfileModelCatalog } from "./profile-model-catalog";
+import { RuntimeRegistry } from "../launcher/electron/runtime-registry.cjs";
+import { deliverInterruptCleanup, InterruptCleanupClaims } from "./interrupt-cleanup";
 
 const HELP = `codex-chatgpt-web ${VERSION}
 
@@ -46,6 +53,8 @@ Usage:
   codex-chatgpt-web route <status|connect|disconnect>
   codex-chatgpt-web route repair <preview|apply> --subagent-protocol <compatibility-v1|native> [--approve ID]
   codex-chatgpt-web subagents <status|compatibility-v1|native>
+  codex-chatgpt-web targets <list|inspect|refresh-catalog> [--codex-home PATH] [--codex-profile NAME]
+  codex-chatgpt-web targets check --codex-binary PATH --codex-profile NAME [--codex-home PATH]
   codex-chatgpt-web browser check
   codex-chatgpt-web dev launcher
   codex-chatgpt-web dev status [--json]
@@ -68,7 +77,7 @@ Setup options:
                                Full mode: select, paste, and send in the launcher yourself
   --zero-risk-pro              Zero Risk: also install the explicit Pro-sized model row
   --zero-risk-default          Zero Risk: install only the default model row
-  --port NUMBER                Loopback Responses port (default: 17841)
+  --port NUMBER                Loopback port (base: 17841; profiles: reserved target endpoint)
   --chrome PATH                Google Chrome/Chromium executable used for account login
   --browser-host-descriptor PATH
                                Use the embedded launcher browser described by this owner-only file
@@ -78,6 +87,7 @@ Setup options:
   --tunnel-id ID               Existing OpenAI tunnel id (full mode)
   --runtime-key-file PATH      File containing a Tunnels Read+Use runtime key
   --replace-codex-route        Reversibly replace existing Responses or Voice route settings
+  --migrate-base               Review base restoration together with this profile's installation
   --subagent-protocol MODE     compatibility-v1 (default) or native (advanced)
   --restart-service            Explicitly restart this project's daemon after an update
   --login                      Refresh the stored ChatGPT login even if one exists
@@ -90,6 +100,9 @@ Setup options:
 
 Global:
   --home PATH                  Override ~/.codex-chatgpt-web
+  --codex-home PATH            Select a canonical Codex configuration home
+  --codex-profile NAME         Select NAME.config.toml and its independent runtime under --home
+  --resolve ID                 Select a source occurrence from the current setup/repair preview
   -h, --help
   -v, --version
 `;
@@ -138,6 +151,16 @@ async function secretPrompt(question: string): Promise<string> {
     reader.close();
     stdout.write("\n");
   }
+}
+
+function takeResolutions(args: string[]): Array<{ occurrenceId: string }> {
+  const choices: Array<{ occurrenceId: string }> = [];
+  while (args.includes("--resolve")) {
+    const occurrenceId = takeOption(args, "--resolve");
+    if (!occurrenceId || !/^[a-f0-9]{64}$/.test(occurrenceId) || choices.length >= 128) throw new Error("--resolve requires a source occurrence ID from the current preview (maximum 128 choices)");
+    choices.push({ occurrenceId });
+  }
+  return choices;
 }
 
 function assertNoArgs(args: string[]): void {
@@ -265,7 +288,7 @@ async function loginCommand(args: string[]): Promise<void> {
   stdout.write("Passkey session captured for Launcher verification.\n");
 }
 
-async function setupCommand(args: string[]): Promise<void> {
+async function setupCommand(args: string[], target?: IntegrationTarget): Promise<void> {
   const preflightOnly = takeFlag(args, "--preflight-only");
   const previewOnly = takeFlag(args, "--preview-json");
   const configurationApproval = takeOption(args, "--approve-configuration");
@@ -274,10 +297,13 @@ async function setupCommand(args: string[]): Promise<void> {
   const full = takeFlag(args, "--full");
   if (browserOnly === full) throw new Error("Choose exactly one setup mode: --browser-only or --full");
   const portRaw = takeOption(args, "--port");
+  const reservation = target?.kind === "profile" ? new RuntimeRegistry({ runtimeRoot: dirname(dirname(target.runtimeHome)) }).read().targets.find(entry => entry.target.id === target.id) : undefined;
+  if (target?.kind === "profile" && !reservation) throw new Error("Run targets check to reserve this profile's stable endpoint before setup");
+  if (reservation && portRaw && Number(portRaw) !== reservation.port) throw new Error(`This profile owns stable port ${reservation.port}; an explicit --port must match its reservation`);
   let acknowledged = takeFlag(args, "--acknowledge-unofficial");
   const options: SetupOptions = {
     mode: full ? "full" : "browser-only",
-    ...(portRaw ? { port: Number(portRaw) } : {}),
+    ...(portRaw ? { port: Number(portRaw) } : reservation ? { port: reservation.port } : {}),
   };
   const automaticBrowserInteraction = takeFlag(args, "--automatic-browser-interaction");
   const manualBrowserInteraction = takeFlag(args, "--zero-risk-browser-interaction");
@@ -289,6 +315,9 @@ async function setupCommand(args: string[]): Promise<void> {
   if (automaticBrowserInteraction || manualBrowserInteraction) {
     options.browserInteractionMode = manualBrowserInteraction ? "manual" : "automatic";
   }
+  options.resolutions = takeResolutions(args);
+  options.migrateBase = takeFlag(args, "--migrate-base");
+  if (target) options.target = target;
   const subagentProtocol = takeOption(args, "--subagent-protocol");
   if (subagentProtocol !== undefined) {
     if (subagentProtocol !== "compatibility-v1" && subagentProtocol !== "native") {
@@ -384,26 +413,27 @@ async function setupCommand(args: string[]): Promise<void> {
   stdout.write("Restart the Codex app once so its native model catalog refreshes through the installed route.\n");
 }
 
-async function doctorCommand(args: string[]): Promise<void> {
+async function doctorCommand(args: string[], target?: IntegrationTarget): Promise<void> {
   const json = takeFlag(args, "--json");
   assertNoArgs(args);
-  const report = await runDoctor();
+  const report = await runDoctor(target);
   stdout.write(json ? `${JSON.stringify(report, null, 2)}\n` : formatDoctorReport(report));
   if (!report.ok) process.exitCode = 1;
 }
 
-async function routeCommand(args: string[]): Promise<void> {
+async function routeCommand(args: string[], target?: IntegrationTarget): Promise<void> {
   const action = args.shift() ?? "status";
   if (action === "repair") {
     const operation = args.shift() ?? "preview";
     const protocol = takeOption(args, "--subagent-protocol");
     const approvalId = takeOption(args, "--approve");
     const launcherControl = takeFlag(args, "--launcher-control");
+    const resolutions = takeResolutions(args);
     assertNoArgs(args);
     if (protocol !== "native" && protocol !== "compatibility-v1") throw new Error("Repair requires --subagent-protocol compatibility-v1 or native; there is no automatic protocol choice");
     if (operation === "preview") {
       if (approvalId || launcherControl) throw new Error("Repair preview does not accept apply authorization");
-      stdout.write(`${JSON.stringify(previewCodexIntegrationRepair(protocol), null, 2)}\n`);
+      stdout.write(`${JSON.stringify(previewCodexIntegrationRepair(protocol, { target, resolutions }), null, 2)}\n`);
       return;
     }
     if (operation !== "apply" || !approvalId) throw new Error("Repair apply requires --approve with the exact preview ID");
@@ -412,13 +442,13 @@ async function routeCommand(args: string[]): Promise<void> {
     if (config.browserHost === "launcher" && !launcherControl) throw new Error("Launcher-owned configuration must be repaired through Codex Web GPT Settings");
     if (getServiceStatus().loaded) throw new Error("Stop the managed runtime safely before applying configuration repair");
     await assertRuntimeEndpointClosed(config);
-    stdout.write(`${JSON.stringify(applyCodexIntegrationRepair(protocol, approvalId), null, 2)}\n`);
+    stdout.write(`${JSON.stringify(applyCodexIntegrationRepair(protocol, approvalId, { target, resolutions }), null, 2)}\n`);
     return;
   }
   assertNoArgs(args);
   const result = action === "status"
     ? (() => {
-        const status = inspectCodexIntegration({ readOnly: true });
+        const status = inspectCodexIntegration({ readOnly: true, target });
         return {
           installed: status.installed,
           active: status.active,
@@ -428,15 +458,15 @@ async function routeCommand(args: string[]): Promise<void> {
         };
       })()
     : action === "connect"
-      ? activateCodexIntegration()
+      ? activateCodexIntegration(target)
       : action === "disconnect"
-        ? deactivateCodexIntegration()
+        ? deactivateCodexIntegration(target)
         : undefined;
   if (!result) throw new Error(`Unknown route action: ${action}`);
   stdout.write(`${JSON.stringify(result, null, 2)}\n`);
 }
 
-async function subagentsCommand(args: string[]): Promise<void> {
+async function subagentsCommand(args: string[], target?: IntegrationTarget): Promise<void> {
   const action = args.shift() ?? "status";
   assertNoArgs(args);
   const config = loadConfig();
@@ -444,9 +474,9 @@ async function subagentsCommand(args: string[]): Promise<void> {
     throw new Error("The isolated DEV harness has no Codex subagent protocol to configure");
   }
   if (action === "status") {
-    const integration = inspectCodexIntegration();
+    const integration = inspectCodexIntegration({ readOnly: true, target });
     stdout.write(`${JSON.stringify({
-      protocol: readCodexSubagentProtocol(config.subagentProtocol),
+      protocol: readCodexSubagentProtocol(config.subagentProtocol, target),
       installed: integration.installed,
       active: integration.active,
     }, null, 2)}\n`);
@@ -455,7 +485,7 @@ async function subagentsCommand(args: string[]): Promise<void> {
   if (action !== "compatibility-v1" && action !== "native") {
     throw new Error("Subagent protocol must be one of: status, compatibility-v1, native");
   }
-  const journal = setCodexSubagentProtocol(config, action);
+  const journal = setCodexSubagentProtocol(target ? { ...config, integrationTarget: target } : config, action);
   stdout.write(`${JSON.stringify({
     protocol: journal.installed.subagent_protocol,
     codexRestartRequired: true,
@@ -504,7 +534,10 @@ async function interruptHookCommand(args: string[]): Promise<void> {
     || !/^[A-Za-z0-9_-]{6,128}$/.test(turnId)) {
     throw new Error("Codex Interrupt hook payload has no valid session_id or turn_id");
   }
-  await interruptActiveTurn(loadConfig(), { threadId, turnId });
+  let config;
+  try { config = loadConfig(); } catch { /* Unavailable runtime is diagnosed only for recorded bridge-owned work. */ }
+  const warning = await deliverInterruptCleanup(config, { threadId, turnId }, new InterruptCleanupClaims(getConfigDir()));
+  if (warning) process.stderr.write(`Codex Web GPT cleanup warning: ${warning}\n`);
 }
 
 async function tunnelCommand(args: string[]): Promise<void> {
@@ -555,7 +588,7 @@ async function openCommand(args: string[]): Promise<void> {
   }
 }
 
-async function uninstallCommand(args: string[]): Promise<void> {
+async function uninstallCommand(args: string[], target?: IntegrationTarget): Promise<void> {
   const yes = takeFlag(args, "--yes");
   const keepData = takeFlag(args, "--keep-data");
   const launcherControl = takeFlag(args, "--launcher-control");
@@ -580,14 +613,18 @@ async function uninstallCommand(args: string[]): Promise<void> {
     stopTunnel(config);
   }
   if (config && process.platform === "darwin" && !launcherRuntimeStopped) await uninstallService(config);
-  uninstallCodexIntegration();
-  if (!keepData) rmSync(getConfigDir(), { recursive: true, force: true });
-  stdout.write(keepData ? "Uninstalled; private application data was preserved.\n" : "Uninstalled and removed private application data.\n");
+  uninstallCodexIntegration(target);
+  const preserveRegistry = target?.kind !== "profile" && existsSync(join(getConfigDir(), "targets"));
+  if (!keepData && !preserveRegistry) rmSync(getConfigDir(), { recursive: true, force: true });
+  stdout.write(preserveRegistry ? "Uninstalled this base integration; application data was preserved because it contains independent target runtimes.\n"
+    : keepData ? "Uninstalled; private application data was preserved.\n" : "Uninstalled and removed private application data.\n");
 }
 
 async function main(): Promise<void> {
   const args = process.argv.slice(2);
   const home = takeOption(args, "--home");
+  const codexHome = takeOption(args, "--codex-home");
+  const profile = takeOption(args, "--codex-profile");
   if (home) process.env.CODEX_CHATGPT_WEB_HOME = home;
   if (takeFlag(args, "--help") || takeFlag(args, "-h")) {
     stdout.write(HELP);
@@ -598,15 +635,66 @@ async function main(): Promise<void> {
     return;
   }
   const command = args.shift() ?? "help";
-  if (command === "dev" && home) {
-    throw new Error("--home does not apply to DEV mode; use CODEX_WEB_GPT_DEV_HOME for an explicit isolated DEV profile");
+  if (command === "dev" && (home || codexHome || profile)) {
+    throw new Error(`${home ? "--home does not apply" : "Integration target selectors do not apply"} to DEV mode; use CODEX_WEB_GPT_DEV_HOME for an explicit isolated DEV profile`);
+  }
+  const runtimeRoot = getConfigDir();
+  let target: IntegrationTarget | undefined;
+  if (codexHome !== undefined || profile !== undefined) {
+    target = resolveIntegrationTarget({ codexHome, profile, runtimeRoot });
+  } else if (existsSync(getConfigPath()) && command !== "dev") {
+    // A launcher child already has its owning runtime home, not the parent registry root.
+    // Invalid configuration is reported by the operation; it is never used to retarget this process.
+    try { target = loadConfigForSetup().integrationTarget; } catch { /* Operation validates its inputs. */ }
+  }
+  // This CLI invocation owns exactly one runtime. Bind ambient service dependencies once at startup,
+  // while passing explicit target authority to every configuration operation.
+  if (target) {
+    process.env.CODEX_CHATGPT_WEB_HOME = target.runtimeHome;
+    process.env.CODEX_HOME = target.codexHome;
   }
   if (command === "help") stdout.write(HELP);
-  else if (command === "setup") await setupCommand(args);
+  else if (command === "setup") await setupCommand(args, target);
   else if (command === "login") await loginCommand(args);
-  else if (command === "doctor" || command === "status") await doctorCommand(args);
-  else if (command === "route") await routeCommand(args);
-  else if (command === "subagents") await subagentsCommand(args);
+  else if (command === "doctor" || command === "status") await doctorCommand(args, target);
+  else if (command === "route") await routeCommand(args, target);
+  else if (command === "subagents") await subagentsCommand(args, target);
+  else if (command === "targets") {
+    const action = args.shift() ?? "list";
+    const binary = takeOption(args, "--codex-binary");
+    takeFlag(args, "--json");
+    assertNoArgs(args);
+    if (action === "check") {
+      if (!binary || target?.kind !== "profile") throw new Error("Target check requires --codex-binary with an absolute CLI binary path and --codex-profile");
+      const evidence = await probeCodexProfileCapabilities(binary);
+      saveProfileCapabilities(target, evidence);
+      const reservation = await new RuntimeRegistry({ runtimeRoot: dirname(dirname(target.runtimeHome)) }).ensure(target);
+      stdout.write(`${JSON.stringify({ target, port: reservation.port, ...evidence }, null, 2)}\n`);
+    } else if (action === "refresh-catalog") {
+      if (target?.kind !== "profile") throw new Error("Select a managed --codex-profile before refreshing its catalog");
+      stdout.write(`${JSON.stringify({ target, changed: refreshProfileModelCatalog(loadConfig()) }, null, 2)}\n`);
+    } else if (action === "list") stdout.write(`${JSON.stringify(new RuntimeRegistry({ runtimeRoot: target?.kind === "profile" ? dirname(dirname(target.runtimeHome)) : runtimeRoot }).list(target?.codexHome ?? codexHome).map(item => {
+      try {
+        const launch = integrationLaunch(item, item.kind === "profile" ? assertProfileCapabilities(item).executable : "codex");
+        return { ...item, launch, launchCommand: integrationLaunchCommand(launch) };
+      } catch (error) { return { ...item, capabilityError: error instanceof Error ? error.message : "Profile capability check required" }; }
+    }), null, 2)}\n`);
+    else if (action === "inspect") {
+      const selected = target ?? resolveIntegrationTarget({ runtimeRoot });
+      const source = existsSync(selected.configPath) ? readFileSync(selected.configPath, "utf8") : "";
+      const status = inspectCodexIntegration({ target: selected, readOnly: true });
+      let executable: string | undefined = selected.kind === "base" ? "codex" : undefined;
+      let capabilityError: string | undefined;
+      if (selected.kind === "profile") {
+        try { executable = assertProfileCapabilities(selected).executable; }
+        catch (error) { capabilityError = error instanceof Error ? error.message : "Profile capability evidence needs attention"; }
+      }
+      const review = withConfigurationReview({ version: 1, status: "blocked", approvalId: "", protocol: readCodexSubagentProtocol("native", selected), changes: [], conflicts: status.conflicts, codexRestartRequired: false, launcherRestartRequired: false }, selected, source,
+        selected.kind === "profile" ? { baseSource: existsSync(`${selected.codexHome}/config.toml`) ? readFileSync(`${selected.codexHome}/config.toml`, "utf8") : "" } : {});
+      const launch = executable ? integrationLaunch(selected, executable) : undefined;
+      stdout.write(`${JSON.stringify({ target: selected, launch, launchCommand: launch ? integrationLaunchCommand(launch) : undefined, capabilityError, installed: status.installed, active: status.active, groups: review.groups, errors: status.errors }, null, 2)}\n`);
+    } else throw new Error("Target command must be: list, inspect, check, or refresh-catalog");
+  }
   else if (command === "browser") {
     const action = args.shift();
     assertNoArgs(args);
@@ -627,7 +715,7 @@ async function main(): Promise<void> {
   } else if (command === "serve") {
     assertNoArgs(args);
     const config = loadConfig();
-    const server = startServer(config);
+    const server = startServer(config, { cleanupClaims: new InterruptCleanupClaims(getConfigDir()) });
     stdout.write(`codex-chatgpt-web ${VERSION} listening on http://${config.host}:${server.port}/v1 (${config.mode})\n`);
     await new Promise<void>(() => {});
   } else if (command === "dev") await runDevCommand(args);
@@ -640,7 +728,7 @@ async function main(): Promise<void> {
   }
   else if (command === "tunnel") await tunnelCommand(args);
   else if (command === "open") await openCommand(args);
-  else if (command === "uninstall") await uninstallCommand(args);
+  else if (command === "uninstall") await uninstallCommand(args, target);
   else throw new Error(`Unknown command: ${command}\n\n${HELP}`);
 }
 

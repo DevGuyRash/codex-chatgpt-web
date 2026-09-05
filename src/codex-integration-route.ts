@@ -190,6 +190,8 @@ export function replacementBaseline(
     const document = parseDocument(baseline);
     for (const [key, installedValue, previous] of [
       ["openai_base_url", journal.installed.openai_base_url, journal.previous.openai_base_url],
+      ["model_provider", journal.version === 10 ? journal.installed.model_provider : undefined, journal.previous.model_provider],
+      ["model_catalog_json", journal.version === 10 ? journal.installed.model_catalog_json : undefined, journal.previous.model_catalog_json],
       [
         "experimental_realtime_webrtc_call_base_url",
         journal.installed.experimental_realtime_webrtc_call_base_url,
@@ -197,7 +199,7 @@ export function replacementBaseline(
       ],
     ] as const) {
       const current = findTopLevelAssignment(document.lines, key);
-      if (current.value !== installedValue || current.index === undefined) continue;
+      if (installedValue === undefined || current.value !== installedValue || current.index === undefined) continue;
       if (previous.present) {
         if (!previous.rawLine) throw new Error(`Codex integration journal is missing the prior ${key} line`);
         document.lines[current.index] = previous.rawLine;
@@ -235,6 +237,7 @@ export function installRoute(
   installedUrl: string,
   replaceExistingRoute: boolean,
   replaceExistingRealtimeRoute: boolean,
+  profileCatalogPath?: string,
 ): {
   text: string;
   previous: CodexIntegrationJournal["previous"];
@@ -256,6 +259,10 @@ export function installRoute(
   if (previousRealtimeWebrtcCallBaseUrl.present && previousRealtimeWebrtcCallBaseUrl.value !== CODEX_REALTIME_WEBRTC_CALL_BASE_URL && !replaceExistingRealtimeRoute) throw new Error("Codex already configures its realtime WebRTC call route. Rerun with --replace-codex-route to replace it reversibly.");
   let result = setTrackedCodexScalar(text, ["openai_base_url"], installedUrl);
   result = setTrackedCodexScalar(result, ["experimental_realtime_webrtc_call_base_url"], CODEX_REALTIME_WEBRTC_CALL_BASE_URL);
+  if (profileCatalogPath) {
+    result = setTrackedCodexScalar(result, ["model_catalog_json"], profileCatalogPath);
+    result = setTrackedCodexScalar(result, ["model_provider"], "openai");
+  }
   // Retain the historical layout only as a rendering optimization, not a parser
   // or authority decision. Quoted keys and inline syntax use the semantic result.
   try {
@@ -423,6 +430,8 @@ function restoredValues(text: string, journal: ModernRouteJournal): Array<[strin
   if (journal.version === 9 || journal.version === 10) values.push([
     ["experimental_realtime_webrtc_call_base_url"], journal.previousRealtimeWebrtcCallBaseUrl.present ? journal.previousRealtimeWebrtcCallBaseUrl.value : undefined,
   ]);
+  if (journal.version === 10 && journal.installed.model_catalog_json) values.push([["model_catalog_json"], journal.previous.model_catalog_json.present ? journal.previous.model_catalog_json.value : undefined]);
+  if (journal.version === 10 && journal.installed.model_provider) values.push([["model_provider"], journal.previous.model_provider.present ? journal.previous.model_provider.value : undefined]);
   const evidence = compatibilityV1Evidence(journal);
   if (evidence) {
     const v2 = configValue(document, ["features", "multi_agent_v2"]);

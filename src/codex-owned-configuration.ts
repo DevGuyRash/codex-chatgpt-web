@@ -26,6 +26,8 @@ export function prepareOwnedCodexConfiguration(original: string, journal: CodexI
   try {
     edit(["openai_base_url"], routeUrl(config));
     edit(["experimental_realtime_webrtc_call_base_url"], CODEX_REALTIME_WEBRTC_CALL_BASE_URL);
+    if (journal.installed.model_catalog_json) edit(["model_catalog_json"], journal.installed.model_catalog_json);
+    if (journal.installed.model_provider) edit(["model_provider"], journal.installed.model_provider);
     const v2Path = table(at(parseTomlValue(text), ["features", "multi_agent_v2"]))
       ? ["features", "multi_agent_v2", "enabled"] : ["features", "multi_agent_v2"];
     if (config.subagentProtocol === "compatibility-v1") {

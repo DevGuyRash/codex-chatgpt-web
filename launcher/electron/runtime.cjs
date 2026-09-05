@@ -13,7 +13,7 @@ const {
 } = require("./connector-identity.cjs");
 const { embeddedRuntimeInvocation, runtimeInvocation } = require("./runtime-command.cjs");
 const { redactText } = require("./logging.cjs");
-const { parseConfigurationPreview } = require("./configuration-review.cjs");
+const { parseConfigurationPreview, resolutionArguments } = require("./configuration-review.cjs");
 const { problemFor, runtimeFailure, withRecovery } = require("./problems.cjs");
 const { DETACH_OWNED_CHILD, terminateOwnedProcessTree } = require("./process-tree.cjs");
 
@@ -147,6 +147,8 @@ class RuntimeHost {
     browserDescriptorPath,
     coreHome,
     codexHome,
+    integrationTarget,
+    runtimePort,
     launcherProfile = "production",
     launchAgentsDir,
     platform = process.platform,
@@ -166,6 +168,9 @@ class RuntimeHost {
     }
     this.launcherProfile = launcherProfile;
     this.coreHome = coreHome ? resolveUserPath(coreHome) : null;
+    this.integrationTarget = integrationTarget ? require("./integration-target.cjs").validateIntegrationTarget(integrationTarget, this.coreHome) : null;
+    this.runtimePort = runtimePort;
+    if (this.integrationTarget?.kind === "profile" && (!Number.isSafeInteger(runtimePort) || runtimePort < 1024 || runtimePort > 65535)) throw new Error("Profile runtime requires its reserved local endpoint");
     if (launcherProfile === "development" && !this.coreHome) {
       throw new Error("Runtime host DEV profile requires its isolated home");
     }
@@ -452,8 +457,8 @@ class RuntimeHost {
       this.supervisor.configPath,
       path.join(coreHome, "codex", "integration-journal.json"),
       path.join(coreHome, "codex", "integration-journal.recovery.json"),
-      path.join(this.codexHome, "config.toml"),
-      path.join(this.codexHome, "models_cache.json"),
+      this.integrationTarget?.configPath ?? path.join(this.codexHome, "config.toml"),
+      this.integrationTarget?.kind === "profile" ? path.join(coreHome, "codex", "model-catalog.json") : path.join(this.codexHome, "models_cache.json"),
       path.join(coreHome, "secrets", "tunnel-runtime.key"),
       path.join(coreHome, "secrets", "tunnel-runtime-automatic.key"),
       path.join(coreHome, "secrets", "tunnel-runtime-zero-risk.key"),
@@ -569,6 +574,7 @@ class RuntimeHost {
   }
 
   async run(name, args, options = {}) {
+    if (this.integrationTarget) args = ["--home", this.integrationTarget.kind === "profile" ? path.dirname(path.dirname(this.coreHome)) : this.coreHome, "--codex-home", this.integrationTarget.codexHome, ...(this.integrationTarget.kind === "profile" ? ["--codex-profile", this.integrationTarget.profile] : []), ...args];
     if (this.active) throw new Error(`Another launcher operation is active: ${this.active}`);
     if (this.activeChild
       && this.activeChild.exitCode === null
@@ -596,6 +602,8 @@ class RuntimeHost {
           CODEX_CHATGPT_WEB_STRUCTURED_ERRORS: "1",
           CODEX_CHATGPT_WEB_BROWSER_HOST_DESCRIPTOR: this.browserDescriptorPath,
           ...(options.env || {}),
+          ...(this.coreHome ? { CODEX_CHATGPT_WEB_HOME: this.coreHome } : {}),
+          CODEX_HOME: this.codexHome,
         });
         const child = spawn(invocation.executable, invocation.args, {
           cwd: invocation.cwd,
@@ -819,17 +827,17 @@ class RuntimeHost {
     return parseBridgeRouteResult(result.stdout, { requireInstalled: true });
   }
 
-  async previewIntegrationRepair(protocol, operationName = "preview-integration-repair") {
+  async previewIntegrationRepair(protocol, operationName = "preview-integration-repair", resolutions = []) {
     this.assertProductionProfile("Codex integration repair");
     if (protocol !== "native" && protocol !== "compatibility-v1") throw new Error("Choose a subagent protocol before previewing repair");
-    const result = await this.run(operationName, ["route", "repair", "preview", "--subagent-protocol", protocol], {
+    const result = await this.run(operationName, ["route", "repair", "preview", "--subagent-protocol", protocol, ...resolutionArguments(resolutions)], {
       embedded: true, privateOutput: true, timeoutMs: 15_000,
       message: "Inspecting configuration repair", successMessage: "Repair preview ready",
     });
     return parseConfigurationPreview(result.stdout, protocol);
   }
 
-  async applyIntegrationRepair(protocol, approvalId) {
+  async applyIntegrationRepair(protocol, approvalId, resolutions = []) {
     this.assertProductionProfile("Codex integration repair");
     if (protocol !== "native" && protocol !== "compatibility-v1") throw new Error("Choose a subagent protocol before approving repair");
     if (typeof approvalId !== "string" || !/^[a-f0-9]{64}$/.test(approvalId)) throw new Error("Exact repair preview approval is required");
@@ -838,10 +846,10 @@ class RuntimeHost {
     const name = "apply-integration-repair";
     this.lifecycleOperation = name;
     try {
-      const preview = await this.previewIntegrationRepair(protocol, name);
+      const preview = await this.previewIntegrationRepair(protocol, name, resolutions);
       if (preview.status !== "ready" || preview.approvalId !== approvalId) throw new Error("Configuration changed; review a fresh preview before applying repair");
       await this.supervisor.stopForSetup();
-      const result = await this.run(name, ["route", "repair", "apply", "--subagent-protocol", protocol, "--approve", approvalId, "--launcher-control"], {
+      const result = await this.run(name, ["route", "repair", "apply", "--subagent-protocol", protocol, "--approve", approvalId, "--launcher-control", ...resolutionArguments(resolutions)], {
         embedded: true, privateOutput: true, env: this.launcherControlEnvironment(), timeoutMs: 15_000,
         message: "Applying approved configuration repair", successMessage: "Configuration repaired; restart Codex and the launcher",
       });
@@ -940,10 +948,11 @@ class RuntimeHost {
 
   setupConnectorName() {
     const current = this.runtimeConfigSnapshot();
-    if (typeof current.config?.automaticAppName === "string" && current.config.automaticAppName.trim()) {
+    if (typeof current.config?.automaticAppName === "string" && current.config.automaticAppName.trim()
+      && !(this.integrationTarget?.kind === "profile" && current.config.automaticAppName === CURRENT_CONNECTOR_NAME)) {
       return validateConnectorName(current.config.automaticAppName);
     }
-    return this.browserConnectorName();
+    return this.integrationTarget?.kind === "profile" ? require("./integration-target.cjs").integrationConnectorNames(this.integrationTarget).automatic : this.browserConnectorName();
   }
 
   cancelActiveTurns() {
@@ -1008,7 +1017,7 @@ class RuntimeHost {
     }
   }
 
-  async setupCore() {
+  async setupCore({ migrateBase = false } = {}) {
     this.assertProductionProfile("Codex integration setup");
     if (this.currentOperation()) throw new Error(`Another launcher operation is active: ${this.currentOperation()}`);
     const existing = this.runtimeConfigSnapshot();
@@ -1021,6 +1030,7 @@ class RuntimeHost {
     }
     const args = [
       "setup",
+      ...(migrateBase ? ["--migrate-base"] : []),
       mode === "full" ? "--full" : "--browser-only",
       "--browser-host-descriptor",
       this.browserDescriptorPath,
@@ -1368,6 +1378,7 @@ class RuntimeHost {
   }
 
   async runSetup(name, args, options) {
+    if (this.integrationTarget?.kind === "profile" && !args.includes("--port")) args = [...args, "--port", String(this.runtimePort)];
     if (this.currentOperation()) throw new Error(`Another launcher operation is active: ${this.currentOperation()}`);
     let previousRuntime = this.runtimeConfigSnapshot();
     let checkpoint = this.captureSetupCheckpoint(previousRuntime);
@@ -1385,10 +1396,18 @@ class RuntimeHost {
           return parseConfigurationPreview(result.stdout);
         };
         let preview = await preparePreview(args);
-        const approved = await this.reviewConfiguration(preview, async protocol => {
-          if (!["native", "compatibility-v1"].includes(protocol)) throw new Error("Choose a supported subagent protocol");
-          const index = args.indexOf("--subagent-protocol");
-          const nextArgs = [...(index < 0 ? args : [...args.slice(0, index), ...args.slice(index + 2)]), "--subagent-protocol", protocol];
+        const approved = await this.reviewConfiguration(preview, async decision => {
+          const nextArgs = [...args];
+          if (typeof decision === "string") {
+            if (!["native", "compatibility-v1"].includes(decision)) throw new Error("Choose a supported subagent protocol");
+            const index = nextArgs.indexOf("--subagent-protocol");
+            if (index >= 0) nextArgs.splice(index, 2);
+            nextArgs.push("--subagent-protocol", decision);
+          } else {
+            const choices = resolutionArguments(decision?.resolutions);
+            for (let index = nextArgs.indexOf("--resolve"); index >= 0; index = nextArgs.indexOf("--resolve")) nextArgs.splice(index, 2);
+            nextArgs.push(...choices);
+          }
           const next = await preparePreview(nextArgs);
           args = nextArgs;
           preview = next;

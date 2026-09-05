@@ -1,5 +1,6 @@
 const os = require("node:os");
 const path = require("node:path");
+const { resolveIntegrationTarget } = require("./integration-target.cjs");
 
 const PRODUCTION_PROFILE = "production";
 const DEVELOPMENT_PROFILE = "development";
@@ -22,6 +23,15 @@ function resolveLauncherProfile({
     throw new Error("Launcher profile resolution requires an absolute appData path");
   }
   const development = argv.includes("--dev-profile");
+  const option = name => {
+    const index = argv.indexOf(name);
+    if (index < 0) return undefined;
+    if (!argv[index + 1] || argv[index + 1].startsWith("--") || argv.lastIndexOf(name) !== index) throw new Error(`${name} requires one explicit value`);
+    return argv[index + 1];
+  };
+  const codexProfile = option("--codex-profile");
+  const selectedCodexHome = option("--codex-home");
+  if (development && (codexProfile || selectedCodexHome)) throw new Error("DEV mode cannot own a Codex integration target");
   if (!development) {
     const coreHome = env.CODEX_CHATGPT_WEB_HOME?.trim()
       ? resolveUserPath(env.CODEX_CHATGPT_WEB_HOME.trim(), homeDir)
@@ -29,15 +39,19 @@ function resolveLauncherProfile({
     const userData = env.CODEX_WEB_GPT_LAUNCHER_DATA_DIR?.trim()
       ? resolveUserPath(env.CODEX_WEB_GPT_LAUNCHER_DATA_DIR.trim(), homeDir)
       : path.join(appData, "Codex Web GPT");
+    const target = resolveIntegrationTarget({
+      codexHome: selectedCodexHome ? resolveUserPath(selectedCodexHome, homeDir) : env.CODEX_HOME?.trim() ? resolveUserPath(env.CODEX_HOME.trim(), homeDir) : path.join(homeDir, ".codex"),
+      runtimeRoot: coreHome, profile: codexProfile,
+    });
     return {
       kind: PRODUCTION_PROFILE,
-      displayName: "Codex Web GPT",
-      coreHome,
-      codexHome: env.CODEX_HOME?.trim()
-        ? resolveUserPath(env.CODEX_HOME.trim(), homeDir)
-        : path.join(homeDir, ".codex"),
-      userData,
-      browserPartition: "persist:codex-web-gpt-chatgpt",
+      displayName: codexProfile ? `Codex Web GPT · ${codexProfile}` : "Codex Web GPT",
+      coreHome: target.runtimeHome,
+      runtimeRoot: coreHome,
+      integrationTarget: target,
+      codexHome: target.codexHome,
+      userData: codexProfile ? path.join(userData, "targets", target.id) : userData,
+      browserPartition: codexProfile ? `persist:codex-web-gpt-${target.id}` : "persist:codex-web-gpt-chatgpt",
     };
   }
 

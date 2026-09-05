@@ -5,6 +5,7 @@ import { isDeepStrictEqual } from "node:util";
 import { MANAGED_COMMENT, MANAGED_ROUTE_COMMENT, ROUTES_BEGIN, ROUTES_END, MANAGED_INTERRUPT_HOOK_START as hookBegin, MANAGED_INTERRUPT_HOOK_END as hookEnd } from "./codex-config-markers";
 export { ROUTES_BEGIN, ROUTES_END } from "./codex-config-markers";
 import type { CodexConfigScalar, CodexIntegrationConflict } from "./contracts/codex-integration";
+import { discoverConfigurationSource } from "./codex-config-occurrences";
 
 const legacyRoutes = [MANAGED_ROUTE_COMMENT, MANAGED_COMMENT];
 const routeKeys = new Set(["openai_base_url", "experimental_realtime_webrtc_call_base_url"]);
@@ -36,6 +37,9 @@ export function inspectCodexConfigSource(text: string): CodexSourceInventory {
   let values: ReturnType<typeof parseTomlValue>;
   try { ast = parseTOML(input, { tomlVersion: "1.0" }); values = parseTomlValue(text); }
   catch (error) {
+    const discovered = discoverConfigurationSource(text);
+    result.assignments = discovered.occurrences.flatMap(item => item.kind === "assignment" && isScalar(item.value) && item.path.every(part => typeof part === "string")
+      ? [{ path: item.path as string[], state: item.state, value: item.value, line: item.line, range: item.range }] : []);
     // Never return parser excerpts, which may contain private values.
     const duplicate = error instanceof Error && /Defining a key multiple times/.test(error.message);
     const line = (error as { lineNumber?: unknown })?.lineNumber;

@@ -1,4 +1,4 @@
-import type { CodexRepairPreview, SubagentProtocol } from "../../src/contracts/codex-integration";
+import type { CodexRepairPreview, SubagentProtocol, ConfigurationResolutionSelection } from "../../src/contracts/codex-integration";
 import type { DoctorReport, DiagnosticProblem } from "../../src/contracts/diagnostics";
 export type { DoctorReport, DoctorCheck, DiagnosticProblem, RecoveryAction } from "../../src/contracts/diagnostics";
 export type { CodexRepairPreview, SubagentProtocol } from "../../src/contracts/codex-integration";
@@ -85,6 +85,7 @@ export type UpdateState =
 
 export interface LauncherSnapshot {
   profile: LauncherProfile;
+  integrationTarget?: import("../../src/contracts/codex-integration").IntegrationTarget;
   profilePaths: {
     coreHome: string;
     codexHome: string;
@@ -113,6 +114,9 @@ export interface LauncherSnapshot {
 }
 
 export interface LauncherApi {
+  integrationTargets(): Promise<{ selected: import("../../src/contracts/codex-integration").IntegrationTarget; targets: import("../../src/contracts/codex-integration").IntegrationTarget[]; launchCommand?: string; capabilityError?: string }>;
+  openIntegrationTarget(target: { codexHome: string; profile?: string }): Promise<{ target: import("../../src/contracts/codex-integration").IntegrationTarget }>;
+  checkTargetCapabilities(): Promise<{ cancelled: boolean }>;
   snapshot(): Promise<LauncherSnapshot>;
   setLanguage(language: Language): Promise<LauncherState>;
   openSocial(target: "github" | "x"): Promise<LauncherState>;
@@ -136,13 +140,13 @@ export interface LauncherApi {
   smokeTest(): Promise<{ ok: boolean; effort: string; response: string }>;
   verifyMcp(): Promise<DoctorReport>;
   doctor(): Promise<DoctorReport>;
-  decideConfiguration(approvalId: string, decision: boolean | SubagentProtocol): Promise<void>;
+  decideConfiguration(approvalId: string, decision: boolean | SubagentProtocol | { resolutions: ConfigurationResolutionSelection[] }): Promise<void>;
   onConfigurationPreview(listener: (preview: CodexRepairPreview | null) => void): () => void;
-  previewIntegrationRepair(protocol: SubagentProtocol): Promise<CodexRepairPreview>;
-  applyIntegrationRepair(protocol: SubagentProtocol, approvalId: string): Promise<{ state: LauncherState }>;
+  previewIntegrationRepair(protocol: SubagentProtocol, resolutions?: ConfigurationResolutionSelection[]): Promise<CodexRepairPreview>;
+  applyIntegrationRepair(protocol: SubagentProtocol, approvalId: string, resolutions?: ConfigurationResolutionSelection[]): Promise<{ state: LauncherState }>;
   cancelTurns(): Promise<{ stdout: string }>;
   uninstallIntegration(): Promise<{ cancelled: true } | { cancelled: false; state: LauncherState }>;
-  setupCore(): Promise<{ ok: boolean; stdout: string; restartRequired: boolean }>;
+  setupCore(options?: { migrateBase?: boolean }): Promise<{ ok: boolean; stdout: string; restartRequired: boolean }>;
   setupMcp(input: {
     tunnelId?: string;
     runtimeKey?: string;

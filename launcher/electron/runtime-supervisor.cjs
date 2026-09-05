@@ -319,6 +319,7 @@ class RuntimeSupervisor {
     installedRuntimeRoot,
     runtimeRootProvider,
     coreHome,
+    integrationTarget,
     browserDescriptorPath,
     launcherProfile = "production",
     publishOperation,
@@ -330,6 +331,7 @@ class RuntimeSupervisor {
     this.installedRuntimeRoot = installedRuntimeRoot;
     this.runtimeRootProvider = runtimeRootProvider;
     this.coreHome = coreHome;
+    this.integrationTarget = integrationTarget ? require("./integration-target.cjs").validateIntegrationTarget(integrationTarget, coreHome) : null;
     this.browserDescriptorPath = browserDescriptorPath;
     if (launcherProfile !== "production" && launcherProfile !== "development") {
       throw new Error("Runtime supervisor launcher profile is invalid");
@@ -361,12 +363,17 @@ class RuntimeSupervisor {
 
   readConfig() {
     if (!fs.existsSync(this.configPath)) return null;
-    return validateConfig(
+    const config = validateConfig(
       readJson(this.configPath),
       this.browserDescriptorPath,
       this.platform,
       this.launcherProfile,
     );
+    if (config.integrationTarget) {
+      const target = require("./integration-target.cjs").validateIntegrationTarget(config.integrationTarget, this.coreHome);
+      if (this.integrationTarget && target.id !== this.integrationTarget.id) throw new Error("Runtime configuration belongs to another selected target");
+    }
+    return config;
   }
 
   readSetupConfig() {
@@ -478,11 +485,15 @@ class RuntimeSupervisor {
   }
 
   spawnChild(name, invocation) {
+    const target = this.integrationTarget ?? this.readConfig()?.integrationTarget;
+    if (target) require("./integration-target.cjs").validateIntegrationTarget(target, this.coreHome);
     const child = spawn(invocation.executable, invocation.args, {
       cwd: invocation.cwd,
       detached: DETACH_OWNED_CHILD,
       env: {
         ...process.env,
+        CODEX_CHATGPT_WEB_HOME: this.coreHome,
+        ...(target ? { CODEX_HOME: target.codexHome } : {}),
         CODEX_CHATGPT_WEB_BROWSER_HOST_DESCRIPTOR: this.browserDescriptorPath,
       },
       stdio: ["ignore", "pipe", "pipe"],

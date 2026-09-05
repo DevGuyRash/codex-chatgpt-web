@@ -737,6 +737,10 @@ export class ChatGptTurnSessions {
     return { cancelled: matches.length, settlement };
   }
 
+  physicalSettlementForNativeTurn(threadId: string, turnId: string): Promise<void> {
+    return Promise.all([...this.entries.values()].filter(session => session.nativeThreadId === threadId && session.nativeTurnId === turnId).map(session => session.physicalSettlement)).then(() => undefined);
+  }
+
   cancelledError(traceId: string): Error | undefined {
     for (const session of this.entries.values()) {
       if (session.traceId !== traceId) continue;

@@ -1,5 +1,13 @@
 import { useEffect, useId, useRef, useState } from "react";
 import type { CodexRepairPreview, Language, LauncherApi, LauncherState, SubagentProtocol } from "./types";
+import { ConfigurationCards } from "./ConfigurationCards";
+
+function selectedResolutions(preview: CodexRepairPreview, occurrenceId: string) {
+  const setting = preview.groups?.flatMap(group => group.settings).find(item => item.occurrences.some(occurrence => occurrence.id === occurrenceId));
+  if (!setting) throw new Error("This source definition is no longer in the current preview");
+  const competing = new Set(setting.occurrences.map(item => item.id));
+  return [...(preview.resolutions ?? []).filter(item => !competing.has(item.occurrenceId)), { occurrenceId }];
+}
 
 const labels = {
   en: {
@@ -44,7 +52,7 @@ export function ConfigurationRepair({ api, language, disabled, onBusyChange, onR
   const [busy, setBusy] = useState(false);
   const [done, setDone] = useState(false);
   const discard = () => { setPreview(null); setApproved(false); };
-  const perform = async (apply: boolean) => {
+  const perform = async (apply: boolean, occurrenceId?: string) => {
     if (!protocol || busy || disabled || (apply && (!preview || !approved || preview.status !== "ready"))) return;
     setBusy(true);
     onBusyChange(true);
@@ -52,13 +60,15 @@ export function ConfigurationRepair({ api, language, disabled, onBusyChange, onR
     setDone(false);
     try {
       if (apply && preview) {
-        const result = await api.applyIntegrationRepair(protocol, preview.approvalId);
+        const result = await api.applyIntegrationRepair(protocol, preview.approvalId, preview.resolutions);
         onRepaired(result.state);
         discard();
         setDone(true);
       } else {
-        discard();
-        setPreview(await api.previewIntegrationRepair(protocol));
+        const resolutions = occurrenceId && preview ? selectedResolutions(preview, occurrenceId) : preview?.resolutions;
+        setApproved(false);
+        if (preview) setPreview({ ...preview, refreshing: true });
+        setPreview(await api.previewIntegrationRepair(protocol, resolutions));
       }
     } catch (cause) {
       discard();
@@ -83,7 +93,7 @@ export function ConfigurationRepair({ api, language, disabled, onBusyChange, onR
     <button type="button" className="button-secondary" disabled={!protocol || busy || disabled} onClick={() => void perform(false)}>{busy ? copy.working : copy.preview}</button>
     {preview ? <>
       {preview.status === "blocked" ? <p role="status">{copy.blocked}</p> : null}
-      <ConfigurationChanges preview={preview} language={language} />
+      <ConfigurationChanges preview={preview} language={language} selectOccurrence={id => void perform(false, id)} />
       {preview.status === "ready" ? <label className="repair-approval"><input type="checkbox" checked={approved} disabled={busy || disabled} onChange={(event) => setApproved(event.target.checked)} /><span>{copy.approve}</span></label> : null}
       <div className="repair-actions">
         <button type="button" className="button-primary" disabled={preview.status !== "ready" || !approved || busy || disabled} onClick={() => void perform(true)}>{copy.apply}</button>
@@ -94,12 +104,12 @@ export function ConfigurationRepair({ api, language, disabled, onBusyChange, onR
   </section>;
 }
 
-export function ConfigurationChanges({ preview, language }: { preview: CodexRepairPreview; language: Language }) {
+export function ConfigurationChanges({ preview, language, selectOccurrence }: { preview: CodexRepairPreview; language: Language; selectOccurrence?: (id: string) => void }) {
   const copy = labels[language];
   const paths = [...new Set([...preview.changes.map(change => change.path), ...preview.conflicts.filter(conflict => conflict.current !== undefined || conflict.expected !== undefined || ["missing", "commented_out", "value_changed"].includes(conflict.category)).map(conflict => conflict.path)])];
   const value = (item: string | number | boolean | null | undefined) => item == null ? copy.absent : String(item);
   return <>
-    {paths.length ? <div className="repair-comparison" tabIndex={0} role="region" aria-label={copy.preview}>
+    {preview.version === 2 ? <ConfigurationCards preview={preview} language={language} selectOccurrence={selectOccurrence} /> : paths.length ? <div className="repair-comparison" tabIndex={0} role="region" aria-label={copy.preview}>
       <table><thead><tr><th>{copy.setting}</th><th>{copy.current}</th><th>{copy.expected}</th><th>{copy.proposed}</th></tr></thead>
         <tbody>{paths.map(path => {
           const change = preview.changes.find(item => item.path === path);
@@ -111,7 +121,7 @@ export function ConfigurationChanges({ preview, language }: { preview: CodexRepa
         })}</tbody>
       </table>
     </div> : null}
-    {preview.conflicts.length ? <section className="configuration-findings"><h3>{language === "en" ? "Configuration findings" : language === "ja" ? "設定の確認結果" : "配置检查结果"}</h3><ul className="diagnostic-findings">{preview.conflicts.map((conflict, index) => <li key={`${conflict.path}-${index}`}><code>{conflict.path}</code><p>{conflict.message}</p></li>)}</ul></section> : null}
+    {preview.version !== 2 && preview.conflicts.length ? <section className="configuration-findings"><h3>{language === "en" ? "Configuration findings" : language === "ja" ? "設定の確認結果" : "配置检查结果"}</h3><ul className="diagnostic-findings">{preview.conflicts.map((conflict, index) => <li key={`${conflict.path}-${index}`}><code>{conflict.path}</code><p>{conflict.message}</p></li>)}</ul></section> : null}
     {preview.effects?.length ? <ul>{preview.effects.map(effect => <li key={effect}>{effect}</li>)}</ul> : null}
     {preview.textChanges?.map(change => <details className="configuration-text-change" key={change.path}>
       <summary>{language === "en" ? "Exact file changes" : language === "ja" ? "ファイルの変更内容" : "文件的具体更改"}: <code>{change.path}</code> ({change.startLine})</summary>
@@ -127,28 +137,35 @@ const setupLabels = {
 };
 
 export function SetupConfigurationReview({ preview, language, decide }: {
-  preview: CodexRepairPreview; language: Language; decide: (id: string, decision: boolean | SubagentProtocol) => Promise<void>;
+  preview: CodexRepairPreview; language: Language; decide: LauncherApi["decideConfiguration"];
 }) {
   const dialog = useRef<HTMLDialogElement>(null);
+  const heading = useRef<HTMLHeadingElement>(null);
   const id = useId();
   const [approvedId, setApprovedId] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const copy = setupLabels[language];
   const approved = preview.status === "ready" && !preview.refreshing && approvedId === preview.approvalId;
-  useEffect(() => { const element = dialog.current!; element.showModal(); return () => element.close(); }, []);
-  const submit = async (accept: boolean | SubagentProtocol) => {
+  useEffect(() => {
+    const previous = document.activeElement;
+    const element = dialog.current!;
+    element.showModal();
+    heading.current?.focus({ preventScroll: true });
+    return () => { element.close(); if (previous instanceof HTMLElement && previous.isConnected) previous.focus({ preventScroll: true }); };
+  }, []);
+  const submit = async (accept: Parameters<LauncherApi["decideConfiguration"]>[1]) => {
     if (busy || (accept !== false && preview.refreshing) || (accept === true && !approved)) return;
     setApprovedId(null);
     setError(null);
-    if (typeof accept !== "string") setBusy(true);
+    if (typeof accept === "boolean") setBusy(true);
     try { await decide(preview.approvalId, accept); }
     catch (cause) { setError(cause instanceof Error ? cause.message : String(cause)); }
     finally { setBusy(false); }
   };
   return <dialog ref={dialog} className="configuration-review-dialog" aria-labelledby={`${id}-title`} onCancel={event => { event.preventDefault(); void submit(false); }}>
     <section className="configuration-repair">
-      <h2 id={`${id}-title`}>{copy.title}</h2><p>{copy.body}</p>
+      <h2 ref={heading} tabIndex={-1} className="configuration-review-title" id={`${id}-title`}>{copy.title}</h2><p>{copy.body}</p>
       <fieldset className="repair-protocol" disabled={busy || preview.refreshing}>
         <legend>{labels[language].protocol}</legend>
         {(["compatibility-v1", "native"] as const).map(choice => <label key={choice}>
@@ -159,7 +176,7 @@ export function SetupConfigurationReview({ preview, language, decide }: {
       {preview.refreshing ? <p role="status">{language === "en" ? "Updating comparison… No changes have been applied." : language === "ja" ? "変更内容を更新中です。設定はまだ変更されていません。" : "正在更新对比，尚未应用任何更改。"}</p>
         : preview.status === "blocked" ? <p role="status">{labels[language].blocked}</p> : null}
       <div className="configuration-review-content" aria-busy={preview.refreshing === true}>
-        <ConfigurationChanges preview={preview} language={language} />
+        <ConfigurationChanges preview={preview} language={language} selectOccurrence={id => void submit({ resolutions: selectedResolutions(preview, id) })} />
       </div>
       {preview.status === "ready" ? <label className="repair-approval"><input type="checkbox" checked={approved} disabled={busy || preview.refreshing} onChange={event => setApprovedId(event.target.checked ? preview.approvalId : null)} /><span>{copy.approve}</span></label> : null}
       {error ? <p role="alert">{error}</p> : null}

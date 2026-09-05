@@ -291,13 +291,31 @@ export function writeFilesWithCompensation(
 ): void {
   const paths = [...new Set([...writes.map(write => write.path), ...removals])];
   const snapshots = paths.map(snapshotFile);
+  const applied = new Map<string, FileSnapshot>();
   try {
-    for (const write of writes) atomicWriteFile(write.path, write.data);
-    for (const removal of removals) rmSync(removal, { force: true });
+    for (const write of writes) {
+      // Capture the bytes supplied to the write, not a subsequent read which could
+      // already contain an external edit. Only completed mutations are ours to undo.
+      const data = Buffer.from(write.data);
+      atomicWriteFile(write.path, data);
+      applied.set(write.path, { path: write.path, exists: true, data });
+    }
+    for (const removal of removals) {
+      rmSync(removal, { force: true });
+      applied.set(removal, { path: removal, exists: false });
+    }
   } catch (error) {
     const rollbackFailures: string[] = [];
     for (const snapshot of [...snapshots].reverse()) {
+      const expected = applied.get(snapshot.path);
+      if (!expected) continue;
       try {
+        const current = snapshotFile(snapshot.path);
+        if (current.exists !== expected.exists
+          || (current.exists && !current.data?.equals(expected.data!))) {
+          rollbackFailures.push(`${snapshot.path}: changed after the transaction write; preserved for manual recovery`);
+          continue;
+        }
         restoreFileSnapshot(snapshot);
       } catch (rollbackError) {
         rollbackFailures.push(`${snapshot.path}: ${rollbackError instanceof Error ? rollbackError.message : String(rollbackError)}`);

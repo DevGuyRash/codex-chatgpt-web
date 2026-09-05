@@ -865,7 +865,7 @@ function registerIpc({ logger, stateStore }) {
   });
 }
 
-async function requestQuit() {
+async function requestQuit({ idleOnly = false, beforeClose } = {}) {
   if (shutdownInProgress || exitCommitted) {
     return { ok: false, message: "Launcher shutdown is already in progress" };
   }
@@ -875,10 +875,11 @@ async function requestQuit() {
     if (activeOperation) {
       throw new Error(`Wait for ${activeOperation} to finish before quitting Codex Web GPT`);
     }
-    await runtimeSupervisor?.shutdown({ cancelActiveTurns: true, force: true });
+    await runtimeSupervisor?.shutdown({ cancelActiveTurns: !idleOnly, force: !idleOnly });
     stopCatalogVerificationMonitor();
     quitting = true;
     await browserHost?.persistSession();
+    await beforeClose?.();
     browserHost?.destroy();
     await browserControl?.close();
     exitCommitted = true;
@@ -972,6 +973,7 @@ async function start() {
     logger,
     getBrowserHost: () => browserHost,
     getPreferences: () => stateStore.read(),
+    shutdownIdle: beforeClose => requestQuit({ idleOnly: true, beforeClose }),
   }).start();
   runtimeSupervisor = new RuntimeSupervisor({
     app,

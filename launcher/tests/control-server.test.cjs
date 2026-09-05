@@ -3,6 +3,41 @@ const assert = require("node:assert/strict");
 const { BrowserHost } = require("../electron/browser-host.cjs");
 const { BrowserControlServer } = require("../electron/control-server.cjs");
 
+test("idle shutdown authenticates, refuses busy work, and acknowledges before closing", async () => {
+  let busy = true;
+  let calls = 0;
+  let acknowledged = false;
+  const server = await new BrowserControlServer({
+    logger: { info() {}, warn() {}, error() {} },
+    getBrowserHost: () => null,
+    getPreferences: () => ({}),
+    shutdownIdle: async acknowledge => {
+      calls += 1;
+      if (busy) return { ok: false };
+      await acknowledge();
+      acknowledged = true;
+      await server.close();
+      return { ok: true };
+    },
+  }).start();
+  const { endpoint, token } = server.descriptor();
+  const request = authorization => fetch(`${endpoint}/v1/launcher/shutdown-idle`, {
+    method: "POST", headers: { authorization, "content-type": "application/json" }, body: "{}",
+  });
+  try {
+    assert.equal((await request("Bearer wrong")).status, 401);
+    assert.equal(calls, 0);
+    assert.equal((await request(`Bearer ${token}`)).status, 409);
+    assert.equal(acknowledged, false);
+    busy = false;
+    const response = await request(`Bearer ${token}`);
+    assert.equal(response.status, 200);
+    assert.deepEqual(await response.json(), { ok: true });
+    assert.equal(acknowledged, true);
+    assert.equal(calls, 2);
+  } finally { await server.close(); }
+});
+
 test("browser control server authenticates and owns turn visibility", async () => {
   const calls = [];
   const logs = [];

@@ -38,10 +38,12 @@ function writeJson(response, status, body) {
 }
 
 class BrowserControlServer {
-  constructor({ logger, getBrowserHost, getPreferences }) {
+  constructor({ logger, getBrowserHost, getPreferences, shutdownIdle }) {
     this.logger = logger;
     this.getBrowserHost = getBrowserHost;
     this.getPreferences = getPreferences;
+    this.shutdownIdle = shutdownIdle;
+    this.shutdownPending = false;
     this.token = randomBytes(32).toString("base64url");
     this.port = 0;
     this.server = createServer((request, response) => {
@@ -91,6 +93,36 @@ class BrowserControlServer {
   async handle(request, response) {
     if (!secureTokenMatches(this.token, request.headers.authorization)) {
       writeJson(response, 401, { error: "unauthorized" });
+      return;
+    }
+    if (request.method === "POST" && request.url === "/v1/launcher/shutdown-idle" && this.shutdownIdle) {
+      if (this.shutdownPending) {
+        writeJson(response, 409, { error: "shutdown_in_progress" });
+        return;
+      }
+      this.shutdownPending = true;
+      let succeeded = false;
+      try {
+        const body = await readJson(request);
+        if (!body || typeof body !== "object" || Array.isArray(body) || Object.keys(body).length !== 0) {
+          writeJson(response, 400, { error: "expected_empty_object" });
+          return;
+        }
+        const result = await this.shutdownIdle(() => new Promise((resolve, reject) => {
+          response.once("finish", resolve);
+          response.once("error", reject);
+          response.once("close", () => { if (!response.writableFinished) reject(new Error("shutdown acknowledgement disconnected")); });
+          writeJson(response, 200, { ok: true });
+        }));
+        succeeded = result?.ok === true;
+        if (!succeeded && !response.headersSent) writeJson(response, 409, { error: "idle_shutdown_refused" });
+      } finally {
+        if (!succeeded) this.shutdownPending = false;
+      }
+      return;
+    }
+    if (this.shutdownPending && (request.url === "/v1/turn/start" || request.url === "/v1/manual/start" || request.url === "/v1/session/inspect")) {
+      writeJson(response, 409, { error: "shutdown_in_progress" });
       return;
     }
     const isTurn = request.url === "/v1/turn/start"

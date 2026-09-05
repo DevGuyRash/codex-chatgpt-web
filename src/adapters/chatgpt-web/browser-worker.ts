@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { chatGptConnectorMenu, CHATGPT_CONNECTOR_ROW_SELECTOR } from "./connector-menu";
 import { chmodSync, existsSync, mkdirSync, readdirSync, rmSync, statSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { chromium, type Browser, type BrowserContext, type Locator, type Page } from "playwright-core";
@@ -179,6 +180,14 @@ function chatGptConnectorUnavailableError(message: string): ChatGptWebAdapterErr
     code: "connector_not_found",
     retryable: false,
   });
+}
+
+function classifyConnectorSelectionError(error: unknown): unknown {
+  // A DOM race can invalidate uniqueness after the count check. Never replay preparation
+  // or expose Playwright's rendered DOM dump for this deterministic identity failure.
+  return error instanceof Error && /strict mode violation/i.test(error.message)
+    ? chatGptConnectorUnavailableError("ChatGPT connector identity became ambiguous during selection")
+    : error;
 }
 
 const CHATGPT_MODEL_CONTROL_UNAVAILABLE_MESSAGE = "ChatGPT model controls are unavailable. Reload ChatGPT and retry the task.";
@@ -1657,6 +1666,16 @@ export function redactChatGptUiDiagnostic(value: string): string {
     .replace(/\b(turn|binding|call)_[A-Za-z0-9_-]{12,}\b/g, "$1_[redacted]");
 }
 
+/** Error messages and causes may contain the entire private page, even on observation failure. */
+export function browserDiagnosticFailure(error: unknown): { kind: string } {
+  if (error instanceof Error) {
+    if (/strict mode violation/i.test(error.message)) return { kind: "ambiguous_locator" };
+    if (error.name === "TimeoutError") return { kind: "timeout" };
+    if (error.name === "AbortError") return { kind: "aborted" };
+  }
+  return { kind: "browser_operation_failed" };
+}
+
 const CHATGPT_DIAGNOSTIC_SAFE_STRING_KEYS = new Set([
   "tag",
   "role",
@@ -1744,6 +1763,7 @@ class ChatGptBrowserDiagnostics {
           effortControlSelector,
           effortItemSelector,
           assistantTurnSelector,
+          connectorRowSelector,
           appName,
         }) => {
           const rendered = (element: Element): boolean => {
@@ -1781,7 +1801,7 @@ class ChatGptBrowserDiagnostics {
           const assistantTurns = [...document.querySelectorAll(assistantTurnSelector)].filter(rendered);
           const selectedConnectors = [...document.querySelectorAll('[data-id^="plugin:"][data-keyword]')]
             .filter(rendered);
-          const exactConnectorRows = [...document.querySelectorAll('.__menu-item[tabindex="0"]')]
+          const exactConnectorRows = [...document.querySelectorAll(connectorRowSelector)]
             .filter(element => rendered(element) && exactText(element, appName));
           const currentUrl = new URL(location.href);
           return {
@@ -1832,6 +1852,7 @@ class ChatGptBrowserDiagnostics {
           effortControlSelector: CHATGPT_EFFORT_CONTROL_SELECTOR,
           effortItemSelector: CHATGPT_EFFORT_ITEM_SELECTOR,
           assistantTurnSelector: CHATGPT_ASSISTANT_TURN_SELECTOR,
+          connectorRowSelector: CHATGPT_CONNECTOR_ROW_SELECTOR,
           appName: this.appName,
         })),
       ]);
@@ -1842,15 +1863,11 @@ class ChatGptBrowserDiagnostics {
       const captureErrors = Object.fromEntries([
         ...(screenshotResult.status === "rejected" ? [[
           "screenshot",
-          redactChatGptUiDiagnostic(
-            screenshotResult.reason instanceof Error ? screenshotResult.reason.message : String(screenshotResult.reason),
-          ),
+          browserDiagnosticFailure(screenshotResult.reason),
         ]] : []),
         ...(stateResult.status === "rejected" ? [[
           "state",
-          redactChatGptUiDiagnostic(
-            stateResult.reason instanceof Error ? stateResult.reason.message : String(stateResult.reason),
-          ),
+          browserDiagnosticFailure(stateResult.reason),
         ]] : []),
       ]);
       atomicWriteFile(join(this.directory, `${stem}.json`), `${JSON.stringify({
@@ -1859,7 +1876,7 @@ class ChatGptBrowserDiagnostics {
         traceId: this.traceId,
         checkpoint,
         ...(error !== undefined ? {
-          error: redactChatGptUiDiagnostic(error instanceof Error ? error.message : String(error)),
+          error: browserDiagnosticFailure(error),
         } : {}),
         ...(stateResult.status === "fulfilled"
           ? { state: sanitizeChatGptBrowserDiagnosticState(stateResult.value) }
@@ -2935,7 +2952,7 @@ export class ChatGptBrowserWorker {
     );
     const exactMatches = keywords.filter(keyword => keyword === this.config.appName).length;
     if (exactMatches > 1) {
-      throw new Error(`ChatGPT composer exposed duplicate ${JSON.stringify(this.config.appName)} connector selections`);
+      throw chatGptConnectorUnavailableError("ChatGPT composer exposed ambiguous connector selections");
     }
     return exactMatches === 1;
   }
@@ -3030,10 +3047,7 @@ export class ChatGptBrowserWorker {
       throwIfPromptAttachmentAborted(abortSignal);
     };
     let composer: Locator;
-    const menuRows = page.locator('.__menu-item[tabindex="0"]');
-    const appResult = menuRows.filter({
-      has: page.getByText(this.config.appName, { exact: true }),
-    });
+    const { rows: menuRows, exact: appResult } = chatGptConnectorMenu(page, this.config.appName);
     await ensureChatGptPersonalizedConnectorAccess(
       page,
       capture,
@@ -3058,7 +3072,10 @@ export class ChatGptBrowserWorker {
           });
           await capture("personalization-proof-mention-triggered");
           try {
-            await appResult.waitFor({ state: "visible", timeout: 2_500, signal: personalizationSignal });
+            await appResult.first().waitFor({ state: "visible", timeout: 2_500, signal: personalizationSignal });
+            if (await withBrowserTurnAbort(appResult.count(), personalizationSignal) !== 1) {
+              throw chatGptConnectorUnavailableError("ChatGPT connector proof exposed ambiguous exact matches");
+            }
             proofResult = true;
             await capture("personalization-proof-menu-visible");
           } catch (error) {
@@ -3077,7 +3094,7 @@ export class ChatGptBrowserWorker {
             "ChatGPT connector proof did not leave a verified empty composer",
           );
         }
-        if (proofError !== undefined) throw proofError;
+        if (proofError !== undefined) throw classifyConnectorSelectionError(proofError);
         return proofResult === true;
       },
       abortSignal,
@@ -3107,7 +3124,7 @@ export class ChatGptBrowserWorker {
           await capture("connector-mention-triggered");
         }
         try {
-          await appResult.waitFor({
+          await appResult.first().waitFor({
             state: "visible",
             timeout: 2_500,
             signal: abortSignal,
@@ -3179,7 +3196,7 @@ export class ChatGptBrowserWorker {
         }
       }
       if (!await rowHighlighted()) {
-        throw new Error(`ChatGPT connector menu could not highlight ${JSON.stringify(this.config.appName)}`);
+        throw chatGptConnectorUnavailableError("ChatGPT connector menu could not establish a unique keyboard selection");
       }
       await composer.press("Enter", {
         signal: abortSignal,
@@ -3197,7 +3214,7 @@ export class ChatGptBrowserWorker {
         signal: abortSignal,
       });
       if (!await this.connectorIsSelected(selectedComposer, abortSignal)) {
-        throw new Error(`ChatGPT composer did not select ${JSON.stringify(this.config.appName)} connector`);
+        throw chatGptConnectorUnavailableError("ChatGPT composer did not confirm the requested connector selection");
       }
       await capture("connector-selected");
       return selectedComposer;
@@ -3210,7 +3227,7 @@ export class ChatGptBrowserWorker {
           "ChatGPT connector selection failed and its composer state could not be cleared",
         );
       }
-      throw error;
+      throw classifyConnectorSelectionError(error);
     }
   }
 

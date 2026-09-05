@@ -1189,6 +1189,7 @@ test("connector selection re-resolves the active composer after ChatGPT replaces
   const calls: Array<[string, string?]> = [];
   let connectorSelected = false;
   const appResult = {
+    first() { return this; },
     waitFor: async () => { calls.push(["waitForResult"]); },
     count: async () => 1,
     getAttribute: async (name: string) => name === "data-highlighted" ? "" : null,
@@ -1235,8 +1236,8 @@ test("connector selection re-resolves the active composer after ChatGPT replaces
       if (selector.includes("__menu-item")) {
         return {
           evaluateAll: async () => [],
-          filter: (options: { has: unknown }) => {
-            expect(options).toEqual({ has: { exactConnectorLabel: true } });
+          filter: (options: { has: unknown; visible: boolean }) => {
+            expect(options).toEqual({ has: { exactConnectorLabel: true }, visible: true });
             return appResult;
           },
         };
@@ -1278,13 +1279,14 @@ test("connector selection moves highlight to the exact hidden-viewport row befor
   let selected = false;
   const selectedConnector = { waitFor: async () => {} };
   const appResult = {
+    first() { return this; },
     waitFor: async () => {},
     count: async () => 1,
     getAttribute: async () => arrowCount >= 2 ? "" : null,
   };
   const menuRows = {
     evaluateAll: async () => [],
-    filter: (options: { visible?: boolean }) => options.visible
+    filter: (options: { visible?: boolean; has?: unknown }) => options.visible && !options.has
       ? { count: async () => 3 }
       : appResult,
   };
@@ -1356,6 +1358,7 @@ test("connector selection retriggers the complete mention after a fresh-page hyd
     count: async () => 1,
   };
   const appResult = {
+    first() { return this; },
     waitFor: async () => {
       menuAttempt += 1;
       calls.push(`menu:${menuAttempt}`);
@@ -1424,6 +1427,7 @@ test("connector verification preserves the host-refreshed catalog evidence", asy
     waitFor: async () => { calls.push("selected"); },
   };
   const appResult = {
+    first() { return this; },
     waitFor: async () => {
       calls.push(`menu:${catalogFresh ? "fresh" : "stale"}`);
       if (!catalogFresh) {
@@ -1438,7 +1442,7 @@ test("connector verification preserves the host-refreshed catalog evidence", asy
     allInnerTexts: async () => catalogFresh ? ["Codex Native2"] : ["Another connector"],
   };
   const menuRows = {
-    filter: (options: { has?: unknown; visible?: boolean }) => options.visible ? visibleRows : appResult,
+    filter: (options: { has?: unknown; visible?: boolean }) => options.visible && !options.has ? visibleRows : appResult,
   };
   const initialComposer = {
     fill: async () => { calls.push("clear"); },
@@ -1535,7 +1539,7 @@ for (const captureScreenshots of [false, true]) test(`connector failure persists
       turns: { user: 0, assistant: [] },
     }),
   };
-  const failure = new Error("connector proof failed");
+  const failure = new Error('connector proof failed: <a href="/c/private-id">private task title</a>');
   const verifyConnectorExclusive = (ChatGptBrowserWorker.prototype as unknown as {
     verifyConnectorExclusive(traceId: string): Promise<string>;
   }).verifyConnectorExclusive;
@@ -1570,7 +1574,7 @@ for (const captureScreenshots of [false, true]) test(`connector failure persists
     ]);
     expect(checkpoints.at(-1)).toMatchObject({
       traceId: "verify_contract_trace",
-      error: "connector proof failed",
+      error: { kind: "browser_operation_failed" },
       state: { composer: { visibleCount: 1, textChars: [6] } },
     });
     expect(JSON.stringify(checkpoints)).not.toContain("private");
@@ -1658,9 +1662,10 @@ test("connector catalog refresh stays fail-closed for absent, legacy, and exact 
       getByRole: personalizedTemporaryChatRole,
       getByText: () => ({ exactConnectorLabel: true }),
       locator: () => ({
-        filter: (options: { has?: unknown; visible?: boolean }) => options.visible
+        filter: (options: { has?: unknown; visible?: boolean }) => options.visible && !options.has
           ? { allInnerTexts: async () => visibleRows }
           : {
+              first() { return this; },
               waitFor: async () => {
                 now += 20_001;
                 throw timeout;
@@ -1722,6 +1727,7 @@ test("tool-capable prompts use the shared Playwright connector selection before 
     count: async () => 1,
   };
   const appResult = {
+    first() { return this; },
     waitFor: async (options?: { signal?: AbortSignal }) => {
       expect(options?.signal).toBeDefined();
       calls.push(["connectorMenu"]);
@@ -1826,6 +1832,7 @@ test("an aborted connector proof clears its mention before the preflight release
     count: async () => 0,
   };
   const appResult = {
+    first() { return this; },
     waitFor: async ({ signal }: { signal?: AbortSignal }) => {
       expect(signal).toBeDefined();
       calls.push("proof-wait");
@@ -1898,6 +1905,7 @@ test("an aborted real connector selection clears the typed mention before return
   const calls: string[] = [];
   let composerText = "";
   const appResult = {
+    first() { return this; },
     waitFor: async ({ signal }: { signal?: AbortSignal }) => {
       expect(signal).toBeDefined();
       calls.push("selection-wait");
@@ -1995,6 +2003,7 @@ test("an abort after connector activation removes the selected pill before retur
   let composerText = "";
   let connectorSelected = false;
   const appResult = {
+    first() { return this; },
     waitFor: async () => {},
     count: async () => 1,
     getAttribute: async () => "",

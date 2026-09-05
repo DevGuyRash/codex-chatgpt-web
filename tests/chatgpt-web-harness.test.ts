@@ -1187,8 +1187,8 @@ describe("ChatGPT outer-native harness v4", () => {
     }
   });
 
-  test("a non-retryable browser failure remains replayable without starting another browser turn", async () => {
-    const socketPath = brokerTestEndpoint(`cgw-h4-nonretryable-${process.pid}-${Date.now()}`);
+  test.each(["context_length_exceeded", "connector_not_found"])("non-retryable %s remains replayable without starting another browser turn", async code => {
+    const socketPath = brokerTestEndpoint(`cgw-h4-nonretryable-${code}-${process.pid}-${Date.now()}`);
     const provider: CodexProviderConfig = {
       adapter: "chatgpt-web",
       baseUrl: "browser://chatgpt-nonretryable-test",
@@ -1199,10 +1199,10 @@ describe("ChatGPT outer-native harness v4", () => {
     let browserStarts = 0;
     (worker as unknown as { run: (turn: BrowserTurn) => Promise<string> }).run = async () => {
       browserStarts += 1;
-      throw new ChatGptWebAdapterError("This task exceeds the model context window.", {
+      throw new ChatGptWebAdapterError("Synthetic terminal browser preflight failure.", {
         status: 400,
         errorType: "invalid_request_error",
-        code: "context_length_exceeded",
+        code,
         retryable: false,
       });
     };
@@ -1216,7 +1216,7 @@ describe("ChatGPT outer-native harness v4", () => {
         );
         expect(events.at(-1)).toMatchObject({
           type: "error",
-          code: "context_length_exceeded",
+          code,
           retryable: false,
         });
       }

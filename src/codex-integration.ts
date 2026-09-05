@@ -1,7 +1,7 @@
-import { existsSync, mkdirSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync } from "node:fs";
 import { dirname } from "node:path";
 import type { AppConfig } from "./config";
-import { atomicWriteFile, getConfigPath, loadConfig, saveConfig } from "./config";
+import { getConfigPath, loadConfig, preserveUtf8Bom, stripUtf8Bom } from "./config";
 import { installCodexInterruptHook, installCodexInterruptHookCommand } from "./codex-interrupt-hook";
 import {
   CODEX_REALTIME_WEBRTC_CALL_BASE_URL,
@@ -9,14 +9,15 @@ import {
   getCodexJournalPath,
   getCodexJournalRecoveryPath,
   getCodexModelsCachePath,
-  restoreFileSnapshot,
   routeUrl,
   sha256,
   snapshotFile,
   writeIntegrationState,
+  writeFilesWithCompensation,
 } from "./codex-integration-shared";
 import type {
   AnyCodexIntegrationJournal,
+  FileSnapshot,
   CodexIntegrationJournal,
   InstallCodexIntegrationOptions,
   LegacyCodexIntegrationJournalV4,
@@ -125,7 +126,7 @@ export function readCodexSubagentProtocol(
 }
 
 export function setCodexSubagentProtocol(
-  config: AppConfig,
+  _config: AppConfig,
   protocol: AppConfig["subagentProtocol"],
 ): CodexIntegrationJournal {
   const status = inspectCodexIntegration();
@@ -133,107 +134,50 @@ export function setCodexSubagentProtocol(
   if (!status.active) {
     throw new Error("Codex integration is disconnected; reconnect it before changing the subagent protocol");
   }
-  const nextConfig = { ...config, subagentProtocol: protocol };
-  // The runtime catalog and Codex feature surface are two halves of one protocol selection. If
-  // either write fails, restore every participant so the next launcher/Codex restart cannot load a
-  // split V1/V2 state.
-  const snapshots = [
-    getConfigPath(),
-    getCodexConfigPath(),
-    getCodexModelsCachePath(),
-    getCodexJournalPath(),
-    getCodexJournalRecoveryPath(),
-  ].map(snapshotFile);
-  try {
-    const journal = installCodexIntegration(nextConfig);
-    saveConfig(nextConfig);
-    return journal;
-  } catch (error) {
-    const rollbackFailures: string[] = [];
-    for (const snapshot of [...snapshots].reverse()) {
-      try {
-        restoreFileSnapshot(snapshot);
-      } catch (rollbackError) {
-        rollbackFailures.push(
-          `${snapshot.path}: ${rollbackError instanceof Error ? rollbackError.message : String(rollbackError)}`,
-        );
-      }
-    }
-    const primary = error instanceof Error ? error.message : String(error);
-    throw new Error(rollbackFailures.length > 0
-      ? `${primary}; subagent protocol rollback also failed: ${rollbackFailures.join("; ")}`
-      : primary);
-  }
+  const runtime = snapshotFile(getConfigPath());
+  if (!runtime.data) throw new Error("Runtime configuration must exist before protocol selection");
+  // A caller's cached config is not authority to overwrite unrelated newer settings.
+  const nextConfig = { ...loadConfig(), subagentProtocol: protocol };
+  const plan = prepareCodexIntegration(nextConfig);
+  const original = runtime.data.toString("utf8");
+  const nextRuntime = { ...JSON.parse(stripUtf8Bom(original)), subagentProtocol: protocol };
+  writeIntegrationState(plan.journal, plan.configWrite, plan.removals, {
+    expected: [...plan.expected, runtime],
+    additionalWrites: [{ path: runtime.path, data: preserveUtf8Bom(`${JSON.stringify(nextRuntime, null, 2)}\n`, original) }],
+    verify: () => { if (loadConfig().subagentProtocol !== protocol) throw new Error("Protocol selection did not persist"); },
+  });
+  return plan.journal;
 }
 
 export function preflightCodexIntegration(
   config: AppConfig,
   options: InstallCodexIntegrationOptions = {},
 ): void {
-  const configPath = getCodexConfigPath();
-  const configExists = existsSync(configPath);
-  const currentText = configExists ? readFileSync(configPath, "utf8") : "";
-  const existing = readJournal();
-  const installedUrl = routeUrl(config);
-  if (existing) assertJournalTargetsConfig(existing, configPath);
-  if (existing && existing.version !== 2) {
-    if (!configExists) {
-      if (options.replaceExistingRoute !== true) {
-        throw new Error(`Codex config is missing: ${configPath}`);
-      }
-      installConfiguredRoute("", installedUrl, config, true, true);
-      return;
-    }
-    try {
-      verifyManagedJournalState(currentText, existing);
-    } catch (error) {
-      if (options.replaceExistingRoute !== true) throw error;
-      installConfiguredRoute(
-        replacementBaseline(currentText, configExists, existing),
-        installedUrl,
-        config,
-        true,
-        true,
-      );
-      return;
-    }
-    if (existing.version === 10) return;
-    const baseline = managedJournalIsActive(existing)
-      ? restoreManagedRoute(currentText, existing)
-      : currentText;
-    installConfiguredRoute(
-      baseline,
-      installedUrl,
-      config,
-      true,
-      options.replaceExistingRoute === true,
-    );
-    return;
-  }
-  let baseline = currentText;
-  if (existing?.version === 2) {
-    if (existsSync(existing.catalogPath) && sha256(readFileSync(existing.catalogPath)) !== existing.catalogSha256) {
-      throw new Error(`Managed legacy catalog changed after setup; refusing migration: ${existing.catalogPath}`);
-    }
-    baseline = restoreLegacyV2(currentText, existing);
-  }
-  installConfiguredRoute(
-    baseline,
-    installedUrl,
-    config,
-    options.replaceExistingRoute === true,
-    options.replaceExistingRoute === true,
-  );
+  prepareCodexIntegration(config, options);
 }
 export function installCodexIntegration(
   config: AppConfig,
   options: InstallCodexIntegrationOptions = {},
 ): CodexIntegrationJournal {
+  mkdirSync(dirname(getCodexConfigPath()), { recursive: true, mode: 0o700 });
+  const plan = prepareCodexIntegration(config, options);
+  writeIntegrationState(plan.journal, plan.configWrite, plan.removals, { expected: plan.expected });
+  return plan.journal;
+}
+
+interface IntegrationInstallPlan {
+  journal: CodexIntegrationJournal;
+  configWrite: { path: string; data: string };
+  removals: string[];
+  expected: FileSnapshot[];
+}
+
+function prepareCodexIntegration(config: AppConfig, options: InstallCodexIntegrationOptions = {}): IntegrationInstallPlan {
   const configPath = getCodexConfigPath();
-  mkdirSync(dirname(configPath), { recursive: true, mode: 0o700 });
-  const configExists = existsSync(configPath);
-  const currentText = configExists ? readFileSync(configPath, "utf8") : "";
-  const existing = readJournal();
+  const expected = [configPath, getCodexJournalPath(), getCodexJournalRecoveryPath(), getCodexModelsCachePath()].map(snapshotFile);
+  const configExists = expected[0]!.exists;
+  const currentText = expected[0]!.data?.toString("utf8") ?? "";
+  const existing = readJournal({ repair: false });
   const installedUrl = routeUrl(config);
   if (existing) assertJournalTargetsConfig(existing, configPath);
 
@@ -295,12 +239,12 @@ export function installCodexIntegration(
       } : {}),
       ...(existing.format ? { format: existing.format } : {}),
     };
-    writeIntegrationState(updated, { path: configPath, data: patched.text }, [getCodexModelsCachePath()]);
-    return updated;
+    return { journal: updated, configWrite: { path: configPath, data: patched.text }, removals: [getCodexModelsCachePath()], expected };
   }
 
   let baseline = currentText;
   if (existing?.version === 2) {
+    expected.push(snapshotFile(existing.catalogPath));
     if (existsSync(existing.catalogPath) && sha256(readFileSync(existing.catalogPath)) !== existing.catalogSha256) {
       throw new Error(`Managed legacy catalog changed after setup; refusing migration: ${existing.catalogPath}`);
     }
@@ -335,20 +279,21 @@ export function installCodexIntegration(
     } : {}),
     format: textFormat(baseline),
   };
-  writeIntegrationState(journal, { path: configPath, data: patched.text }, [getCodexModelsCachePath()]);
-  if (existing?.version === 2 && existsSync(existing.catalogPath)) rmSync(existing.catalogPath);
-  return journal;
+  return { journal, configWrite: { path: configPath, data: patched.text },
+    removals: [getCodexModelsCachePath(), ...(existing?.version === 2 ? [existing.catalogPath] : [])], expected };
 }
 
 export function deactivateCodexIntegration(): SetCodexIntegrationActiveResult {
-  const existing = readJournal();
+  const journalInputs = [getCodexJournalPath(), getCodexJournalRecoveryPath()].map(snapshotFile);
+  const existing = readJournal({ repair: false });
   if (!existing) return { changed: false, active: false };
   if (existing.version === 2) {
     throw new Error("Legacy Codex integration must be upgraded by Setup before the bridge can be disconnected");
   }
   assertJournalTargetsConfig(existing, getCodexConfigPath());
-  if (!existsSync(existing.configPath)) throw new Error(`Codex config is missing: ${existing.configPath}`);
-  const current = readFileSync(existing.configPath, "utf8");
+  const expected = [snapshotFile(existing.configPath), ...journalInputs, snapshotFile(getCodexModelsCachePath())];
+  if (!expected[0]!.exists) throw new Error(`Codex config is missing: ${existing.configPath}`);
+  const current = expected[0]!.data!.toString("utf8");
   if ((existing.version === 4 || existing.version === 5 || existing.version === 6 || existing.version === 7 || existing.version === 8 || existing.version === 9 || existing.version === 10) && !existing.active) {
     verifyRestoredRoute(current, existing);
     return { changed: false, active: false };
@@ -365,19 +310,21 @@ export function deactivateCodexIntegration(): SetCodexIntegrationActiveResult {
       || existing.version === 7 || existing.version === 8 || existing.version === 9 || existing.version === 10
       ? { ...existing, active: false }
       : { ...existing, version: 4, active: false };
-  writeIntegrationState(disconnected, { path: existing.configPath, data: restored }, [getCodexModelsCachePath()]);
+  writeIntegrationState(disconnected, { path: existing.configPath, data: restored }, [getCodexModelsCachePath()], { expected });
   return { changed: true, active: false };
 }
 
 export function activateCodexIntegration(): SetCodexIntegrationActiveResult {
-  const existing = readJournal();
+  const journalInputs = [getCodexJournalPath(), getCodexJournalRecoveryPath()].map(snapshotFile);
+  const existing = readJournal({ repair: false });
   if (!existing) throw new Error("Codex integration is not installed");
   if (existing.version === 2) {
     throw new Error("Legacy Codex integration must be upgraded by Setup before the bridge can be reconnected");
   }
   assertJournalTargetsConfig(existing, getCodexConfigPath());
-  if (!existsSync(existing.configPath)) throw new Error(`Codex config is missing: ${existing.configPath}`);
-  const current = readFileSync(existing.configPath, "utf8");
+  const expected = [snapshotFile(existing.configPath), ...journalInputs, snapshotFile(getCodexModelsCachePath())];
+  if (!expected[0]!.exists) throw new Error(`Codex config is missing: ${existing.configPath}`);
+  const current = expected[0]!.data!.toString("utf8");
   if (existing.version === 10 && existing.active) {
     verifyInstalledRoute(current, existing);
     return { changed: false, active: true };
@@ -432,17 +379,21 @@ export function activateCodexIntegration(): SetCodexIntegrationActiveResult {
     } : {}),
     ...(existing.format ? { format: existing.format } : {}),
   };
-  writeIntegrationState(connected, { path: existing.configPath, data: route.text }, [getCodexModelsCachePath()]);
+  writeIntegrationState(connected, { path: existing.configPath, data: route.text }, [getCodexModelsCachePath()], { expected });
   return { changed: true, active: true };
 }
 
 export function uninstallCodexIntegration(): UninstallCodexIntegrationResult {
-  const journal = readJournal();
+  const journalInputs = [getCodexJournalPath(), getCodexJournalRecoveryPath()].map(snapshotFile);
+  const journal = readJournal({ repair: false });
   if (!journal) return { changed: false };
-  if (!existsSync(journal.configPath)) throw new Error(`Codex config is missing: ${journal.configPath}`);
-  const current = readFileSync(journal.configPath, "utf8");
+  assertJournalTargetsConfig(journal, getCodexConfigPath());
+  const expected = [snapshotFile(getCodexConfigPath()), ...journalInputs, snapshotFile(getCodexModelsCachePath())];
+  if (!expected[0]!.exists) throw new Error(`Codex config is missing: ${journal.configPath}`);
+  const current = expected[0]!.data!.toString("utf8");
   let restored: string;
   if (journal.version === 2) {
+    expected.push(snapshotFile(journal.catalogPath));
     if (existsSync(journal.catalogPath) && sha256(readFileSync(journal.catalogPath)) !== journal.catalogSha256) {
       throw new Error(`Managed legacy catalog changed after setup: ${journal.catalogPath}`);
     }
@@ -453,32 +404,10 @@ export function uninstallCodexIntegration(): UninstallCodexIntegrationResult {
   } else {
     restored = restoreManagedRoute(current, journal);
   }
-  const configSnapshot = snapshotFile(journal.configPath);
-  const catalogSnapshot = journal.version === 2 ? snapshotFile(journal.catalogPath) : undefined;
-  const modelsCacheSnapshot = snapshotFile(getCodexModelsCachePath());
-  const journalSnapshot = snapshotFile(getCodexJournalPath());
-  const recoverySnapshot = snapshotFile(getCodexJournalRecoveryPath());
-  try {
-    atomicWriteFile(journal.configPath, restored);
-    if (catalogSnapshot?.exists) rmSync(catalogSnapshot.path);
-    rmSync(modelsCacheSnapshot.path, { force: true });
-    rmSync(getCodexJournalPath(), { force: true });
-    rmSync(getCodexJournalRecoveryPath(), { force: true });
-  } catch (error) {
-    const rollbackFailures: string[] = [];
-    for (const snapshot of [recoverySnapshot, journalSnapshot, modelsCacheSnapshot, catalogSnapshot, configSnapshot]) {
-      if (!snapshot) continue;
-      try {
-        restoreFileSnapshot(snapshot);
-      } catch (caught) {
-        rollbackFailures.push(`${snapshot.path}: ${caught instanceof Error ? caught.message : String(caught)}`);
-      }
-    }
-    const primary = error instanceof Error ? error.message : String(error);
-    throw new Error(rollbackFailures.length > 0
-      ? `${primary}; Codex integration rollback also failed: ${rollbackFailures.join("; ")}`
-      : primary);
-  }
+  writeFilesWithCompensation([{ path: journal.configPath, data: restored }], [
+    ...(journal.version === 2 ? [journal.catalogPath] : []),
+    getCodexModelsCachePath(), getCodexJournalPath(), getCodexJournalRecoveryPath(),
+  ], { expected });
   return { changed: true };
 }
 

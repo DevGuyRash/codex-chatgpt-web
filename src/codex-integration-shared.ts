@@ -356,6 +356,7 @@ export function writeIntegrationState(
   journal: AnyCodexIntegrationJournal,
   configWrite?: { path: string; data: string },
   removals: string[] = [],
+  options: { expected?: readonly FileSnapshot[]; additionalWrites?: Array<{ path: string; data: string }>; verify?: () => void } = {},
 ): void {
   const data = serializeJournal(journal);
   // The recovery copy records intent and the primary copy records commit. If the process stops
@@ -363,6 +364,7 @@ export function writeIntegrationState(
   writeFilesWithCompensation([
     { path: getCodexJournalRecoveryPath(), data },
     ...(configWrite ? [configWrite] : []),
+    ...(options.additionalWrites ?? []),
     { path: getCodexJournalPath(), data },
-  ], removals);
+  ], removals, options);
 }

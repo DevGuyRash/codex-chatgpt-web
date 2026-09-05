@@ -59,6 +59,50 @@ afterEach(() => {
 });
 
 describe("reversible native Codex route integration", () => {
+  test("preflight validates the proposed protocol without healing journal files", () => {
+    const { codexHome } = fixture();
+    const configPath = join(codexHome, "config.toml");
+    writeFileSync(configPath, '[features]\nmulti_agent="unsupported"\n');
+    installCodexIntegration(nativeConfig("browser-only"));
+    rmSync(getCodexJournalRecoveryPath());
+    const before = readFileSync(configPath, "utf8");
+    expect(() => preflightCodexIntegration(compatibilityV1Config("browser-only"))).toThrow("multi_agent must be a boolean");
+    expect(readFileSync(configPath, "utf8")).toBe(before);
+    expect(existsSync(getCodexJournalRecoveryPath())).toBe(false);
+  });
+  test("uninstall without an installation does not inspect unmanaged configuration", () => {
+    const { codexHome } = fixture();
+    mkdirSync(join(codexHome, "config.toml"));
+    expect(uninstallCodexIntegration()).toEqual({ changed: false });
+  });
+  test("uninstall refuses a journal targeting a different Codex configuration", () => {
+    const { codexHome } = fixture();
+    installCodexIntegration(nativeConfig("browser-only"));
+    const foreignPath = join(codexHome, "foreign.toml");
+    const source = readFileSync(join(codexHome, "config.toml"), "utf8");
+    writeFileSync(foreignPath, source);
+    const journal = JSON.parse(readFileSync(getCodexJournalPath(), "utf8"));
+    journal.configPath = foreignPath;
+    for (const path of [getCodexJournalPath(), getCodexJournalRecoveryPath()]) writeFileSync(path, JSON.stringify(journal));
+    expect(() => uninstallCodexIntegration()).toThrow("not the active config");
+    expect(readFileSync(foreignPath, "utf8")).toBe(source);
+  });
+
+  test("setup cannot overwrite an edit made while its integration changes are being prepared", () => {
+    const { codexHome } = fixture();
+    const configPath = join(codexHome, "config.toml");
+    writeFileSync(configPath, 'model="original"\n');
+    const config = nativeConfig("browser-only");
+    const runtimeCommand = config.runtimeCommand;
+    Object.defineProperty(config, "runtimeCommand", { get() {
+      writeFileSync(configPath, 'model="newer user edit"\n');
+      return runtimeCommand;
+    } });
+    expect(() => installCodexIntegration(config)).toThrow("changed since approval");
+    expect(readFileSync(configPath, "utf8")).toBe('model="newer user edit"\n');
+    expect(existsSync(getCodexJournalPath())).toBe(false);
+  });
+
   for (const featureText of [
     'features = { multi_agent = false, multi_agent_v2 = { enabled = true, concurrency = 6 }, context_management = { experimental_mode = true } }\nagents = { max_depth = 0x03 }\n',
     'features."multi_agent" = false\nfeatures.multi_agent_v2.enabled = true\nfeatures.multi_agent_v2.concurrency = 6\nfeatures.context_management.experimental_mode = true\n',
@@ -410,6 +454,16 @@ describe("reversible native Codex route integration", () => {
     expect(readFileSync(configPath, "utf8")).toContain("multi_agent_v2 = true # native choice");
     uninstallCodexIntegration();
     expect(readFileSync(configPath, "utf8")).toBe(original);
+  });
+
+  test("protocol selection cannot restore stale unrelated runtime settings from its caller", () => {
+    fixture();
+    const cached = nativeConfig("browser-only");
+    saveConfig(cached);
+    installCodexIntegration(cached);
+    saveConfig({ ...loadConfig(), headed: !cached.headed });
+    setCodexSubagentProtocol(cached, "compatibility-v1");
+    expect(loadConfig().headed).toBe(!cached.headed);
   });
 
   test("Compatibility V1 refuses to overwrite a newer agent depth edit", () => {

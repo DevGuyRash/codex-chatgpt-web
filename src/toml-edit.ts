@@ -28,14 +28,22 @@ export function removeTomlPath(text: string, path: readonly (string | number)[])
   if (Array.isArray(parent) && typeof last === "number") parent.splice(last, 1);
   else if (table(parent) && typeof last === "string") delete parent[last];
   else throw new Error("Invalid configuration removal path");
+  const selected = new Set<AST.TOMLNode>();
   const ranges: Array<[number, number]> = [];
   const add = (node: AST.TOMLKeyValue | AST.TOMLTable | AST.TOMLContentNode): void => {
+    selected.add(node);
+  };
+  const range = (node: AST.TOMLNode): void => {
     let [start, end] = node.range;
-    if (node.parent.type === "TOMLInlineTable" || node.parent.type === "TOMLArray") {
+    if (node.parent?.type === "TOMLInlineTable" || node.parent?.type === "TOMLArray") {
       const siblings: AST.TOMLNode[] = node.parent.type === "TOMLArray" ? node.parent.elements : node.parent.body;
       const index = siblings.indexOf(node);
-      const next = siblings[index + 1];
       const previous = siblings[index - 1];
+      if (previous && selected.has(previous)) return;
+      let lastIndex = index;
+      while (siblings[lastIndex + 1] && selected.has(siblings[lastIndex + 1]!)) lastIndex++;
+      end = siblings[lastIndex]!.range[1];
+      const next = siblings[lastIndex + 1];
       const comma = parsed.ast.tokens.find(token => token.value === ","
         && (next ? token.range[0] >= end && token.range[1] <= next.range[0]
           : previous ? token.range[0] >= previous.range[1] && token.range[1] <= start : false));
@@ -59,6 +67,7 @@ export function removeTomlPath(text: string, path: readonly (string | number)[])
     else if (prefix(path, entry.resolvedKey)) add(entry);
     else entry.body.forEach(child => visit(child, entry.resolvedKey));
   }
+  selected.forEach(range);
   if (!ranges.length) throw new Error("Could not identify the owned configuration subtree");
   const bom = text.startsWith("\uFEFF") ? 1 : 0;
   let result = text;
@@ -135,8 +144,8 @@ export function setTomlScalar(text: string, path: readonly string[], value: stri
   if (current !== undefined && !["string", "boolean", "number"].includes(typeof current)) {
     throw new Error("Cannot replace a non-scalar setting with a scalar");
   }
-  if (value === undefined) delete expected[last];
-  else Object.defineProperty(expected, last, { value, enumerable: true, configurable: true, writable: true });
+  if (value === undefined) return removeTomlPath(text, path);
+  Object.defineProperty(expected, last, { value, enumerable: true, configurable: true, writable: true });
 
   let target: AST.TOMLKeyValue | undefined;
   let container: { path: (string | number)[]; node: AST.TOMLInlineTable | AST.TOMLTable } | undefined;
@@ -167,21 +176,7 @@ export function setTomlScalar(text: string, path: readonly string[], value: stri
   let start: number;
   let end: number;
   let replacement: string;
-  if (target && value === undefined) {
-    [start, end] = target.range;
-    replacement = "";
-    if (target.parent.type === "TOMLInlineTable") {
-      const siblings = target.parent.body;
-      const index = siblings.indexOf(target);
-      const next = siblings[index + 1];
-      const previous = siblings[index - 1];
-      const comma = parsed.ast.tokens.find(token => token.value === ","
-        && (next ? token.range[0] >= end && token.range[1] <= next.range[0]
-          : previous ? token.range[0] >= previous.range[1] && token.range[1] <= start : false));
-      if (comma && next) end = comma.range[1];
-      else if (comma) start = comma.range[0];
-    }
-  } else if (target) {
+  if (target) {
     [start, end] = target.value.range;
     replacement = encoded!;
   } else {

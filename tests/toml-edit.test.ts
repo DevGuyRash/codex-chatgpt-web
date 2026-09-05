@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { setTomlScalar } from "../src/toml-edit";
+import { removeTomlPath, setTomlScalar } from "../src/toml-edit";
 
 test("changes only the owned scalar, preserving comments, alignment, and mixed endings", () => {
   const text = '# user\r\n[features]\n  "multi_agent"   = false # keep\r\ncontext_management = { experimental_mode = true }\n';
@@ -56,4 +56,14 @@ test("removes only the selected inline scalar, leaving its siblings", () => {
 test("removing a scalar preserves surrounding comments and a BOM", () => {
   const text = '\uFEFF[features]\r\nflag = true # user comment\r\nother = false\r\n';
   expect(setTomlScalar(text, ["features", "flag"], undefined)).toBe(text.replace("flag = true", ""));
+});
+
+test("removing the last dotted scalar tolerates its implicit parent disappearing", () => {
+  expect(Bun.TOML.parse(setTomlScalar('agents.max_depth=2\nother=true\n', ["agents", "max_depth"], undefined))).toEqual({ other: true });
+});
+
+test("subtree removal owns contiguous inline siblings and their separators together", () => {
+  for (const text of ['config={keep=3,owned.a=1,owned.b=2}', 'config={owned.a=1,owned.b=2,keep=3}', 'config={owned.a=1,keep=3,owned.b=2}']) {
+    expect(Bun.TOML.parse(removeTomlPath(text, ["config", "owned"]))).toEqual({ config: { keep: 3 } });
+  }
 });

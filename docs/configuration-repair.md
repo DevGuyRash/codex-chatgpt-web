@@ -23,4 +23,8 @@ Repair requires an active version 10 installation journal. Missing, corrupt, amb
 
 The approval identifies exact configuration, journal, recovery, runtime configuration, and model-cache inputs. Any intervening change requires another preview. Application revalidates those inputs, writes the configuration and ownership records using existing atomic replacement, invalidates the model cache, and verifies the resulting settings. Failure compensation restores only outputs still matching this transaction's own writes, preserving intervening edits. This is not an operating-system compare-and-swap guarantee or a promise of crash-proof multi-file atomicity.
 
+Active version 8–10 route verification and modern disconnect/removal compare owned values semantically. Quoted route keys, alignment, and comments are not ownership conflicts. Restoration edits only the owned scalar settings, preserving newer sibling fields inside structured Native V2 configuration. Historical source formatting is reused only when its parsed result agrees with the syntax-aware edit. Changed values still require review. Older journal formats retain their legacy migration checks.
+
+During an interrupted additive journal upgrade, a matching newer recovery record can supersede an older primary record only when projecting it onto the older version preserves every existing ownership field and baseline. Different baselines remain ambiguous and are not automatically adopted.
+
 Preview values are shown only in the requested interface. Raw repair output and approval arguments are excluded from launcher activity logs. Treat a terminal preview as private configuration data; do not paste it into public issue reports without review.

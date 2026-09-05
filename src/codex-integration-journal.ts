@@ -1,5 +1,6 @@
 import { existsSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
+import { isDeepStrictEqual } from "node:util";
 import { atomicWriteFile, stripUtf8Bom } from "./config";
 import {
   CODEX_REALTIME_WEBRTC_CALL_BASE_URL,
@@ -221,6 +222,23 @@ function journalMatchesConfig(journal: AnyCodexIntegrationJournal, semantic = fa
   }
 }
 
+/** A newer recovery intent may add ownership while preserving every older baseline.
+ * Both records must independently match the configuration before using this proof.
+ */
+function additiveRecoveryUpgrade(primary: AnyCodexIntegrationJournal, recovery: AnyCodexIntegrationJournal): boolean {
+  if ((primary.version !== 8 && primary.version !== 9)
+    || (recovery.version !== 9 && recovery.version !== 10)
+    || recovery.version <= primary.version) return false;
+  const projected = structuredClone(recovery) as unknown as Record<string, unknown>;
+  projected.version = primary.version;
+  if (primary.version < 10) delete projected.interruptHook;
+  if (primary.version === 8) {
+    delete projected.previousRealtimeWebrtcCallBaseUrl;
+    delete (projected.installed as Record<string, unknown>).experimental_realtime_webrtc_call_base_url;
+  }
+  return isDeepStrictEqual(projected, primary);
+}
+
 export function readJournal({ repair = true }: { repair?: boolean } = {}): AnyCodexIntegrationJournal | undefined {
   const primaryPath = getCodexJournalPath();
   const recoveryPath = getCodexJournalRecoveryPath();
@@ -254,14 +272,15 @@ export function readJournal({ repair = true }: { repair?: boolean } = {}): AnyCo
 
   const primaryMatches = primary ? journalMatchesConfig(primary, !repair) : false;
   const recoveryMatches = recovery ? journalMatchesConfig(recovery, !repair) : false;
-  if (primaryMatches === recoveryMatches) {
+  const upgrade = primaryMatches && recoveryMatches && primary && recovery && additiveRecoveryUpgrade(primary, recovery);
+  if (primaryMatches === recoveryMatches && !upgrade) {
     throw new Error(
       primaryMatches
         ? "Codex integration journal copies contain different baselines for the same config"
         : "Codex integration journal copies do not match the active config",
     );
   }
-  const selected = primaryMatches ? primary! : recovery!;
+  const selected = upgrade || !primaryMatches ? recovery! : primary!;
   const data = serializeJournal(selected);
   if (repair) writeFilesWithCompensation([
     { path: recoveryPath, data },

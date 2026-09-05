@@ -59,6 +59,61 @@ afterEach(() => {
 });
 
 describe("reversible native Codex route integration", () => {
+  test("formatted owned values remain inspectable and removable without losing newer sibling settings", () => {
+    const { codexHome } = fixture();
+    const configPath = join(codexHome, "config.toml");
+    const original = '[features]\nmulti_agent = false\nmulti_agent_v2 = { enabled = true, max_concurrency = 4 }\ncontext_management = { experimental_mode = true }\n';
+    writeFileSync(configPath, original);
+    installCodexIntegration(compatibilityV1Config("browser-only"));
+    const formatted = readFileSync(configPath, "utf8")
+      .replace(MANAGED_ROUTE_COMMENT, "# locally formatted")
+      .replace('openai_base_url = "', '"openai_base_url"  =  "')
+      .replace('experimental_realtime_webrtc_call_base_url = "', 'experimental_realtime_webrtc_call_base_url   =   "')
+      .replace(MANAGED_MULTI_AGENT_LINE, '"multi_agent" = true')
+      .replace('max_concurrency = 4', 'max_concurrency = 6')
+      .replace(managedAgentMaxDepthLine(2), '"max_depth" = 2');
+    writeFileSync(configPath, formatted);
+    expect(inspectCodexIntegration().errors).toEqual([]);
+    uninstallCodexIntegration();
+    const restored = Bun.TOML.parse(readFileSync(configPath, "utf8")) as Record<string, any>;
+    expect(restored.openai_base_url).toBeUndefined();
+    expect(restored.experimental_realtime_webrtc_call_base_url).toBeUndefined();
+    expect(restored.features).toEqual({ multi_agent: false, multi_agent_v2: { enabled: true, max_concurrency: 6 }, context_management: { experimental_mode: true } });
+  });
+
+  test("format-only differences survive disconnect and reconnect", () => {
+    const { codexHome } = fixture();
+    const configPath = join(codexHome, "config.toml");
+    writeFileSync(configPath, '[features]\nmulti_agent = false\nmulti_agent_v2 = true\n');
+    const config = compatibilityV1Config("browser-only");
+    installCodexIntegration(config);
+    writeFileSync(configPath, readFileSync(configPath, "utf8")
+      .replace(MANAGED_MULTI_AGENT_LINE, 'multi_agent    = true')
+      .replace(MANAGED_MULTI_AGENT_V2_LINE, 'multi_agent_v2 = false')
+      .replace(managedAgentMaxDepthLine(2), 'max_depth = 2'));
+    deactivateCodexIntegration();
+    writeFileSync(configPath, readFileSync(configPath, "utf8").replace('multi_agent = false', 'multi_agent    = false # formatting only'));
+    activateCodexIntegration();
+    expect(inspectCodexIntegration().errors).toEqual([]);
+  });
+
+  test("quoted route keys and reformatted previous Voice routes survive reinstall and reconnect", () => {
+    const { codexHome } = fixture();
+    const configPath = join(codexHome, "config.toml");
+    writeFileSync(configPath, '"openai_base_url" = "https://previous.example/v1"\nexperimental_realtime_webrtc_call_base_url = "https://voice.example/v1"\n');
+    const config = nativeConfig("browser-only");
+    expect(() => installCodexIntegration(config)).toThrow("--replace-codex-route");
+    installCodexIntegration(config, { replaceExistingRoute: true });
+    installCodexIntegration(config);
+    deactivateCodexIntegration();
+    writeFileSync(configPath, readFileSync(configPath, "utf8").replace('experimental_realtime_webrtc_call_base_url =', 'experimental_realtime_webrtc_call_base_url   ='));
+    activateCodexIntegration();
+    uninstallCodexIntegration();
+    const restored = Bun.TOML.parse(readFileSync(configPath, "utf8")) as Record<string, unknown>;
+    expect(restored.openai_base_url).toBe("https://previous.example/v1");
+    expect(restored.experimental_realtime_webrtc_call_base_url).toBe("https://voice.example/v1");
+  });
+
   test("expands a configured tilde Codex home consistently with launcher paths", () => {
     process.env.CODEX_HOME = "~/custom-codex-home";
     expect(getCodexHome()).toBe(join(homedir(), "custom-codex-home"));
@@ -347,7 +402,7 @@ describe("reversible native Codex route integration", () => {
     );
     writeFileSync(configPath, edited);
 
-    expect(() => uninstallCodexIntegration()).toThrow("max_depth changed after Compatibility V1 setup");
+    expect(() => uninstallCodexIntegration()).toThrow("agents.max_depth differs from the installed value");
     expect(readFileSync(configPath, "utf8")).toBe(edited);
   });
 
@@ -560,12 +615,12 @@ describe("reversible native Codex route integration", () => {
       "https://voice.example/changed",
     );
     writeFileSync(configPath, activeEdit);
-    expect(() => deactivateCodexIntegration()).toThrow("realtime WebRTC call route changed after setup");
+    expect(() => deactivateCodexIntegration()).toThrow("experimental_realtime_webrtc_call_base_url differs from the installed value");
 
     writeFileSync(configPath, activeEdit.replace("https://voice.example/changed", CODEX_REALTIME_WEBRTC_CALL_BASE_URL));
     deactivateCodexIntegration();
     writeFileSync(configPath, `${readFileSync(configPath, "utf8")}experimental_realtime_webrtc_call_base_url = "https://voice.example/new"\n`);
-    expect(() => activateCodexIntegration()).toThrow("realtime WebRTC call route changed while the bridge was disconnected");
+    expect(() => activateCodexIntegration()).toThrow("experimental_realtime_webrtc_call_base_url changed while the bridge was disconnected");
   });
 
   test("invalidates Codex's provider-agnostic model cache on install and uninstall", () => {

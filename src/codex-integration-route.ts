@@ -1,5 +1,8 @@
 import { existsSync } from "node:fs";
 import { resolve } from "node:path";
+import { isDeepStrictEqual } from "node:util";
+import { inspectInstalledCodexConfig } from "./codex-integration-inspection";
+import { parseTomlValue, removeTomlComments, setTomlScalar } from "./toml-edit";
 import {
   CODEX_REALTIME_WEBRTC_CALL_BASE_URL,
   MANAGED_COMMENT,
@@ -25,7 +28,6 @@ import type {
 } from "./codex-integration-shared";
 import {
   restoreCodexInterruptHook,
-  verifyCodexInterruptHook,
   verifyCodexInterruptHookRestored,
 } from "./codex-interrupt-hook";
 import {
@@ -48,7 +50,6 @@ import {
   restoreMultiAgentV2Feature,
   splitLines,
   verifyInstalledFeatures,
-  verifyCompatibilityV1Features,
 } from "./codex-integration-document";
 
 function compatibilityV1Evidence(
@@ -237,28 +238,37 @@ export function installRoute(
   previous: CodexIntegrationJournal["previous"];
   previousRealtimeWebrtcCallBaseUrl: PreviousAssignment;
 } {
+  const parsed = parsedConfig(text);
+  const capture = (key: string): PreviousAssignment => {
+    const value = parsed[key];
+    if (value === undefined) return { present: false };
+    if (typeof value !== "string") throw new Error(`Codex ${key} must be a string before route ownership can be acquired`);
+    const legacy = findTopLevelAssignment(splitLines(text), key);
+    return legacy.present && legacy.value === value ? legacy : { present: true, value, rawLine: `${key} = ${JSON.stringify(value)}` };
+  };
+  const previous = {
+    openai_base_url: capture("openai_base_url"), model_provider: capture("model_provider"), model_catalog_json: capture("model_catalog_json"),
+  };
+  const previousRealtimeWebrtcCallBaseUrl = capture("experimental_realtime_webrtc_call_base_url");
+  if (previous.openai_base_url.present && !replaceExistingRoute) throw new Error("Codex already configures model routing. Rerun with --replace-codex-route to replace it reversibly. Check whether another Codex extension or wrapper (for example, OpenCodex or Headroom) is replacing the bridge port.");
+  if (previousRealtimeWebrtcCallBaseUrl.present && previousRealtimeWebrtcCallBaseUrl.value !== CODEX_REALTIME_WEBRTC_CALL_BASE_URL && !replaceExistingRealtimeRoute) throw new Error("Codex already configures its realtime WebRTC call route. Rerun with --replace-codex-route to replace it reversibly.");
+  let result = setTomlScalar(text, ["openai_base_url"], installedUrl);
+  result = setTomlScalar(result, ["experimental_realtime_webrtc_call_base_url"], CODEX_REALTIME_WEBRTC_CALL_BASE_URL);
+  result = removeTomlComments(result, [MANAGED_COMMENT, MANAGED_ROUTE_COMMENT]);
+  // Retain the historical layout only as a rendering optimization, not a parser
+  // or authority decision. Quoted keys and inline syntax use the semantic result.
+  try {
+    const legacy = installLegacyRouteLayout(text, installedUrl);
+    if (isDeepStrictEqual(parsedConfig(legacy), parsedConfig(result))) result = legacy;
+  } catch { /* The verified syntax-aware edit is sufficient. */ }
+  return { text: result, previous, previousRealtimeWebrtcCallBaseUrl };
+}
+
+function installLegacyRouteLayout(
+  text: string,
+  installedUrl: string,
+): string {
   const document = parseDocument(text);
-  const previous = assignments(document.lines);
-  if (previous.openai_base_url.present && !replaceExistingRoute) {
-    throw new Error(
-      `Codex already configures model routing (openai_base_url=${JSON.stringify(previous.openai_base_url.value)}). `
-      + "Rerun with --replace-codex-route to replace it reversibly. "
-      + "Check whether another Codex extension or wrapper (for example, OpenCodex or Headroom) is replacing the bridge port.",
-    );
-  }
-  const previousRealtimeWebrtcCallBaseUrl = findTopLevelAssignment(
-    document.lines,
-    "experimental_realtime_webrtc_call_base_url",
-  );
-  if (previousRealtimeWebrtcCallBaseUrl.present
-    && previousRealtimeWebrtcCallBaseUrl.value !== CODEX_REALTIME_WEBRTC_CALL_BASE_URL
-    && !replaceExistingRealtimeRoute) {
-    throw new Error(
-      "Codex already configures its realtime WebRTC call route "
-      + `(experimental_realtime_webrtc_call_base_url=${JSON.stringify(previousRealtimeWebrtcCallBaseUrl.value)}). `
-      + "Rerun with --replace-codex-route to replace it reversibly.",
-    );
-  }
 
   const currentBaseUrl = findTopLevelAssignment(document.lines, "openai_base_url");
   if (currentBaseUrl.index !== undefined) {
@@ -277,41 +287,24 @@ export function installRoute(
   removeManagedComment(document);
   const installedBaseUrl = findTopLevelAssignment(document.lines, "openai_base_url");
   insertDocumentLine(document, installedBaseUrl.index!, MANAGED_ROUTE_COMMENT);
-  return { text: renderDocument(document), previous, previousRealtimeWebrtcCallBaseUrl };
+  return renderDocument(document);
 }
 
 export function verifyInstalledRoute(text: string, journal: ManagedRouteJournal): void {
+  if (journal.version === 8 || journal.version === 9 || journal.version === 10) {
+    const conflicts = inspectInstalledCodexConfig(text, journal);
+    if (conflicts.length) throw new Error(conflicts.map(conflict => conflict.message).join("; "));
+    return;
+  }
   const lines = splitLines(text);
   const current = assignments(lines);
   if (current.openai_base_url.value !== journal.installed.openai_base_url) {
     throw new Error("Codex openai_base_url changed after setup; refusing to overwrite the user's newer value");
   }
-  const expectedMarker = journal.version === 9 || journal.version === 10
-    ? MANAGED_ROUTE_COMMENT
-    : MANAGED_COMMENT;
-  if (!lines.includes(expectedMarker)) {
+  if (!lines.includes(MANAGED_COMMENT)) {
     throw new Error("Managed Codex route marker changed after setup; refusing to overwrite it");
   }
-  if (journal.version === 9 || journal.version === 10) {
-    const realtime = findTopLevelAssignment(lines, "experimental_realtime_webrtc_call_base_url");
-    const expectedLine = `experimental_realtime_webrtc_call_base_url = ${JSON.stringify(journal.installed.experimental_realtime_webrtc_call_base_url)}`;
-    if (realtime.value !== journal.installed.experimental_realtime_webrtc_call_base_url
-      || realtime.rawLine !== expectedLine) {
-      throw new Error("Codex realtime WebRTC call route changed after setup; refusing to overwrite the user's newer value");
-    }
-  }
-  if (journal.version === 10) verifyCodexInterruptHook(text, journal.interruptHook);
-  if (journal.version === 8 || journal.version === 9 || journal.version === 10) {
-    const evidence = compatibilityV1Evidence(journal);
-    if (evidence) {
-      verifyCompatibilityV1Features(
-        text,
-        evidence.previousMultiAgentV2,
-        evidence.installedAgentMaxDepth,
-      );
-    }
-  }
-  if (journal.version !== 7 && journal.version !== 8 && journal.version !== 9 && journal.version !== 10) {
+  if (journal.version !== 7) {
     if (current.model_provider.present || current.model_catalog_json.present) {
       throw new Error("Codex model_provider or model_catalog_json changed after setup; refusing to overwrite the user's newer value");
     }
@@ -324,18 +317,17 @@ function previousAssignmentMatches(current: PreviousAssignment, previous: Previo
     && (!current.present || current.value === previous.value);
 }
 
-function previousAssignmentMatchesExactly(current: PreviousAssignment, previous: PreviousAssignment): boolean {
-  return current.present === previous.present
-    && (!current.present || (current.value === previous.value && current.rawLine === previous.rawLine));
-}
-
 export function verifyRestoredRoute(
   text: string,
   journal: CodexIntegrationJournal | LegacyCodexIntegrationJournalV9 | LegacyCodexIntegrationJournalV8 | LegacyCodexIntegrationJournalV7 | LegacyCodexIntegrationJournalV6 | LegacyCodexIntegrationJournalV5 | LegacyCodexIntegrationJournalV4,
 ): void {
+  if (journal.version === 8 || journal.version === 9 || journal.version === 10) {
+    verifySemanticRestoredRoute(text, journal);
+    return;
+  }
   const lines = splitLines(text);
   const current = assignments(lines);
-  const keys = journal.version === 7 || journal.version === 8 || journal.version === 9 || journal.version === 10
+  const keys = journal.version === 7
     ? (["openai_base_url"] as const)
     : (["openai_base_url", "model_provider", "model_catalog_json"] as const);
   for (const key of keys) {
@@ -346,15 +338,6 @@ export function verifyRestoredRoute(
   if (lines.includes(MANAGED_COMMENT) || lines.includes(MANAGED_ROUTE_COMMENT)) {
     throw new Error("Managed Codex route marker is present while the bridge is disconnected");
   }
-  if (journal.version === 9 || journal.version === 10) {
-    const realtime = findTopLevelAssignment(lines, "experimental_realtime_webrtc_call_base_url");
-    if (!previousAssignmentMatchesExactly(realtime, journal.previousRealtimeWebrtcCallBaseUrl)) {
-      throw new Error(
-        "Codex realtime WebRTC call route changed while the bridge was disconnected; refusing to overwrite the user's newer value",
-      );
-    }
-  }
-  if (journal.version === 10) verifyCodexInterruptHookRestored(text, journal.interruptHook);
   if (journal.version === 5 || journal.version === 6) {
     const previousFeatures: Array<readonly [string, PreviousFeatureAssignment]> = [
       ["remote_compaction_v2", journal.previousRemoteCompactionV2],
@@ -377,38 +360,6 @@ export function verifyRestoredRoute(
       }
     }
   }
-  if (journal.version === 8 || journal.version === 9 || journal.version === 10) {
-    const evidence = compatibilityV1Evidence(journal);
-    if (evidence) {
-      for (const [key, previous] of [
-        ["multi_agent", evidence.previousMultiAgent],
-        ["multi_agent_v2", evidence.previousMultiAgentV2],
-      ] as const) {
-        const current = key === "multi_agent_v2"
-          ? findMultiAgentV2Assignment(lines)
-          : findFeatureAssignment(lines, key);
-        const matches = current.present === previous.present
-          && (!current.present || (
-            (current.tableName ?? "features") === (previous.tableName ?? "features")
-            && current.rawLine === previous.rawLine
-          ));
-        if (!matches) {
-          throw new Error(
-            `Codex [features].${key} changed while Compatibility V1 was disconnected; refusing to overwrite the user's newer value`,
-          );
-        }
-      }
-      const depth = findAgentMaxDepthAssignment(lines);
-      const previousDepth = evidence.previousAgentMaxDepth;
-      const depthMatches = depth.present === previousDepth.present
-        && (!depth.present || depth.rawLine === previousDepth.rawLine);
-      if (!depthMatches) {
-        throw new Error(
-          "Codex [agents].max_depth changed while Compatibility V1 was disconnected; refusing to overwrite the user's newer value",
-        );
-      }
-    }
-  }
 }
 
 export function assertPreservedPreviousAssignments(
@@ -424,13 +375,78 @@ export function assertPreservedPreviousRealtimeAssignment(
   actual: PreviousAssignment,
   expected: PreviousAssignment,
 ): void {
-  if (!previousAssignmentMatchesExactly(actual, expected)) {
+  if (!previousAssignmentMatches(actual, expected)) {
     throw new Error("Codex realtime WebRTC call route changed while the bridge was disconnected; refusing to replace it");
   }
 }
 
 export function restoreManagedRoute(text: string, journal: ManagedRouteJournal): string {
   verifyInstalledRoute(text, journal);
+  if (journal.version === 8 || journal.version === 9 || journal.version === 10) {
+    const semantic = restoreSemanticRoute(text, journal);
+    // Preserve historical byte-for-byte restoration where its result agrees with
+    // the semantic edit. Legacy rendering is never ownership evidence.
+    try {
+      const legacy = restoreLegacyRouteLayout(text, journal);
+      const normalize = (source: string) => {
+        const value = parseTomlValue(source) as Record<string, unknown>;
+        for (const [key, owned] of [["features", journal.previousMultiAgent?.tablePresent === false], ["agents", journal.previousAgentMaxDepth?.tablePresent === false]] as const) {
+          const branch = value[key];
+          if (owned && branch && typeof branch === "object" && !Object.keys(branch).length) delete value[key];
+        }
+        return value;
+      };
+      if (isDeepStrictEqual(normalize(legacy), normalize(semantic))) return legacy;
+    } catch { /* Syntax-aware restoration remains authoritative. */ }
+    return semantic;
+  }
+  return restoreLegacyRouteLayout(text, journal);
+}
+
+type ModernRouteJournal = Extract<ManagedRouteJournal, { version: 8 | 9 | 10 }>;
+function parsedConfig(text: string): Record<string, unknown> {
+  try { return parseTomlValue(text) as Record<string, unknown>; }
+  catch { throw new Error("Codex configuration is not valid, unambiguous TOML; inspect it before changing integration"); }
+}
+function configValue(document: unknown, path: readonly string[]): unknown {
+  for (const key of path) document = document && typeof document === "object" && Object.hasOwn(document, key)
+    ? (document as Record<string, unknown>)[key] : undefined;
+  return document;
+}
+function restoredValues(text: string, journal: ModernRouteJournal): Array<[string[], string | number | boolean | undefined]> {
+  const document = parsedConfig(text);
+  const values: Array<[string[], string | number | boolean | undefined]> = [
+    [["openai_base_url"], journal.previous.openai_base_url.present ? journal.previous.openai_base_url.value : undefined],
+  ];
+  if (journal.version === 9 || journal.version === 10) values.push([
+    ["experimental_realtime_webrtc_call_base_url"], journal.previousRealtimeWebrtcCallBaseUrl.present ? journal.previousRealtimeWebrtcCallBaseUrl.value : undefined,
+  ]);
+  const evidence = compatibilityV1Evidence(journal);
+  if (evidence) {
+    const v2 = configValue(document, ["features", "multi_agent_v2"]);
+    const v2Path = v2 && typeof v2 === "object" ? ["features", "multi_agent_v2", "enabled"] : ["features", "multi_agent_v2"];
+    for (const [path, previous] of [
+      [["features", "multi_agent"], evidence.previousMultiAgent], [v2Path, evidence.previousMultiAgentV2],
+    ] as const) values.push([[...path], previous.present && previous.value !== "unset" ? previous.value === "true" : undefined]);
+    values.push([["agents", "max_depth"], evidence.previousAgentMaxDepth.present ? Number(evidence.previousAgentMaxDepth.value) : undefined]);
+  }
+  return values;
+}
+function verifySemanticRestoredRoute(text: string, journal: ModernRouteJournal): void {
+  const document = parsedConfig(text);
+  const conflicts = restoredValues(text, journal).filter(([path, value]) => configValue(document, path) !== value);
+  if (conflicts.length) throw new Error(conflicts.map(([path]) => `Codex ${path.join(".")} changed while the bridge was disconnected; review the newer value before reconnecting`).join("; "));
+  if (journal.version === 10) verifyCodexInterruptHookRestored(text, journal.interruptHook);
+}
+function restoreSemanticRoute(text: string, journal: ModernRouteJournal): string {
+  let result = journal.version === 10 ? restoreCodexInterruptHook(text, journal.interruptHook) : text;
+  for (const [path, value] of restoredValues(result, journal)) result = setTomlScalar(result, path, value);
+  result = removeTomlComments(result, [MANAGED_COMMENT, MANAGED_ROUTE_COMMENT]);
+  verifySemanticRestoredRoute(result, journal);
+  return result;
+}
+
+function restoreLegacyRouteLayout(text: string, journal: ManagedRouteJournal): string {
   const withoutHook = journal.version === 10
     ? restoreCodexInterruptHook(text, journal.interruptHook)
     : text;

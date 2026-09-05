@@ -73,16 +73,15 @@ export function ConfigurationRepair({ api, language, disabled, onBusyChange, onR
   return <section className="configuration-repair" aria-labelledby={`${id}-title`} aria-busy={busy}>
     <h3 id={`${id}-title`}>{copy.title}</h3>
     <p>{copy.body}</p>
-    <label htmlFor={`${id}-protocol`}>{copy.protocol}</label>
-    <select id={`${id}-protocol`} value={protocol} disabled={busy || disabled} onChange={(event) => {
-      const next = event.target.value;
-      if (next !== "" && next !== "native" && next !== "compatibility-v1") return;
-      setProtocol(next); discard(); setDone(false);
-    }}>
-      <option value="">{copy.choose}</option>
-      <option value="compatibility-v1">{copy.compatibility}</option>
-      <option value="native">{copy.native}</option>
-    </select>
+    <fieldset className="repair-protocol" disabled={busy || disabled}>
+      <legend>{copy.protocol}</legend>
+      {(["compatibility-v1", "native"] as const).map((choice) => <label key={choice}>
+        <input type="radio" name={`${id}-protocol`} value={choice} checked={protocol === choice} onChange={() => {
+          setProtocol(choice); discard(); setDone(false);
+        }} />
+        <span>{choice === "native" ? copy.native : copy.compatibility}</span>
+      </label>)}
+    </fieldset>
     <button type="button" className="button-secondary" disabled={!protocol || busy || disabled} onClick={() => void perform(false)}>{busy ? copy.working : copy.preview}</button>
     {preview ? <>
       {preview.status === "blocked" ? <p role="status">{copy.blocked}</p> : null}

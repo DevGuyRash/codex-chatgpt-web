@@ -623,8 +623,8 @@ function registerIpc({ logger, stateStore }) {
   });
 
   handle("launcher:doctor", () => IS_DEV_PROFILE ? runtimeHost.devDoctor() : runtimeHost.doctor());
-  handle("launcher:repair-preview", (protocol) => runtimeHost.previewIntegrationRepair(protocol));
-  handle("launcher:repair-apply", async (protocol, approvalId) => {
+  handle("launcher:repair-preview", (_event, protocol) => runtimeHost.previewIntegrationRepair(protocol));
+  handle("launcher:repair-apply", async (_event, protocol, approvalId) => {
     await runtimeHost.applyIntegrationRepair(protocol, approvalId);
     const state = stateStore.update({ codexRestartRequired: true, codexCatalogVerified: false });
     send("launcher:state-changed", state);

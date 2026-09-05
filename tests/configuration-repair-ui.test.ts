@@ -23,19 +23,29 @@ test.skipIf(!process.env.CHATGPT_TEST_CHROME_EXECUTABLE)("repair UI requires exp
     await page.setContent('<div id="root"></div>');
     await page.addStyleTag({ content: css });
     await page.addScriptTag({ content: js });
-    const protocol = page.getByLabel("Subagent protocol", { exact: true });
+    const protocol = page.getByRole("group", { name: "Subagent protocol", exact: true });
+    const native = protocol.getByRole("radio", { name: "Native (preserve newer feature choices)", exact: true });
+    const compatibility = protocol.getByRole("radio", { name: "Compatibility V1 (Native V2 disabled)", exact: true });
     const preview = page.getByRole("button", { name: "Preview changes", exact: true });
     await protocol.waitFor();
-    expect(await protocol.inputValue()).toBe("");
+    expect(await native.isChecked()).toBe(false);
+    expect(await compatibility.isChecked()).toBe(false);
     expect(await preview.isDisabled()).toBe(true);
-    await protocol.selectOption("native");
+    for (const width of [360, 720]) {
+      await page.setViewportSize({ width, height: 900 });
+      expect(await native.isVisible()).toBe(true);
+      expect(await compatibility.isVisible()).toBe(true);
+      expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+    }
+    await native.check();
+    if (process.env.CHATGPT_TEST_REPAIR_SCREENSHOT) await page.screenshot({ path: process.env.CHATGPT_TEST_REPAIR_SCREENSHOT });
     await preview.click();
     const apply = page.getByRole("button", { name: "Apply approved repair", exact: true });
     await apply.waitFor();
     expect(await apply.isDisabled()).toBe(true);
     expect(await page.getByRole("cell", { name: "native", exact: true }).count()).toBe(1);
     await page.getByRole("checkbox").check();
-    await protocol.selectOption("compatibility-v1");
+    await compatibility.check();
     await apply.waitFor({ state: "detached" });
     await preview.click();
     await apply.waitFor();

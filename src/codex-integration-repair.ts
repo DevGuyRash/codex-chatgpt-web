@@ -71,19 +71,9 @@ function materialize(protocol: SubagentProtocol): MaterializedRepair {
       ? ["features", "multi_agent_v2", "enabled"] : ["features", "multi_agent_v2"];
     if (protocol === "compatibility-v1") {
       if (journal.installed.subagent_protocol === "native") {
-        // Legacy ownership metadata remains the compatibility contract. Refuse a
-        // representation it cannot faithfully describe rather than inventing a baseline.
+        // Setup and repair capture the same semantic baseline. The preview's
+        // scalar edits below retain the current document's source formatting.
         const captured = installCompatibilityV1Features(text);
-        const document = parseTomlValue(text);
-        for (const [path, previous] of [
-          [["features", "multi_agent"], captured.previousMultiAgent],
-          [v2Path, captured.previousMultiAgentV2],
-          [["agents", "max_depth"], captured.previousAgentMaxDepth],
-        ] as const) {
-          const current = at(document, [...path]);
-          if ((current !== undefined) !== (previous.present && previous.value !== "unset")
-            || (current !== undefined && String(current) !== previous.value)) return blocked("The current feature representation needs semantic ownership migration before Compatibility V1 can be acquired");
-        }
         next.previousMultiAgent = captured.previousMultiAgent;
         next.previousMultiAgentV2 = captured.previousMultiAgentV2;
         next.previousAgentMaxDepth = captured.previousAgentMaxDepth;

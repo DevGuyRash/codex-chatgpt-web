@@ -25,6 +25,8 @@ The approval identifies exact configuration, journal, recovery, runtime configur
 
 Active version 8–10 route verification and modern disconnect/removal compare owned values semantically. Quoted route keys, alignment, and comments are not ownership conflicts. Restoration edits only the owned scalar settings, preserving newer sibling fields inside structured Native V2 configuration. Historical source formatting is reused only when its parsed result agrees with the syntax-aware edit. Changed values still require review. Older journal formats retain their legacy migration checks.
 
+Compatibility V1 setup and approved repair share feature acquisition: ordinary tables, quoted or dotted keys, nested inline tables, and equivalent positive integer representations describe the same settings. The baseline records only owned scalar values; unrelated feature fields are not restored from an old snapshot. When the historical renderer cannot represent the current syntax, installation uses the syntax-aware edit and a canonical scalar baseline instead of adding competing assignments.
+
 During an interrupted additive journal upgrade, a matching newer recovery record can supersede an older primary record only when projecting it onto the older version preserves every existing ownership field and baseline. Different baselines remain ambiguous and are not automatically adopted.
 
 Preview values are shown only in the requested interface. Raw repair output and approval arguments are excluded from launcher activity logs. Treat a terminal preview as private configuration data; do not paste it into public issue reports without review.

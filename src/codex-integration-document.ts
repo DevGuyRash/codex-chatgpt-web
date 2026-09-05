@@ -1,6 +1,7 @@
 import { existsSync, readFileSync } from "node:fs";
+import { isDeepStrictEqual } from "node:util";
 import { stripUtf8Bom } from "./config";
-import { setTomlScalar } from "./toml-edit";
+import { parseTomlValue, setTomlScalar } from "./toml-edit";
 import {
   MANAGED_COMMENT,
   MANAGED_ROUTE_COMMENT,
@@ -379,13 +380,57 @@ export function managedMultiAgentV2AssignmentLine(previous: PreviousFeatureAssig
   return setTomlScalar(previous.rawLine, ["multi_agent_v2", "enabled"], false);
 }
 
-export function installCompatibilityV1Features(text: string): {
+interface CompatibilityV1FeatureInstall {
   text: string;
   previousMultiAgent: PreviousFeatureAssignment;
   previousMultiAgentV2: PreviousFeatureAssignment;
   previousAgentMaxDepth: PreviousAgentAssignment;
   installedAgentMaxDepth: number;
-} {
+}
+
+export function installCompatibilityV1Features(text: string): CompatibilityV1FeatureInstall {
+  const table = (value: unknown): value is Record<string, unknown> => value !== null && typeof value === "object" && !Array.isArray(value) && !(value instanceof Date);
+  let parsed: Record<string, unknown>;
+  try { parsed = parseTomlValue(text) as Record<string, unknown>; }
+  catch { throw new Error("Codex configuration must be valid TOML before Compatibility V1 setup"); }
+  const features = parsed.features;
+  const agents = parsed.agents;
+  if (features !== undefined && !table(features)) throw new Error("Codex features must be a table");
+  if (agents !== undefined && !table(agents)) throw new Error("Codex agents must be a table");
+  const multiAgent = features?.multi_agent;
+  const v2 = features?.multi_agent_v2;
+  const enabled = table(v2) ? v2.enabled : v2;
+  const depth = agents?.max_depth;
+  if (multiAgent !== undefined && typeof multiAgent !== "boolean") throw new Error("Codex multi_agent must be a boolean");
+  if (enabled !== undefined && typeof enabled !== "boolean") throw new Error("Codex multi_agent_v2.enabled must be a boolean");
+  if (depth !== undefined && (typeof depth !== "number" || !Number.isSafeInteger(depth) || depth <= 0)) throw new Error("Codex agents.max_depth must be a positive integer");
+  const installedAgentMaxDepth = Math.max(depth ?? 0, MIN_COMPATIBILITY_V1_AGENT_DEPTH);
+  const capture = (key: string, value: boolean | undefined, parentPresent: boolean, tableName: PreviousFeatureAssignment["tableName"]): PreviousFeatureAssignment => ({
+    present: value !== undefined, tablePresent: parentPresent, tableName,
+    ...(value !== undefined ? { value: String(value), rawLine: `${key} = ${value}` } : {}),
+  });
+  const previousMultiAgent = capture("multi_agent", multiAgent, features !== undefined, "features");
+  const previousMultiAgentV2 = capture(table(v2) ? "enabled" : "multi_agent_v2", enabled,
+    table(v2) || features !== undefined, table(v2) ? "features.multi_agent_v2" : "features");
+  const previousAgentMaxDepth: PreviousAgentAssignment = {
+    present: depth !== undefined, tablePresent: agents !== undefined,
+    ...(depth !== undefined ? { value: String(depth), rawLine: `max_depth = ${depth}` } : {}),
+  };
+  let result = setTomlScalar(text, ["features", "multi_agent"], true);
+  result = setTomlScalar(result, table(v2) ? ["features", "multi_agent_v2", "enabled"] : ["features", "multi_agent_v2"], false);
+  result = setTomlScalar(result, ["agents", "max_depth"], installedAgentMaxDepth);
+  try {
+    const legacy = installLegacyCompatibilityV1Layout(text);
+    const baseline = (value: PreviousAssignment): string | undefined => value.present && value.value !== "unset" ? value.value : undefined;
+    if (baseline(legacy.previousMultiAgent) === baseline(previousMultiAgent)
+      && baseline(legacy.previousMultiAgentV2) === baseline(previousMultiAgentV2)
+      && baseline(legacy.previousAgentMaxDepth) === baseline(previousAgentMaxDepth)
+      && isDeepStrictEqual(parseTomlValue(legacy.text), parseTomlValue(result))) return legacy;
+  } catch { /* Preserve only legacy source metadata proven equivalent to the parsed baseline. */ }
+  return { text: result, previousMultiAgent, previousMultiAgentV2, previousAgentMaxDepth, installedAgentMaxDepth };
+}
+
+function installLegacyCompatibilityV1Layout(text: string): CompatibilityV1FeatureInstall {
   const document = parseDocument(text);
   const foundMultiAgent = findFeatureAssignment(document.lines, "multi_agent");
   const featureSeparatorInserted = !foundMultiAgent.tablePresent
@@ -583,22 +628,6 @@ export function verifyInstalledFeatures(
   verifyInstalledBooleanFeature(text, "multi_agent", "true", MANAGED_MULTI_AGENT_LINE);
   if (journal.version === 6) {
     verifyInstalledMultiAgentV2Feature(text, journal.previousMultiAgentV2);
-  }
-}
-
-export function verifyCompatibilityV1Features(
-  text: string,
-  previousMultiAgentV2: PreviousFeatureAssignment,
-  installedAgentMaxDepth: number,
-): void {
-  verifyInstalledBooleanFeature(text, "multi_agent", "true", MANAGED_MULTI_AGENT_LINE);
-  verifyInstalledMultiAgentV2Feature(text, previousMultiAgentV2);
-  const depth = findAgentMaxDepthAssignment(splitLines(text));
-  if (depth.value !== String(installedAgentMaxDepth)
-    || depth.rawLine !== managedAgentMaxDepthLine(installedAgentMaxDepth)) {
-    throw new Error(
-      "Codex [agents].max_depth changed after Compatibility V1 setup; refusing to overwrite the user's newer value",
-    );
   }
 }
 

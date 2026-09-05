@@ -59,6 +59,27 @@ afterEach(() => {
 });
 
 describe("reversible native Codex route integration", () => {
+  for (const featureText of [
+    'features = { multi_agent = false, multi_agent_v2 = { enabled = true, concurrency = 6 }, context_management = { experimental_mode = true } }\nagents = { max_depth = 0x03 }\n',
+    'features."multi_agent" = false\nfeatures.multi_agent_v2.enabled = true\nfeatures.multi_agent_v2.concurrency = 6\nfeatures.context_management.experimental_mode = true\n',
+    '["features"]\n"multi_agent" = false\n[features."multi_agent_v2"]\n"enabled" = true\nconcurrency = 6\n',
+  ]) test(`Compatibility V1 acquires and relinquishes equivalent feature syntax: ${featureText.split("\n")[0]}`, () => {
+    const { codexHome } = fixture();
+    const configPath = join(codexHome, "config.toml");
+    writeFileSync(configPath, featureText);
+    const before = Bun.TOML.parse(featureText) as Record<string, unknown>;
+    const config = compatibilityV1Config("browser-only");
+    installCodexIntegration(config);
+    expect(inspectCodexIntegration().errors).toEqual([]);
+    installCodexIntegration(config);
+    deactivateCodexIntegration();
+    activateCodexIntegration();
+    uninstallCodexIntegration();
+    const after = Bun.TOML.parse(readFileSync(configPath, "utf8")) as Record<string, unknown>;
+    expect(after.features).toEqual(before.features);
+    expect(after.agents === undefined || Object.keys(after.agents as object).length === 0 ? undefined : after.agents).toEqual(before.agents);
+  });
+
   test("formatted owned values remain inspectable and removable without losing newer sibling settings", () => {
     const { codexHome } = fixture();
     const configPath = join(codexHome, "config.toml");
@@ -317,7 +338,7 @@ describe("reversible native Codex route integration", () => {
     const configPath = join(codexHome, "config.toml");
     writeFileSync(configPath, "[features]\nmulti_agent_v2 = { enabled = \"false\" }\n");
     expect(() => installCodexIntegration(compatibilityV1Config("browser-only")))
-      .toThrow("enabled in Codex [features].multi_agent_v2 inline table must be a boolean");
+      .toThrow("multi_agent_v2.enabled must be a boolean");
   });
 
   test("explicit replacement adopts a Codex-migrated inline multi_agent_v2 value", () => {

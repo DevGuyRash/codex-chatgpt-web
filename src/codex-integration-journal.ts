@@ -23,7 +23,6 @@ import type {
   LegacyCodexIntegrationJournalV8,
 } from "./codex-integration-shared";
 import { verifyManagedJournalState } from "./codex-integration-route";
-import { inspectInstalledCodexConfig } from "./codex-integration-inspection";
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === "object" && !Array.isArray(value);
@@ -206,14 +205,11 @@ function parseJournal(path: string): AnyCodexIntegrationJournal {
   }
   throw new Error(`Invalid Codex integration journal: ${path}`);
 }
-function journalMatchesConfig(journal: AnyCodexIntegrationJournal, semantic = false): boolean {
+function journalMatchesConfig(journal: AnyCodexIntegrationJournal): boolean {
   try {
     assertJournalTargetsConfig(journal, getCodexConfigPath());
     if (!existsSync(journal.configPath)) return false;
     const text = readFileSync(journal.configPath, "utf8");
-    if (semantic && (journal.version === 8 || journal.version === 9 || journal.version === 10) && journal.active) {
-      return inspectInstalledCodexConfig(text, journal).length === 0;
-    }
     if (journal.version === 2) return text.includes(journal.providerBlock);
     verifyManagedJournalState(text, journal);
     return true;
@@ -263,15 +259,15 @@ export function readJournal({ repair = true }: { repair?: boolean } = {}): AnyCo
     return primary;
   }
   if (recovery && !primary && !primaryError) {
-    if (!journalMatchesConfig(recovery, !repair)) {
+    if (!journalMatchesConfig(recovery)) {
       throw new Error("Codex integration recovery journal does not match the active config");
     }
     if (repair) atomicWriteFile(primaryPath, serializeJournal(recovery));
     return recovery;
   }
 
-  const primaryMatches = primary ? journalMatchesConfig(primary, !repair) : false;
-  const recoveryMatches = recovery ? journalMatchesConfig(recovery, !repair) : false;
+  const primaryMatches = primary ? journalMatchesConfig(primary) : false;
+  const recoveryMatches = recovery ? journalMatchesConfig(recovery) : false;
   const upgrade = primaryMatches && recoveryMatches && primary && recovery && additiveRecoveryUpgrade(primary, recovery);
   if (primaryMatches === recoveryMatches && !upgrade) {
     throw new Error(

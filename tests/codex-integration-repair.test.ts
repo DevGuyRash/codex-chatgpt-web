@@ -67,6 +67,25 @@ test("Native repair preserves newer feature choices and updates both protocol au
   expect(inspectCodexIntegration({ readOnly: true }).conflicts).toEqual([]);
 }));
 
+test("approved compatibility acquisition shares setup's inline feature baseline", () => fixture((path) => {
+  applyCodexIntegrationRepair("native", previewCodexIntegrationRepair("native").approvalId);
+  const config = readFileSync(path, "utf8");
+  // Replace this synthetic fixture's feature block while retaining its real hook journal.
+  const start = config.indexOf("[features]");
+  const next = config.indexOf("[", start + "[features]".length);
+  if (start < 0) throw new Error("Fixture features missing");
+  const inline = 'features = { multi_agent = false, multi_agent_v2 = { enabled = true, concurrency = 6 }, context_management = { experimental_mode = true } }\n';
+  const withoutFeatures = config.slice(0, start) + (next < 0 ? "" : config.slice(next));
+  writeFileSync(path, inline + withoutFeatures);
+  const preview = previewCodexIntegrationRepair("compatibility-v1");
+  expect(preview.status).toBe("ready");
+  applyCodexIntegrationRepair("compatibility-v1", preview.approvalId);
+  expect(inspectCodexIntegration().errors).toEqual([]);
+  applyCodexIntegrationRepair("native", previewCodexIntegrationRepair("native").approvalId);
+  const restored = Bun.TOML.parse(readFileSync(path, "utf8")) as Record<string, unknown>;
+  expect(restored.features).toEqual({ multi_agent: false, multi_agent_v2: { enabled: true, concurrency: 6 }, context_management: { experimental_mode: true } });
+}));
+
 test("a journal or runtime change invalidates an approval even if Codex TOML is unchanged", () => fixture((_path, _original) => {
   const preview = previewCodexIntegrationRepair("compatibility-v1");
   const runtime = JSON.parse(readFileSync(getConfigPath(), "utf8"));

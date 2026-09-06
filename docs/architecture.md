@@ -103,17 +103,7 @@ out of the JSON and are attached natively with stable references. The runtime do
 context JSONL file, upload a synthetic context document, include prompt hashes, or silently truncate
 the envelope. Attachment acceptance and send readiness are verified before the turn begins.
 
-Initial Launcher setup asks which interaction mode to install and defaults to With Automation. The
-same choice remains available in Settings; changing it uses the transactional setup path, replaces
-the installed catalog, and requires a Codex restart. Zero Risk never reads or mutates the ChatGPT DOM.
-For a new ChatGPT chat the adapter provides the complete compiled prompt; for an exactly retained
-chat it also provides an incremental prompt containing only the Codex suffix after the last assistant
-reply. The Launcher chooses between those two prompts from its own retained-tab ownership and writes
-the selected text to the system clipboard. The user has thirty seconds to paste, select the visible
-ChatGPT model, effort, and Zero Risk connector, send, and confirm Sent.
-The pasted task carries one opaque `request_id` for routing concurrent requests. Start/completion
-sequencing lives in the Zero Risk MCP server metadata, not in user-authored imperative text; the
-per-tab nonce used to validate the Launcher confirmation never leaves the local runtime.
+Initial Launcher setup asks which interaction mode to install and defaults to With Automation. The same choice remains available in Settings; changing it uses the transactional setup path, replaces the installed catalog, and requires a Codex restart. Zero Risk never reads or mutates the ChatGPT DOM. For a new ChatGPT chat the adapter provides the complete compiled prompt; for an exactly retained chat it also provides an incremental prompt containing only the Codex suffix after the last assistant reply. The Launcher chooses between those two prompts from its own retained-tab ownership and writes the selected text to the system clipboard. The user has thirty seconds to paste, select the visible ChatGPT model, effort, and Zero Risk connector, send, and confirm Sent; a manual compaction handoff allows two minutes. Sent ends the confirmation deadline. Waiting for the first MCP bind belongs to the live turn and remains subject to explicit cancellation and runtime-owner cleanup. The pasted task carries one opaque `request_id` for routing concurrent requests. Start/completion sequencing lives in the Zero Risk MCP server metadata, not in user-authored imperative text; the per-tab nonce used to validate the Launcher confirmation never leaves the local runtime.
 
 The appended models advertise the authenticated account's context window and a ten-percent
 auto-compaction reserve. Usage is counted with the GPT-5 tokenizer plus fixed platform/image

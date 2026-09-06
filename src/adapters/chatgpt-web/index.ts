@@ -719,11 +719,6 @@ export function createChatGptWebAdapter(
         traceId,
       );
       activeToken = turnToken;
-      observeCapabilityRetirement(turnToken, externalProgress);
-      if (!tokenSettled) {
-        tokenSettled = true;
-        token.resolve(turnToken);
-      }
       try {
         const compiled = compileChatGptWebPrompt(
           input,
@@ -731,6 +726,12 @@ export function createChatGptWebAdapter(
           turnToken,
           compileOptionsFor(input),
         );
+        // Publish only after preparation succeeds; otherwise revocation can mask its cause.
+        observeCapabilityRetirement(turnToken, externalProgress);
+        if (!tokenSettled) {
+          tokenSettled = true;
+          token.resolve(turnToken);
+        }
         return { ...compiled, release: () => {} };
       } catch (error) {
         await broker.revoke(turnToken);

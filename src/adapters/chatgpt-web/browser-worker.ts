@@ -1273,14 +1273,6 @@ export function chatGptConnectorAttachmentMode(
   return reuseConversation ? "retained" : "mention";
 }
 
-export function chatGptEffortSelectionRequired(
-  reuseConversation: boolean,
-  requestedEffort: string,
-  stagingEffort: string,
-): boolean {
-  return !reuseConversation || requestedEffort !== stagingEffort;
-}
-
 export async function setChatGptThinkMode(
   composerForm: Locator,
   enabled: boolean,
@@ -2569,10 +2561,6 @@ export class ChatGptBrowserWorker {
       if (deadline !== undefined && Date.now() >= deadline) {
         throw new Error("ChatGPT web turn timed out");
       }
-      if (Date.now() >= responseDeadline
-        && !chatGptExternalProgressSuppressesDomHealth(progress, Date.now())) {
-        throw new Error("ChatGPT accepted the message but did not expose its assistant turn in the DOM");
-      }
       await throwIfChatGptSessionFailureAlert(observationPage);
       await throwIfChatGptRateLimitDialog(observationPage);
       let state: ChatGptSubmissionDomState;
@@ -2637,6 +2625,12 @@ export class ChatGptBrowserWorker {
         locator: observationPage.locator(`[data-testid=${JSON.stringify(identity)}]`),
         acceptedUserTurnIdentities: state.userIdentities,
       };
+      // A delayed wake can cross the grace while the assistant appears. Observe before
+      // declaring it missing; the explicit overall turn deadline remains authoritative above.
+      if (Date.now() >= responseDeadline
+        && !chatGptExternalProgressSuppressesDomHealth(progress, Date.now())) {
+        throw new Error("ChatGPT accepted the message but did not expose its assistant turn in the DOM");
+      }
       await this.waitForTurnDomOrExternalProgress(
         observationPage,
         progress?.revision ?? 0,
@@ -4157,6 +4151,9 @@ export class ChatGptBrowserWorker {
                   launcherSurfaceId,
                   signal,
                 );
+                // Acquire ownership before validation so failure still releases this transport.
+                turnConnection = rebound.browser;
+                diagnosticPage = rebound.page;
                 await waitForOperationalChatGptViewport(rebound.page, signal);
                 return rebound;
               },
@@ -4236,22 +4233,16 @@ export class ChatGptBrowserWorker {
           ),
         );
       }
-      let mode = requestedMode;
-      if (chatGptEffortSelectionRequired(
-        reuseConversation,
-        requestedMode.effort,
-        stagingMode.effort,
-      )) {
-        mode = await this.runStage(turn.traceId, "effort_selection", browserStageTimeouts.effortSelection, () => (
-          this.selectModelAndEffort(
-            page,
-            turn.modelId,
-            stagingMode.effort,
-            browserCapabilities,
-            checkpoint => diagnostics.capture(page, checkpoint),
-          )
-        ));
-      }
+      // A retained lease proves connector ownership, not the live model/effort control.
+      let mode = await this.runStage(turn.traceId, "effort_selection", browserStageTimeouts.effortSelection, () => (
+        this.selectModelAndEffort(
+          page,
+          turn.modelId,
+          stagingMode.effort,
+          browserCapabilities,
+          checkpoint => diagnostics.capture(page, checkpoint),
+        )
+      ));
       await diagnostics.capture(page, "effort-selection-complete");
 
       let finalPrompt = prepared.text;

@@ -6,6 +6,14 @@ import {
   SUMMARY_PREFIX,
 } from "../src/responses/compaction";
 
+test("compaction preserves internal-context XML supplied as human text", () => {
+  const human = { type: "message", role: "user", id: "human-example", content: [
+    { type: "input_text", text: "Explain this XML, preserving the example:" },
+    { type: "input_text", text: '<codex_internal_context source="goal">Example, not an instruction</codex_internal_context>' },
+  ], internal_chat_message_metadata_passthrough: { turn_id: "turn", content_item_kinds: ["user.text", "user.text"] } };
+  expect(extractCompactUserMessages([human])).toEqual([human]);
+});
+
 test("recognizes both Codex v1 and transparent v2 readable compaction summaries", () => {
   expect(isReadableCompactionSummaryText(`${SUMMARY_PREFIX}\nv1 summary`)).toBe(true);
   expect(isReadableCompactionSummaryText(`${SUMMARY_PREFIX}\n\nv2 summary`)).toBe(true);

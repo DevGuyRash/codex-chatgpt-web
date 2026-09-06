@@ -2,13 +2,17 @@ import { expect, test } from "bun:test";
 import type { ProviderAdapter } from "../src/adapters/base";
 import { defaultConfig } from "../src/config";
 import { COMPACT_PROMPT, SUMMARY_PREFIX, decodeCompactionSummary, encodeCompactionSummary } from "../src/responses/compaction";
-import { compactRequest, responseRequest } from "../src/server";
+import { compactRequest, responseRequest as respond } from "../src/server";
 import type { CodexProviderConfig } from "../src/types";
 import { extractChatGptTurnIdentity, extractChatGptTurnUserRevision } from "../src/adapters/chatgpt-web/environment";
 import { chatGptCompactionSourceExecutionKey, chatGptTurnExecutionKey } from "../src/adapters/chatgpt-web/turn-execution";
 
 const model = "chatgpt-web/high";
 const summary = "The repository was inspected. Continue by implementing the bounded Web context contract.";
+
+// These fixtures test checkpoint authorization, not persisted previous_response_id storage.
+const responseRequest: typeof respond = (request, config, factory, options) =>
+  respond(request, config, factory, { ...options, rememberState: false });
 
 function compactionAdapterFactory(
   seenProviders: CodexProviderConfig[] = [],

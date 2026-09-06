@@ -1107,7 +1107,7 @@ function ManualTurnGuide({
 }) {
   const [now, setNow] = useState(Date.now());
   useEffect(() => {
-    if (!["awaiting-user", "sent"].includes(tab.manualState ?? "") || !tab.manualDeadlineAt) return;
+    if (tab.manualState !== "awaiting-user" || !tab.manualDeadlineAt) return;
     setNow(Date.now());
     const timer = window.setInterval(() => setNow(Date.now()), 250);
     return () => window.clearInterval(timer);
@@ -1115,13 +1115,15 @@ function ManualTurnGuide({
   const deadline = tab.manualDeadlineAt ? Date.parse(tab.manualDeadlineAt) : Number.NaN;
   const seconds = Number.isFinite(deadline) ? Math.max(0, Math.ceil((deadline - now) / 1_000)) : 0;
   const waiting = tab.manualState === "awaiting-user";
-  const status = waiting || tab.manualState === "sent"
+  const status = waiting
     ? `${seconds} ${copy.manualPromptSeconds}`
-    : tab.manualState === "running"
-      ? copy.manualPromptRunning
-      : tab.manualState === "completed"
-        ? copy.complete
-        : copy.failed;
+    : tab.manualState === "sent"
+      ? copy.manualPromptSent
+      : tab.manualState === "running"
+        ? copy.manualPromptRunning
+        : tab.manualState === "completed"
+          ? copy.complete
+          : copy.failed;
   return (
     <div className={`manual-turn-guide${waiting ? " is-waiting" : ""}`}>
       <div>
@@ -1396,7 +1398,7 @@ function McpSurface({
       <div className="wizard-stepper" aria-label={`${step + 1} / 3`}>
         {steps.map((item, index) => (
           <button
-            className={`${index === step ? "is-active" : ""}${index < step ? " is-complete" : ""}`}
+            className={`${index === step ? "is-active" : ""}${index < step || (index === 2 && verified) ? " is-complete" : ""}`}
             disabled={busy || index > step}
             key={item.title}
             onClick={() => void safeMove(index)}

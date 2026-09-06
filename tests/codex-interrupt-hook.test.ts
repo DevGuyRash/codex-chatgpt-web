@@ -3,6 +3,7 @@ import { mkdtempSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import {
+  MANAGED_INTERRUPT_HOOK_END,
   codexInterruptHookCommand,
   codexInterruptHookHash,
   installCodexInterruptHook,
@@ -10,6 +11,21 @@ import {
   verifyCodexInterruptHook,
   verifyCodexInterruptHookRestored,
 } from "../src/codex-interrupt-hook";
+
+test("semantic hook removal preserves native TOML tables inserted before a trailing marker", () => {
+  for (const ending of ["\n", "\r\n", "\r"]) {
+    const original = 'model = "gpt-5.6-sol"\n';
+    const installed = installCodexInterruptHook(original.replaceAll("\n", ending), "/Users/test/.codex/config.toml", { runtimeCommand: ["/opt/runtime"] });
+    const appended = "\n[features]\ngoals = true\n";
+    const edited = installed.text.replace(/\r\n|\r/g, "\n").replace(MANAGED_INTERRUPT_HOOK_END, appended + MANAGED_INTERRUPT_HOOK_END);
+    verifyCodexInterruptHook(edited, installed.installed);
+    const restored = restoreCodexInterruptHook(edited, installed.installed);
+    expect(Bun.TOML.parse(restored)).toEqual({ model: "gpt-5.6-sol", features: { goals: true } });
+    expect(restored).toContain(appended);
+    verifyCodexInterruptHookRestored(restored);
+    expect(() => restoreCodexInterruptHook(edited.replace("timeout = 3", "timeout = 2"), installed.installed)).toThrow();
+  }
+});
 
 test("installs one narrowly trusted Interrupt hook and restores the exact Codex config", () => {
   const original = [

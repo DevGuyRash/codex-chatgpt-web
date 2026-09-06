@@ -4,7 +4,7 @@ import type { DiagnosticsApi } from "../../../src/diagnostics/contracts";
 import "../../src/tokens.css";
 import "../../src/styles.css";
 
-const fixture = (window as unknown as { fixture: { language: Language; problem: DiagnosticProblem } }).fixture;
+const fixture = (window as unknown as { fixture: { language: Language; problem: DiagnosticProblem; upstreamReview?: { verified: boolean } } }).fixture;
 const call = async (path: string, body?: unknown, signal?: AbortSignal) => {
   const response = await fetch(`/diagnostics/${path}`, { method: body === undefined ? "GET" : "POST", body: body === undefined ? undefined : JSON.stringify(body), headers: { "content-type": "application/json" }, signal });
   if (!response.ok) throw new Error("Synthetic diagnostic bridge failed");
@@ -24,6 +24,13 @@ const snapshot: LauncherSnapshot = {
   operation: { name: "fixture-approval", status: "failed", message: fixture.problem.message, problem: fixture.problem }, update: { status: "disabled" },
 };
 const subscribe = () => () => {};
+if (fixture.upstreamReview) {
+  snapshot.operation = null;
+  snapshot.state.mcpGuideStep = 2;
+  snapshot.state.mcpSetupComplete = fixture.upstreamReview.verified;
+  snapshot.browser = { status: "running", message: "Synthetic sent turn", url: "https://example.invalid", title: "Fixture", authenticated: true, visible: false, surfaceActive: true, loading: false, canGoBack: false, canGoForward: false, zoomFactor: 1, activeTabId: "manual-fixture", maxTabs: 5,
+    tabs: [{ id: "manual-fixture", traceId: "fixture", title: "ChatGPT", status: "running", loading: false, active: true, closable: true, interactionMode: "manual", manualState: "sent", canCopyPrompt: false, canConfirmSent: false }] };
+}
 // Only presentation seams exercised here are substituted. Missing mutation APIs fail if invoked.
 window.codexWebLauncher = {
   diagnostics, snapshot: async () => snapshot, setBrowserSurfaceActive: async () => snapshot.browser, setBrowserBounds: async () => true,

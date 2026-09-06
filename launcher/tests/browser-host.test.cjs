@@ -2630,7 +2630,8 @@ test("manual start is idempotent and never exposes its private prompt in snapsho
   for (const tab of fixture.turnTabs.values()) clearTimeout(tab.manualDeadlineTimer);
 });
 
-test("manual compaction alone keeps both pre-start deadlines open for two minutes", () => {
+test("manual confirmation deadlines end at Sent so slow model startup can still complete", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout", "Date"], now: 1_000_000 });
   const { fixture } = manualTurnFixture();
   const ordinary = fixture.beginManualTurn("manual_ordinary", process.pid, "ordinary prompt");
   const compaction = fixture.beginManualTurn(
@@ -2645,12 +2646,24 @@ test("manual compaction alone keeps both pre-start deadlines open for two minute
   const compactionTab = fixture.turnTabs.get(compaction.tabId);
   assert.equal(ordinaryTab.manualSubmitTimeoutMs, 30_000);
   assert.equal(compactionTab.manualSubmitTimeoutMs, 120_000);
+  t.mock.timers.tick(31_000);
+  assert.equal(ordinaryTab.manualState, "timed-out");
+  assert.equal(compactionTab.manualState, "awaiting-user");
 
+  const slow = fixture.beginManualTurn("manual_slow_model", process.pid, "slow model prompt");
+  fixture.confirmManualSent(slow.tabId);
   fixture.confirmManualSent(compaction.tabId);
-  assert.ok(compactionTab.manualDeadlineAt - Date.now() > 119_000);
-  assert.ok(compactionTab.manualDeadlineAt - Date.now() <= 120_000);
-
-  for (const tab of fixture.turnTabs.values()) clearTimeout(tab.manualDeadlineTimer);
+  t.mock.timers.tick(180_000);
+  for (const lease of [slow, compaction]) {
+    const tab = fixture.turnTabs.get(lease.tabId);
+    assert.equal(tab.manualState, "sent");
+    assert.equal(tab.manualDeadlineAt, null);
+    assert.equal(tab.manualDeadlineTimer, null);
+    assert.equal((await fixture.waitManualSent(tab.traceId, process.pid)).status, "sent");
+    fixture.markManualTurnStarted(tab.traceId, process.pid);
+    fixture.endManualTurn(tab.traceId, process.pid, "completed");
+    assert.equal(fixture.manualCompletionSignals.has(tab.traceId), true);
+  }
 });
 
 test("manual completion is idempotent and cannot be downgraded after a lost acknowledgement", () => {
@@ -2762,7 +2775,7 @@ test("manual Copy and Sent confirmation remain isolated across concurrent tabs",
   for (const tab of fixture.turnTabs.values()) clearTimeout(tab.manualDeadlineTimer);
 });
 
-test("manual Sent timeout and explicit cancellation are terminal", async () => {
+test("manual confirmation timeout and explicit cancellation are terminal", async () => {
   const { fixture } = manualTurnFixture();
   const timed = fixture.beginManualTurn("manual_timeout", process.pid, "timeout prompt");
   const timedTab = fixture.turnTabs.get(timed.tabId);

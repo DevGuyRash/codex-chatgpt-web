@@ -43,6 +43,19 @@ test("fresh setup previews are stable and read-only and stale approvals fail bef
   expect(existsSync(getConfigPath())).toBe(false);
 }));
 
+test("generated model cache refresh does not invalidate an unchanged setup review", () => fixture(options => {
+  writeFileSync(getCodexConfigPath(), "# user configuration\n");
+  const cachePath = join(process.env.CODEX_HOME!, "models_cache.json");
+  writeFileSync(cachePath, '{"models":["old"],"fetched_at":"before"}\n');
+  const before = previewSetupConfiguration(options);
+  writeFileSync(cachePath, '{"models":["new"],"fetched_at":"after"}\n');
+  const after = previewSetupConfiguration(options);
+  expect(before.status).toBe("ready");
+  expect(after.approvalId).toBe(before.approvalId);
+  expect(() => preflightSetup({ ...options, configurationApproval: before.approvalId })).not.toThrow();
+  expect(readFileSync(cachePath, "utf8")).toContain('"after"');
+}));
+
 test("setup and repair share commented source and ambiguous-section detection", () => fixture(options => {
   const text = `${ROUTES_BEGIN}\n# openai_base_url="old"\n# experimental_realtime_webrtc_call_base_url="voice"\n${ROUTES_END}\n`;
   writeFileSync(getCodexConfigPath(), text);

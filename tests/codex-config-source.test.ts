@@ -41,6 +41,16 @@ test("approved edits reactivate the unique tracked line and preserve comments an
   expect(parseTomlValue(changed)).toEqual({ openai_base_url: "new" });
 });
 
+test("owned scalars reactivate outside marker sections without changing spelling or whitespace", () => {
+  const text = '\uFEFF[features]\r\n  # "multi_agent"   = false # keep explanation\r\nother = true\r\n';
+  expect(setTrackedCodexScalar(text, ["features", "multi_agent"], true))
+    .toBe(text.replace('# "multi_agent"   = false', '"multi_agent"   = true'));
+});
+
+test("competing commented owned settings outside markers require an explicit source choice", () => {
+  expect(() => setTrackedCodexScalar('[features]\n# multi_agent = true\n# multi_agent = false\n', ["features", "multi_agent"], true)).toThrow("Multiple commented assignments");
+});
+
 for (const [name, text] of [
   ["missing end", `${ROUTES_BEGIN}\n# openai_base_url="old"\n`],
   ["stray end", `${ROUTES_END}\n`],

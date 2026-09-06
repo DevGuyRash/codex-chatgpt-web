@@ -5,6 +5,17 @@ import type { CodexRepairPreview } from "../src/contracts/codex-integration";
 
 const preview: CodexRepairPreview = { version: 1, status: "blocked", approvalId: "", protocol: "native", changes: [], conflicts: [], codexRestartRequired: true, launcherRestartRequired: true };
 const target = resolveIntegrationTarget({ codexHome: "/tmp/config-review-fixture", runtimeRoot: "/tmp/runtime-review-fixture", profile: "test" });
+test("existing runtime values are changed, not newly added TOML definitions", () => {
+  const result = withConfigurationReview({ ...preview, status: "ready", changes: [
+    { path: "runtime.releaseVersion", current: "5.0.2", proposed: "5.0.3" },
+    { path: "runtime.subagentProtocol", current: "native", proposed: "compatibility-v1" },
+    { path: "runtime.appName", current: null, proposed: "Example" },
+  ] }, target, "");
+  const settings = result.groups!.flatMap(group => group.settings);
+  expect(settings.find(setting => setting.path === "runtime.releaseVersion")?.changeKind).toBe("changed");
+  expect(settings.find(setting => setting.path === "runtime.subagentProtocol")?.changeKind).toBe("changed");
+  expect(settings.find(setting => setting.path === "runtime.appName")?.changeKind).toBe("added");
+});
 test("review groups all competing definitions and retains every finding", () => {
   const result = withConfigurationReview({ ...preview, conflicts: [
     { path: "openai_base_url", category: "invalid_config", message: "Duplicate" },

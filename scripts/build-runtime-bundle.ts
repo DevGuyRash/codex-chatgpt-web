@@ -66,6 +66,9 @@ if (!build.success) {
   throw new Error(`Runtime bundle failed: ${build.logs.map(log => log.message).join("; ")}`);
 }
 
+const diagnosticsQueryBuild = await Bun.build({ entrypoints: [join(root, "src", "diagnostics", "query-worker.ts")], target: "bun", minify: true, packages: "external", outdir: appDir, naming: "diagnostics-query-worker.js" });
+if (!diagnosticsQueryBuild.success) throw new Error(`Diagnostics query worker build failed: ${diagnosticsQueryBuild.logs.join("\n")}`);
+
 const browserHelperBuild = await Bun.build({
   entrypoints: [join(root, "src", "adapters", "chatgpt-web", "browser-helper-main.ts")],
   target: "node",

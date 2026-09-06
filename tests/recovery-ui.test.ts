@@ -23,6 +23,11 @@ test.skipIf(!process.env.CHATGPT_TEST_CHROME_EXECUTABLE)("notification recovery 
     expect(await toast.locator("li").count()).toBe(2);
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
     expect(await toast.locator("li p").last().evaluate(element => getComputedStyle(element).whiteSpace)).toBe("pre-wrap");
+    await page.getByRole("checkbox", { name: "Other launcher operation in progress" }).check();
+    expect(await toast.getByRole("button", { name: "Run Doctor", exact: true }).isDisabled()).toBe(true);
+    expect(await toast.getByRole("button", { name: "Run Doctor", exact: true }).getAttribute("title")).toBe("Wait for the current operation or review to finish.");
+    expect(await page.evaluate(() => (window as unknown as { recoveryCalls: string[] }).recoveryCalls)).toEqual([]);
+    await page.getByRole("checkbox", { name: "Other launcher operation in progress" }).uncheck();
     await toast.getByRole("button", { name: "Run Doctor", exact: true }).click();
     const dialog = page.getByRole("dialog");
     await dialog.getByRole("heading", { name: "Codex integration is inconsistent" }).waitFor();

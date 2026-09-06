@@ -1,6 +1,7 @@
 #!/usr/bin/env bun
 import { createInterface } from "node:readline/promises";
 import { CodexConfigurationError } from "./codex-configuration-error";
+import { diagnosticCancellation, isDiagnosticCancellation } from "./diagnostics/outcome";
 import { Writable } from "node:stream";
 import { timingSafeEqual } from "node:crypto";
 import { existsSync, readFileSync, rmSync } from "node:fs";
@@ -40,6 +41,9 @@ import { assertProfileCapabilities, probeCodexProfileCapabilities, saveProfileCa
 import { refreshProfileModelCatalog } from "./profile-model-catalog";
 import { RuntimeRegistry } from "../launcher/electron/runtime-registry.cjs";
 import { deliverInterruptCleanup, InterruptCleanupClaims } from "./interrupt-cleanup";
+import { runDiagnosticsCommand } from "./diagnostics/cli";
+import { initializeRuntimeDiagnostics, runtimeParent, closeRuntimeDiagnostics } from "./diagnostics/runtime";
+import { problemFor } from "./diagnostics/problems";
 
 const HELP = `codex-chatgpt-web ${VERSION}
 
@@ -50,6 +54,7 @@ Usage:
   codex-chatgpt-web setup --full --tunnel-id ID --runtime-key-file PATH [options]
   codex-chatgpt-web login
   codex-chatgpt-web doctor [--json]
+  codex-chatgpt-web diagnostics <status|list|show|search|follow|export> [options]
   codex-chatgpt-web route <status|connect|disconnect>
   codex-chatgpt-web route repair <preview|apply> --subagent-protocol <compatibility-v1|native> [--approve ID]
   codex-chatgpt-web subagents <status|compatibility-v1|native>
@@ -400,10 +405,13 @@ async function setupCommand(args: string[], target?: IntegrationTarget): Promise
     stdout.write(`${JSON.stringify(preview, null, 2)}\n`);
     if (preview.status !== "ready") throw new Error(preview.conflicts.map(conflict => conflict.message).join("; ") || "Resolve setup configuration conflicts before continuing");
     if (!stdin.isTTY) throw new Error("Review setup --preview-json and pass its --approve-configuration ID to apply these changes");
-    if (!await confirm("Apply these configuration changes and continue setup?")) throw new Error("Setup cancelled; no configuration changes were applied");
+    if (!await confirm("Apply these configuration changes and continue setup?")) throw diagnosticCancellation("Setup cancelled; no configuration changes were applied");
     options.configurationApproval = preview.approvalId;
   }
-  const result = await setup(options);
+  // Do not create a diagnostic store before setup's exact-preview authorization gate.
+  preflightSetup(options);
+  const setupTelemetry = initializeRuntimeDiagnostics({ component: "runtime", target: target?.id, standalone: true });
+  const result = setupTelemetry ? await setupTelemetry.run("setup.apply", async () => setup(options)) : await setup(options);
   stdout.write(`Setup complete: ${result.mode}\n`);
   stdout.write(`Config: ${result.configPath}\n`);
   if (result.connectorSetupRequired) {
@@ -595,7 +603,7 @@ async function uninstallCommand(args: string[], target?: IntegrationTarget): Pro
   assertNoArgs(args);
   if (launcherControl) authorizeLauncherControl("uninstall");
   if (!yes && !await confirm("Restore Codex config, stop services, and remove this installation?")) {
-    throw new Error("Uninstall cancelled");
+    throw diagnosticCancellation("Uninstall cancelled");
   }
   const config = existsSync(getConfigPath()) ? loadConfig() : undefined;
   if (config?.browserHost === "launcher" && !launcherControl) {
@@ -653,7 +661,12 @@ async function main(): Promise<void> {
     process.env.CODEX_CHATGPT_WEB_HOME = target.runtimeHome;
     process.env.CODEX_HOME = target.codexHome;
   }
+  const readOnly = ["help", "diagnostics", "doctor", "status", "targets", "browser", "setup", "uninstall"].includes(command) || args.includes("--preview-json") || args.includes("--preflight-only");
+  const telemetry = command !== "diagnostics" ? initializeRuntimeDiagnostics({ component: "runtime", target: target?.id, standalone: !readOnly }) : undefined;
+  const operation = telemetry?.begin(`cli.${command}`, { "runtime.version": VERSION }, runtimeParent());
+  const execute = async () => {
   if (command === "help") stdout.write(HELP);
+  else if (command === "diagnostics") await runDiagnosticsCommand(args);
   else if (command === "setup") await setupCommand(args, target);
   else if (command === "login") await loginCommand(args);
   else if (command === "doctor" || command === "status") await doctorCommand(args, target);
@@ -730,12 +743,29 @@ async function main(): Promise<void> {
   else if (command === "open") await openCommand(args);
   else if (command === "uninstall") await uninstallCommand(args, target);
   else throw new Error(`Unknown command: ${command}\n\n${HELP}`);
+  };
+  try {
+    if (operation) await operation.run(execute); else await execute();
+    operation?.end();
+  } catch (error) {
+    const cancelled = isDiagnosticCancellation(error);
+    const problem = cancelled ? undefined : operation?.problem(error);
+    operation?.end(cancelled ? "cancelled" : "failed");
+    if (problem && error && typeof error === "object") Object.assign(error, { problem });
+    throw error;
+  }
 }
 
 main().catch(error => {
-  if (process.env.CODEX_CHATGPT_WEB_STRUCTURED_ERRORS === "1" && error instanceof CodexConfigurationError) {
+  if (isDiagnosticCancellation(error)) {
+    process.stderr.write("CGW_CANCELLED_V1 {\"version\":1}\n");
+    process.exitCode = 130; return;
+  }
+  if (process.env.CODEX_CHATGPT_WEB_STRUCTURED_ERRORS === "2") {
+    process.stderr.write(`CGW_ERROR_V2 ${JSON.stringify(problemFor(error))}\n`);
+  } else if (process.env.CODEX_CHATGPT_WEB_STRUCTURED_ERRORS === "1" && error instanceof CodexConfigurationError) {
     process.stderr.write(`CGW_ERROR_V1 ${JSON.stringify({ version: 1, code: error.code, message: "Codex configuration differs from this installation", findings: error.conflicts.map(({ path, message }) => ({ path, message })) })}\n`);
   } else
   process.stderr.write(`codex-chatgpt-web: ${error instanceof Error ? error.message : String(error)}\n`);
   process.exitCode = 1;
-});
+}).finally(closeRuntimeDiagnostics);

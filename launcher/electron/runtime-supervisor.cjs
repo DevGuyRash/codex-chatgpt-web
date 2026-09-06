@@ -492,13 +492,15 @@ class RuntimeSupervisor {
       detached: DETACH_OWNED_CHILD,
       env: {
         ...process.env,
+        ...(this.logger.environment?.() || {}),
         CODEX_CHATGPT_WEB_HOME: this.coreHome,
         ...(target ? { CODEX_HOME: target.codexHome } : {}),
         CODEX_CHATGPT_WEB_BROWSER_HOST_DESCRIPTOR: this.browserDescriptorPath,
       },
-      stdio: ["ignore", "pipe", "pipe"],
+      stdio: ["ignore", "pipe", "pipe", ...(this.logger.attachChild ? ["pipe"] : [])],
       windowsHide: true,
     });
+    this.logger.attachChild?.(child);
     this[name] = child;
     this.lastChildFailure[name] = null;
     this.lastChildOutput[name] = null;

@@ -13,6 +13,7 @@ test("Settings IPC retains the current connection when inspection or enumeration
     const external = { id: "external", status: "external", resolvedPath: "/managed/profile.toml" };
     runInNewContext(`${registration}\nregisterIpc({ logger: {}, stateStore: {} });`, {
       Error,
+      registerDiagnosticsIpc: require("../electron/logging.cjs").registerDiagnosticsIpc, runtimeSupervisor: null,
       registerLoggedIpc: (ipcMain, _logger, name, callback) => ipcMain.handle(name, callback),
       ipcMain: { handle: (name, callback) => handlers.set(name, callback), on() {} },
       LAUNCHER_PROFILE: { integrationTarget: selected, codexHome: selected.codexHome },

@@ -5,6 +5,7 @@ import { CODEX_REALTIME_WEBRTC_CALL_BASE_URL, routeUrl, type CodexIntegrationJou
 import { parseTomlValue } from "./toml-edit";
 import { boundCodexRouteSection, setTrackedCodexScalar } from "./codex-config-source";
 import { CodexConfigurationError } from "./codex-configuration-error";
+import { ownedCodexScalarSettings } from "./codex-owned-settings";
 
 type Scalar = string | number | boolean;
 const table = (value: unknown): value is Record<string, unknown> => value !== null && typeof value === "object" && !Array.isArray(value);
@@ -20,14 +21,13 @@ export function prepareOwnedCodexConfiguration(original: string, journal: CodexI
   if (conflicts.some(conflict => !["missing", "commented_out", "value_changed"].includes(conflict.category))) throw new CodexConfigurationError(conflicts);
   let text = original;
   const next = structuredClone(journal);
+  next.installed.openai_base_url = routeUrl(config);
+  next.installed.experimental_realtime_webrtc_call_base_url = CODEX_REALTIME_WEBRTC_CALL_BASE_URL;
+  next.installed.subagent_protocol = config.subagentProtocol;
   const edit = (path: string[], value: Scalar | undefined): void => {
     if (at(parseTomlValue(text), path) !== value) text = setTrackedCodexScalar(text, path, value);
   };
   try {
-    edit(["openai_base_url"], routeUrl(config));
-    edit(["experimental_realtime_webrtc_call_base_url"], CODEX_REALTIME_WEBRTC_CALL_BASE_URL);
-    if (journal.installed.model_catalog_json) edit(["model_catalog_json"], journal.installed.model_catalog_json);
-    if (journal.installed.model_provider) edit(["model_provider"], journal.installed.model_provider);
     const v2Path = table(at(parseTomlValue(text), ["features", "multi_agent_v2"]))
       ? ["features", "multi_agent_v2", "enabled"] : ["features", "multi_agent_v2"];
     if (config.subagentProtocol === "compatibility-v1") {
@@ -38,9 +38,6 @@ export function prepareOwnedCodexConfiguration(original: string, journal: CodexI
         next.previousAgentMaxDepth = captured.previousAgentMaxDepth;
         next.installed.agent_max_depth = captured.installedAgentMaxDepth;
       }
-      edit(["features", "multi_agent"], true);
-      edit(v2Path, false);
-      edit(["agents", "max_depth"], next.installed.agent_max_depth!);
     } else if (journal.installed.subagent_protocol === "compatibility-v1") {
       for (const [path, installed, previous, numeric] of [
         [["features", "multi_agent"], true, journal.previousMultiAgent!, false],
@@ -56,13 +53,11 @@ export function prepareOwnedCodexConfiguration(original: string, journal: CodexI
       delete next.previousAgentMaxDepth;
       delete next.installed.agent_max_depth;
     }
+    for (const setting of ownedCodexScalarSettings(next, parseTomlValue(text))) edit(setting.path, setting.expected);
     text = boundCodexRouteSection(text);
   } catch {
     throw new CodexConfigurationError([...conflicts, { path: "config", category: "ownership_conflict", message: "The proposed setting edit cannot preserve this document safely; review its structure before repair" }]);
   }
-  next.installed.openai_base_url = routeUrl(config);
-  next.installed.experimental_realtime_webrtc_call_base_url = CODEX_REALTIME_WEBRTC_CALL_BASE_URL;
-  next.installed.subagent_protocol = config.subagentProtocol;
   const remaining = inspectInstalledCodexConfig(text, next);
   if (remaining.length) throw new CodexConfigurationError([...conflicts, ...remaining]);
   return { text, journal: next, conflicts };

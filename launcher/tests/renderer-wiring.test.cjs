@@ -212,16 +212,16 @@ test("failed doctor reports retain every failed check", () => {
 });
 
 test("launcher shares only privacy-safe exported diagnostics", () => {
-  assert.match(appSource, /api!\.exportLogs\(\)/);
+  assert.match(appSource, /api\.diagnostics\.export\(/);
   assert.match(preloadSource, /exportLogs:[\s\S]*?launcher:export-logs/);
-  assert.match(electronMain, /launcher:export-logs[\s\S]*?showSaveDialog[\s\S]*?exportSanitizedLogs/);
+  assert.match(electronMain, /launcher:export-logs[\s\S]*?chooseDiagnosticExport[\s\S]*?logger.client.export/);
   assert.doesNotMatch(preloadSource, /launcher:open-logs/);
   assert.doesNotMatch(electronMain, /launcher:open-logs/);
 });
 
-test("MCP verification failures stay inside the structured setup report", () => {
-  assert.match(appSource, /next\.operation\.name !== "mcp-verification"/);
-  assert.match(appSource, /next\.name !== "mcp-verification"/);
+test("MCP verification retains its structured report and uses shared operation feedback", () => {
+  assert.match(appSource, /observeLauncherOperation\(next\.operation\)/);
+  assert.match(appSource, /observeLauncherOperation\(next\)/);
   assert.match(electronMain, /Finish the active Codex task before verifying the ChatGPT connector/);
   assert.match(electronMain, /report\.checks\.filter\(\(check\) => check\.id !== "connector"\)/);
   assert.match(electronMain, /mcp\.verification_requested/);

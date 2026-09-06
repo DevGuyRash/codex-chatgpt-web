@@ -286,9 +286,11 @@ export function installedBunExecutable({
     process.env.CODEX_CHATGPT_WEB_BUN,
     process.env.CODEX_WEB_GPT_BUN,
     ...candidates,
+    // A durable Bun already running setup is stronger evidence than an unrelated PATH shim.
+    // Temporary self-extract executables are still rejected by the durability check below.
+    /^(?:bun|bun\.exe)$/i.test(basename(process.execPath)) ? process.execPath : undefined,
     ...pathCandidates,
     typeof Bun !== "undefined" ? Bun.which("bun") : undefined,
-    process.execPath,
   ];
   for (const candidate of discovered) {
     if (!candidate?.trim()) continue;

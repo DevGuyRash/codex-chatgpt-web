@@ -30,7 +30,8 @@ test.skipIf(!process.env.CHATGPT_TEST_CHROME_EXECUTABLE)("changes-first review a
       expect(addedColor).not.toBe("rgba(0, 0, 0, 0)");
       await page.getByRole("button", { name: language === "en" ? /Show unchanged settings/ : language === "ja" ? /変更のない設定を表示/ : /显示未更改的设置/ }).click();
       expect(await page.locator(".change-unchanged").count()).toBeGreaterThan(0);
-      expect(await page.locator(".change-unchanged .configuration-after").first().evaluate(element => getComputedStyle(element).backgroundColor)).not.toBe(addedColor);
+      expect(await page.locator(".change-unchanged .configuration-value-pair").count()).toBe(0);
+      expect(await page.locator(".change-unchanged .configuration-unchanged-value").count()).toBe(await page.locator(".change-unchanged").count());
       await page.locator(".configuration-text-change > summary").click();
       expect(await page.locator(".diff-removed").count()).toBe(2);
       expect(await page.locator(".diff-added").count()).toBe(2);

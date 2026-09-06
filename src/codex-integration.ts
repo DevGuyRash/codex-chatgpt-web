@@ -201,7 +201,9 @@ export function prepareCodexIntegration(config: AppConfig, options: InstallCodex
   if (options.migrateBase && target?.kind !== "profile") throw new Error("Base migration requires a named profile target");
   const migration = options.migrateBase ? prepareBaseToProfileMigration(target!) : undefined;
   const configPath = getCodexConfigPath(target);
-  const expected = [configPath, getCodexJournalPath(target), getCodexJournalRecoveryPath(target), ...codexModelCacheInvalidations(target)].map(snapshotFile);
+  // The generated cache is an invalidation target, not a reviewed configuration input.
+  // Compensation snapshots it at commit, so background catalog refreshes do not stale approval.
+  const expected = [configPath, getCodexJournalPath(target), getCodexJournalRecoveryPath(target)].map(snapshotFile);
   if (target?.kind === "profile") {
     const base = snapshotFile(join(target.codexHome, "config.toml"));
     expected.push(base);

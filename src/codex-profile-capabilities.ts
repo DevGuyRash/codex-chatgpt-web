@@ -41,20 +41,26 @@ async function inspectFixtureHook(executable: string, root: string, env: NodeJS.
   child.stdin.on("error", error => { failure = error; });
   child.on("error", error => { failure = error; });
   const closed = new Promise<void>(resolve => child.once("close", () => { exited = true; resolve(); }));
-  const waitFor = async (matches: (text: string) => boolean, label: string) => {
+  const waitFor = async (matches: (text: string) => boolean, label: string, whileWaiting?: () => void) => {
     const deadline = Date.now() + 12_000;
     while (!matches(plain(output))) {
       if (failure || exited || Date.now() >= deadline) throw new Error(`Codex capability probe could not confirm ${label}; profile installation remains blocked. ${plain(output).slice(-1_500)}`);
+      whileWaiting?.();
       await delay(40);
     }
   };
   try {
     if (!active) {
-      await waitFor(text => text.includes("Hooks need review") && text.includes("Continuewithouttrusting"), "the changed hook trust review");
-      // Reject trust for this deliberately mismatched fixture; never approve via terminal automation.
-      child.stdin.write("\x1b[B\x1b[B");
-      await delay(180);
-      child.stdin.write("\r");
+      await waitFor(text => text.includes("Hooks need review") && text.includes("Continuewithouttrusting") && /esc\s*to\s*go\s*back/.test(text), "the changed hook trust review");
+      // A rendered startup review does not guarantee the first input is consumed.
+      // Escape is safe to repeat here: it cannot grant trust or submit a turn.
+      // Stop on observed launch, and retain the same bounded, fail-closed deadline.
+      let lastDismiss = 0;
+      await waitFor(text => /cgw-offline-profile high/.test(text), "dismissal without trusting the changed hook", () => {
+        if (Date.now() - lastDismiss < 500) return;
+        child.stdin.write("\x1b");
+        lastDismiss = Date.now();
+      });
     }
     await waitFor(text => /cgw-offline-profile high/.test(text), "profile-local launch and model selection");
     output = "";

@@ -128,22 +128,24 @@ export function sourceAssignments(inventory: CodexSourceInventory, path: readonl
   return inventory.assignments.filter(item => item.path.length === path.length && item.path.every((part, index) => part === path[index]));
 }
 
-/** An approved caller may reactivate one unambiguous commented scalar in a tracked section. */
-export function setTrackedCodexScalar(text: string, path: readonly string[], value: CodexConfigScalar | undefined): string {
+/** The caller owns this path; markers are source layout, not the authority to reactivate it. */
+export function setTrackedCodexScalar(text: string, path: readonly (string | number)[], value: CodexConfigScalar | undefined): string {
   const inventory = inspectCodexConfigSource(text);
   if (inventory.conflicts.length) throw new Error(inventory.conflicts.map(issue => issue.message).join("; "));
-  const matches = sourceAssignments(inventory, path);
-  const disabled = matches.filter(item => item.state === "commented_out" && item.section);
+  const matches = path.every((key): key is string => typeof key === "string") ? sourceAssignments(inventory, path)
+    : discoverConfigurationSource(text).occurrences.filter(item => item.kind === "assignment"
+      && item.path.length === path.length && item.path.every((key, index) => key === path[index]));
+  const disabled = matches.filter(item => item.state === "commented_out");
   if (value !== undefined && !matches.some(item => item.state === "active") && disabled.length) {
     if (disabled.length !== 1) throw new Error(`Multiple commented assignments for ${path.join(".")}; review which one to reactivate`);
     const candidate = disabled[0]!;
     const [start, end] = candidate.range;
-    const enabled = text.slice(0, start) + text.slice(start, end).replace(/^#\s?/, "") + text.slice(end);
+    const enabled = text.slice(0, start) + text.slice(start, end).replace(/^(\s*)# ?/, "$1") + text.slice(end);
     // The normal semantic editor verifies the requested change and preserves every sibling value.
     return setTomlScalar(enabled, path, value);
   }
   const routes = inventory.sections.find(section => section.kind === "routes");
-  if (value !== undefined && routes && path.length === 1 && routeKeys.has(path[0]!) && !matches.some(item => item.state === "active")) {
+  if (value !== undefined && routes && path.length === 1 && typeof path[0] === "string" && routeKeys.has(path[0]) && !matches.some(item => item.state === "active")) {
     const ending = text.includes("\r\n") ? "\r\n" : text.includes("\n") ? "\n" : text.includes("\r") ? "\r" : "\n";
     const result = text.slice(0, routes.end) + `${JSON.stringify(path[0])} = ${JSON.stringify(value)}${ending}` + text.slice(routes.end);
     if (!isDeepStrictEqual(parseTomlValue(result), parseTomlValue(setTomlScalar(text, path, value)))) throw new Error("Route insertion changed unrelated settings");

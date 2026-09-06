@@ -1,6 +1,9 @@
 import { randomUUID } from "node:crypto";
+import { runtimeDiagnostics } from "../../diagnostics/runtime";
+import { captureBrowserCheckpoint } from "../../diagnostics/browser-capture";
+import { parseTraceparent, type Operation } from "../../diagnostics/instrumentation";
 import { chatGptConnectorMenu, CHATGPT_CONNECTOR_ROW_SELECTOR } from "./connector-menu";
-import { chmodSync, existsSync, mkdirSync, readdirSync, rmSync, statSync } from "node:fs";
+import { existsSync, mkdirSync, rmSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { chromium, type Browser, type BrowserContext, type Locator, type Page } from "playwright-core";
 import {
@@ -1135,6 +1138,7 @@ function withBrowserTurnAbort<T>(promise: Promise<T>, signal?: AbortSignal): Pro
 
 export interface BrowserTurn {
   traceId: string;
+  diagnosticsParent?: string;
   modelId: string;
   reasoning?: string;
   capabilities: ChatGptWebCapabilities;
@@ -1702,201 +1706,15 @@ export function sanitizeChatGptBrowserDiagnosticState(value: unknown): unknown {
   }));
 }
 
-const CHATGPT_BROWSER_DIAGNOSTIC_TRACE_LIMIT = 10;
-
 export function browserDiagnosticCheckpoint(value: string): string {
   const safe = value.replace(/[^A-Za-z0-9_-]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 80);
   return safe || "checkpoint";
 }
 
-function privateDirectory(path: string): void {
-  mkdirSync(path, { recursive: true, mode: 0o700 });
-  try { chmodSync(path, 0o700); } catch { /* Windows ACLs are managed by the installer. */ }
-}
-
-function pruneBrowserDiagnostics(root: string): void {
-  const traces = readdirSync(root, { withFileTypes: true })
-    .filter(entry => entry.isDirectory() && /^[A-Za-z0-9_-]{6,128}$/.test(entry.name))
-    .map(entry => {
-      const path = join(root, entry.name);
-      return { path, modifiedAt: statSync(path).mtimeMs };
-    })
-    .sort((left, right) => right.modifiedAt - left.modifiedAt);
-  for (const trace of traces.slice(CHATGPT_BROWSER_DIAGNOSTIC_TRACE_LIMIT)) {
-    rmSync(trace.path, { recursive: true, force: true });
-  }
-}
-
 class ChatGptBrowserDiagnostics {
-  private readonly directory: string;
-  private sequence = 0;
-  private initialized = false;
-
-  constructor(
-    private readonly traceId: string,
-    private readonly root: string,
-    private readonly appName: string,
-  ) {
-    if (!/^[A-Za-z0-9_-]{6,128}$/.test(traceId)) {
-      throw new Error("ChatGPT browser diagnostic trace id is invalid");
-    }
-    this.directory = join(this.root, `${traceId}-${randomUUID().slice(0, 8)}`);
-  }
-
+  constructor(_traceId: string, _root: string, _appName: string) {}
   async capture(page: Page, checkpoint: string, error?: unknown): Promise<void> {
-    try {
-      if (!this.initialized) {
-        privateDirectory(this.root);
-        privateDirectory(this.directory);
-        pruneBrowserDiagnostics(this.root);
-        this.initialized = true;
-      }
-      const sequence = String(++this.sequence).padStart(2, "0");
-      const stem = `${sequence}-${browserDiagnosticCheckpoint(checkpoint)}`;
-      const includeScreenshot = process.env.CODEX_CHATGPT_WEB_BROWSER_DIAGNOSTICS === "1";
-      const [screenshotResult, stateResult] = await Promise.allSettled([
-        includeScreenshot
-          ? page.screenshot({ animations: "disabled", caret: "hide", timeout: 5_000, type: "png" })
-          : Promise.resolve(undefined),
-        withChatGptBrowserObservationTimeout(page.evaluate(({
-          composerSelector,
-          effortControlSelector,
-          effortItemSelector,
-          assistantTurnSelector,
-          connectorRowSelector,
-          appName,
-        }) => {
-          const rendered = (element: Element): boolean => {
-            const candidate = element as HTMLElement;
-            const style = getComputedStyle(candidate);
-            return candidate.isConnected
-              && style.display !== "none"
-              && style.visibility !== "hidden"
-              && style.opacity !== "0";
-          };
-
-          const rows = (selector: string, limit = 40) => [...document.querySelectorAll(selector)]
-            .filter(rendered)
-            .slice(-limit)
-            .map(element => {
-              const rect = element.getBoundingClientRect();
-              return {
-                tag: element.tagName.toLowerCase(),
-                role: element.getAttribute("role"),
-                ariaExpanded: element.getAttribute("aria-expanded"),
-                ariaChecked: element.getAttribute("aria-checked"),
-                dataState: element.getAttribute("data-state"),
-                dataHighlighted: element.getAttribute("data-highlighted"),
-                rect: { x: rect.x, y: rect.y, width: rect.width, height: rect.height },
-                textChars: (element.textContent ?? "").length,
-              };
-            });
-          const exactText = (element: Element, expected: string): boolean => (
-            [element, ...element.querySelectorAll("*")].some(candidate => (
-              candidate.children.length === 0
-              && (candidate.textContent ?? "").replace(/\s+/g, " ").trim() === expected
-            ))
-          );
-          const composers = [...document.querySelectorAll(composerSelector)].filter(rendered);
-          const assistantTurns = [...document.querySelectorAll(assistantTurnSelector)].filter(rendered);
-          const selectedConnectors = [...document.querySelectorAll('[data-id^="plugin:"][data-keyword]')]
-            .filter(rendered);
-          const exactConnectorRows = [...document.querySelectorAll(connectorRowSelector)]
-            .filter(element => rendered(element) && exactText(element, appName));
-          const currentUrl = new URL(location.href);
-          return {
-            location: {
-              origin: currentUrl.origin,
-              pathSegments: currentUrl.pathname.split("/").filter(Boolean).length,
-              temporaryChat: currentUrl.searchParams.has("temporary-chat"),
-            },
-            titleChars: document.title.length,
-            viewport: { width: innerWidth, height: innerHeight },
-            surfaceBound: typeof (globalThis as typeof globalThis & { __CODEX_WEB_GPT_SURFACE_ID__?: unknown })
-              .__CODEX_WEB_GPT_SURFACE_ID__ === "string",
-            // textContent avoids the synchronous layout forced by innerText on huge prompts.
-            bodyTextChars: document.body?.textContent?.length ?? 0,
-            composer: {
-              visibleCount: composers.length,
-              textChars: composers.map(element => (element.textContent ?? "").length),
-              selectedConnectorCount: selectedConnectors.length,
-              exactSelectedConnectorCount: selectedConnectors.filter(
-                element => element.getAttribute("data-keyword") === appName,
-              ).length,
-            },
-            effortControls: rows(effortControlSelector, 10),
-            effortItems: rows(effortItemSelector, 20),
-            menus: rows('[role="menu"], [role="listbox"], [data-testid="composer-intelligence-picker-content"]', 20),
-            connectorRows: exactConnectorRows.slice(-20).map(element => {
-              const rect = element.getBoundingClientRect();
-              return {
-                tag: element.tagName.toLowerCase(),
-                role: element.getAttribute("role"),
-                dataState: element.getAttribute("data-state"),
-                dataHighlighted: element.getAttribute("data-highlighted"),
-                rect: { x: rect.x, y: rect.y, width: rect.width, height: rect.height },
-                textChars: (element.textContent ?? "").length,
-              };
-            }),
-            overlays: rows('[role="dialog"], [role="alert"], [role="status"]', 30),
-            turns: {
-              user: document.querySelectorAll('[data-testid^="conversation-turn-"][data-message-author-role="user"]').length,
-              assistant: assistantTurns.map(element => ({
-                textChars: (element.textContent ?? "").length,
-                htmlChars: (element as HTMLElement).innerHTML.length,
-              })),
-            },
-          };
-        }, {
-          composerSelector: CHATGPT_COMPOSER_SELECTOR,
-          effortControlSelector: CHATGPT_EFFORT_CONTROL_SELECTOR,
-          effortItemSelector: CHATGPT_EFFORT_ITEM_SELECTOR,
-          assistantTurnSelector: CHATGPT_ASSISTANT_TURN_SELECTOR,
-          connectorRowSelector: CHATGPT_CONNECTOR_ROW_SELECTOR,
-          appName: this.appName,
-        })),
-      ]);
-      const capturedAt = new Date().toISOString();
-      if (screenshotResult.status === "fulfilled" && screenshotResult.value) {
-        atomicWriteFile(join(this.directory, `${stem}.png`), screenshotResult.value);
-      }
-      const captureErrors = Object.fromEntries([
-        ...(screenshotResult.status === "rejected" ? [[
-          "screenshot",
-          browserDiagnosticFailure(screenshotResult.reason),
-        ]] : []),
-        ...(stateResult.status === "rejected" ? [[
-          "state",
-          browserDiagnosticFailure(stateResult.reason),
-        ]] : []),
-      ]);
-      atomicWriteFile(join(this.directory, `${stem}.json`), `${JSON.stringify({
-        version: 2,
-        capturedAt,
-        traceId: this.traceId,
-        checkpoint,
-        ...(error !== undefined ? {
-          error: browserDiagnosticFailure(error),
-        } : {}),
-        ...(stateResult.status === "fulfilled"
-          ? { state: sanitizeChatGptBrowserDiagnosticState(stateResult.value) }
-          : {}),
-        ...(Object.keys(captureErrors).length > 0 ? { captureErrors } : {}),
-      }, null, 2)}\n`);
-      if (Object.keys(captureErrors).length > 0) {
-        console.warn(
-          `[chatgpt-web] browser diagnostic partial capture trace=${this.traceId}`
-          + ` checkpoint=${stem} failures=${Object.keys(captureErrors).join(",")}`,
-        );
-      }
-      console.info(`[chatgpt-web] browser diagnostic trace=${this.traceId} checkpoint=${stem} path=${this.directory}`);
-    } catch (captureError) {
-      console.warn(
-        `[chatgpt-web] browser diagnostic capture failed trace=${this.traceId}`
-        + ` checkpoint=${browserDiagnosticCheckpoint(checkpoint)}:`
-        + ` ${captureError instanceof Error ? captureError.message : String(captureError)}`,
-      );
-    }
+    await captureBrowserCheckpoint(page, browserDiagnosticCheckpoint(checkpoint), error !== undefined);
   }
 }
 
@@ -2102,7 +1920,19 @@ export class ChatGptBrowserWorker {
     if (useHelper) {
       this.launcherHelper ??= new LauncherBrowserHelperClient(this.config);
     }
-    const run = Promise.resolve().then(() => useHelper ? this.launcherHelper!.run(turn) : this.runExclusive(turn));
+    const telemetry = runtimeDiagnostics();
+    const operation = telemetry?.begin("browser.turn", { model: turn.modelId }, parseTraceparent(turn.diagnosticsParent) ?? telemetry.context(), { id: turn.traceId });
+    const execute = async () => {
+      try {
+        const value = await (useHelper ? this.launcherHelper!.run(turn) : this.runExclusive(turn));
+        operation?.end(); return value;
+      } catch (error) {
+        operation?.problem(error);
+        operation?.end(turn.abortSignal?.aborted || error instanceof Error && error.name === "AbortError" ? "cancelled" : "failed");
+        throw error;
+      }
+    };
+    const run = Promise.resolve().then(() => operation ? operation.run(execute) : execute());
     this.activeRuns.set(turn.traceId, run);
     void run.finally(() => {
       if (this.activeRuns.get(turn.traceId) === run) this.activeRuns.delete(turn.traceId);
@@ -2172,6 +2002,7 @@ export class ChatGptBrowserWorker {
     chatGptSuspensionClock.start();
     const startedAt = performance.now();
     const suspendedAtStart = suspensionClock.suspendedMs();
+    const diagnosticStage: Operation | undefined = runtimeDiagnostics()?.begin(`browser.${stage}`, { timeoutMs }, undefined, { id: traceId });
     console.info(`[chatgpt-web] browser turn ${traceId} stage=${stage} started`);
     const controller = new AbortController();
     let timer: ReturnType<typeof setTimeout> | undefined;
@@ -2194,8 +2025,9 @@ export class ChatGptBrowserWorker {
         };
         timer = setTimeout(fireOrRearm, timeoutMs);
       });
-      actionPromise = action(controller.signal);
+      actionPromise = diagnosticStage ? diagnosticStage.run(() => action(controller.signal)) : action(controller.signal);
       const value = await Promise.race([actionPromise, timeout]);
+      diagnosticStage?.end();
       console.info(`[chatgpt-web] browser turn ${traceId} stage=${stage} completed durationMs=${Math.round(performance.now() - startedAt)}`);
       return value;
     } catch (error) {
@@ -2209,7 +2041,9 @@ export class ChatGptBrowserWorker {
           }
         }
       }
-      console.error(`[chatgpt-web] browser turn ${traceId} stage=${stage} failed durationMs=${Math.round(performance.now() - startedAt)}: ${surfacedError instanceof Error ? surfacedError.message : String(surfacedError)}`);
+      console.error(`[chatgpt-web] browser turn ${traceId} stage=${stage} failed durationMs=${Math.round(performance.now() - startedAt)}`);
+      diagnosticStage?.problem(surfacedError);
+      diagnosticStage?.end(surfacedError instanceof Error && surfacedError.name === "AbortError" ? "cancelled" : "failed", { timedOut: stageTimedOut });
       throw surfacedError;
     } finally {
       if (timer) clearTimeout(timer);

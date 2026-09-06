@@ -3,6 +3,8 @@ import type { CodexRepairPreview, CodexConfigScalar, ConfigurationReviewGroup, C
 import { join } from "node:path";
 import { readJournal } from "./codex-integration-journal";
 import { snapshotFile, type FileSnapshot, type CodexIntegrationJournal } from "./codex-integration-shared";
+import { ownedCodexScalarSettings } from "./codex-owned-settings";
+import { parseTomlValue } from "./toml-edit";
 
 export function configurationReviewContext(target: IntegrationTarget, inputs?: readonly FileSnapshot[], proposed?: CodexIntegrationJournal): { baseSource?: string; trackedPaths: string[]; managedHookPaths: string[] } {
   const trackedPaths: string[] = [];
@@ -15,8 +17,9 @@ export function configurationReviewContext(target: IntegrationTarget, inputs?: r
   try {
     const journal = readJournal({ target, repair: false });
     if (journal && journal.configPath === target.configPath && journal.version === 10 && journal.active) {
-      trackedPaths.push("openai_base_url", "experimental_realtime_webrtc_call_base_url");
-      if (journal.installed.subagent_protocol === "compatibility-v1") trackedPaths.push("features.multi_agent", "features.multi_agent_v2", "features.multi_agent_v2.enabled", "agents.max_depth");
+      let document: unknown = {};
+      try { document = parseTomlValue((inputs?.find(file => file.path === target.configPath) ?? snapshotFile(target.configPath)).data?.toString("utf8") ?? ""); } catch { /* Ambiguous source has no effective value. */ }
+      trackedPaths.push(...ownedCodexScalarSettings(journal, document).map(setting => configurationPathName(setting.path)));
       const hook = journal.interruptHook;
       for (const key of ["command", "type", "timeout", "async"]) trackedPaths.push(configurationPathName(["hooks", "Interrupt", hook.groupIndex, "hooks", 0, key]));
       trackedPaths.push(configurationPathName(["hooks", "state", hook.stateKey, "trusted_hash"]));
@@ -88,7 +91,9 @@ export function withConfigurationReview(preview: CodexRepairPreview, target: Int
     const localOccurrences = occurrences.filter(item => item.file === target.configPath);
     const inheritedProposed = proposedBase && !localActive.length ? proposedBase.occurrences.filter(item => item.kind === "assignment" && item.state === "active" && configurationPathName(item.path) === path) : undefined;
     const proposed = change ? change.proposed : inheritedProposed ? inheritedProposed.length === 1 ? scalar(inheritedProposed[0]!.value) : null : current;
-    const state = ambiguous ? "ambiguous" : active.length ? "active" : occurrences.length ? "commented_out" : change?.currentState ?? "missing";
+    // Runtime values are sourced from runtime configuration, not TOML occurrences.
+    const state = path.startsWith("runtime.") ? current === null ? "missing" : "active"
+      : ambiguous ? "ambiguous" : active.length ? "active" : occurrences.length ? "commented_out" : change?.currentState ?? "missing";
     const changeKind = ambiguous ? preview.status === "ready" && change ? "changed" : "unresolved"
       : current === proposed && !((state === "commented_out" || state === "missing") && change && proposed !== null) ? "unchanged"
         : proposed === null ? "removed" : current === null || state === "commented_out" || state === "missing" ? "added" : "changed";

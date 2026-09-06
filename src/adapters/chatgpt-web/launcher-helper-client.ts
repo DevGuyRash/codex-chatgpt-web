@@ -2,6 +2,8 @@ import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { existsSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
 import { createInterface } from "node:readline";
+import { runtimeDiagnostics } from "../../diagnostics/runtime";
+import { traceparent } from "../../diagnostics/instrumentation";
 import { notifyLauncherTurn, readLauncherBrowserHostDescriptor } from "../../launcher-browser-host";
 import { ChatGptWebAdapterError } from "./adapter-error";
 import type { CompiledChatGptWebPrompt } from "./prompt";
@@ -274,6 +276,7 @@ export class LauncherBrowserHelperClient {
           },
           turn: {
             traceId: turn.traceId,
+            diagnosticsParent: traceparent(runtimeDiagnostics()?.context()),
             modelId: turn.modelId,
             reasoning: turn.reasoning,
             capabilities: turn.capabilities,
@@ -327,12 +330,23 @@ export class LauncherBrowserHelperClient {
           ...process.env,
           ELECTRON_RUN_AS_NODE: "1",
           CODEX_CHATGPT_WEB_BROWSER_HELPER_PROCESS: "1",
+          CODEX_CHATGPT_WEB_DIAGNOSTICS_FD: "3",
         },
-        stdio: ["pipe", "pipe", "pipe"],
+        stdio: ["pipe", "pipe", "pipe", "pipe"],
         windowsHide: true,
       },
     );
     this.child = child;
+    let diagnosticBuffer = "";
+    child.stdio[3]?.on("data", (chunk: Buffer) => {
+      diagnosticBuffer += chunk.toString("utf8");
+      if (diagnosticBuffer.length > 128 * 1024) { diagnosticBuffer = ""; return; }
+      let newline: number;
+      while ((newline = diagnosticBuffer.indexOf("\n")) >= 0) {
+        const line = diagnosticBuffer.slice(0, newline); diagnosticBuffer = diagnosticBuffer.slice(newline + 1);
+        try { runtimeDiagnostics()?.ingest(JSON.parse(line)); } catch { /* Invalid diagnostic records cannot affect the browser protocol. */ }
+      }
+    });
     this.ready = new Promise<void>((resolveReady, rejectReady) => {
       this.readyResolve = resolveReady;
       this.readyReject = rejectReady;

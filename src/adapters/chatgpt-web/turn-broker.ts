@@ -1,4 +1,6 @@
 import { createHash, randomBytes } from "node:crypto";
+import { runtimeDiagnostics } from "../../diagnostics/runtime";
+import type { DiagnosticContext, Operation } from "../../diagnostics/instrumentation";
 import { chmodSync, existsSync, lstatSync, mkdirSync, unlinkSync } from "node:fs";
 import { createConnection, createServer, type Server, type Socket } from "node:net";
 import { dirname, isAbsolute, relative, resolve } from "node:path";
@@ -29,6 +31,7 @@ export interface BrokerToolResult {
 }
 
 interface PendingInvocation {
+  diagnostic?: Operation;
   request: BrokerToolRequest;
   resolve: (result: BrokerToolResult) => void;
   reject: (error: Error) => void;
@@ -63,6 +66,7 @@ interface SafeTurnControl {
 
 interface TurnChannel {
   traceId: string;
+  diagnosticContext?: DiagnosticContext;
   externalOwner: boolean;
   environment: PendingTurn;
   bindingId?: string;
@@ -291,6 +295,7 @@ export class TurnBroker implements TurnBrokerOwner {
     const token = opaqueId(handlePrefix);
     const channel: TurnChannel = {
       traceId,
+      diagnosticContext: runtimeDiagnostics()?.context(),
       externalOwner,
       environment: {
         ...environment,
@@ -429,6 +434,8 @@ export class TurnBroker implements TurnBrokerOwner {
       throw new Error(`tool call was completed before it was delivered: ${callId}`);
     }
     channel.invocations.delete(callId);
+    if (result.isError) invocation.diagnostic?.problem(new Error("MCP tool failed"), "MCP tool returned a failure; arguments and output are excluded");
+    invocation.diagnostic?.end(result.isError ? "failed" : "succeeded");
     console.info(`[chatgpt-web] broker trace=${channel.traceId} completed call=${callId.slice(0, 17)} pending=${channel.invocations.size}`);
     invocation.resolve(result);
   }
@@ -488,6 +495,7 @@ export class TurnBroker implements TurnBrokerOwner {
       if (!invocation) continue;
       channel.invocations.delete(callId);
       channel.compactionDeliveryCount += 1;
+      invocation.diagnostic?.end("cancelled", { reason: "compaction" });
       invocation.resolve(structuredClone(queuedResult));
     }
     if (queued.length > 0) {
@@ -1122,7 +1130,8 @@ export class TurnBroker implements TurnBrokerOwner {
       ...(request.freeform === true ? { input: request.input ?? "" } : { arguments: request.arguments ?? {} }),
     };
     return new Promise<BrokerToolResult>((resolveInvoke, rejectInvoke) => {
-      binding.channel.invocations.set(callId, { request: toolRequest, resolve: resolveInvoke, reject: rejectInvoke });
+      const diagnostic = runtimeDiagnostics()?.begin("mcp.tool", { tool: /^[a-zA-Z0-9_.:-]{1,128}$/.test(wireName) ? wireName : "unknown", callId }, binding.channel.diagnosticContext ?? null, { id: binding.channel.traceId });
+      binding.channel.invocations.set(callId, { request: toolRequest, resolve: resolveInvoke, reject: rejectInvoke, diagnostic });
       binding.channel.queuedCallIds.push(callId);
       console.info(
         `[chatgpt-web] broker trace=${binding.channel.traceId} queued call=${callId.slice(0, 17)} tool=${wireName} waiters=${binding.channel.waiters.size}`,
@@ -1175,7 +1184,7 @@ export class TurnBroker implements TurnBrokerOwner {
       waiter.reject(error);
     }
     channel.waiters.clear();
-    for (const invocation of channel.invocations.values()) invocation.reject(error);
+    for (const invocation of channel.invocations.values()) { invocation.diagnostic?.end(error.name === "AbortError" ? "cancelled" : "interrupted"); invocation.reject(error); }
     channel.invocations.clear();
     channel.queuedCallIds = [];
     channel.deliveredCallIds.clear();

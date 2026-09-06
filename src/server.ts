@@ -194,6 +194,10 @@ export class HttpTurnCounter {
     endpoint: HttpTrackedEndpoint = "unspecified",
   ): Promise<Response> {
     const id = this.nextId++;
+    const diagnostic = runtimeDiagnostics()?.begin(`http.${endpoint}`, {}, null);
+    let httpStatus: number | undefined;
+    let diagnosticFailure = false;
+    let diagnosticCancelled = false;
     const abort = new AbortController();
     let finish!: () => void;
     const done = new Promise<void>(resolve => { finish = resolve; });
@@ -212,6 +216,7 @@ export class HttpTurnCounter {
     const release = () => {
       if (released) return;
       released = true;
+      diagnostic?.end(terminalOutcome({ failed: diagnosticFailure, cancelled: abort.signal.aborted || diagnosticCancelled, uncertain: claimUncertain }), { ...(httpStatus ? { "http.response.status_code": httpStatus } : {}) });
       this.active.delete(id);
       if (!abort.signal.aborted && !claimUncertain && releaseClaim) {
         const confirm = () => { try { releaseClaim?.(); } catch { console.error("[chatgpt-web] cleanup ownership receipt could not be released"); } };
@@ -230,7 +235,7 @@ export class HttpTurnCounter {
     else clientSignal?.addEventListener("abort", clientAbortListener, { once: true });
 
     try {
-      const response = await run(abort.signal, identity => {
+      const invoke = () => run(abort.signal, identity => {
         if (!identity.threadId.trim() || !identity.turnId.trim()) {
           throw new Error("Native Codex turn identity must contain a threadId and turnId");
         }
@@ -240,9 +245,13 @@ export class HttpTurnCounter {
         }
         if (!tracked.identity) releaseClaim = this.cleanupClaims?.begin(identity);
         tracked.identity = identity;
+        diagnostic?.identify({ id: `${identity.threadId}:${identity.turnId}` });
         const interruptedReason = this.interrupted.get(this.identityKey(identity));
         if (interruptedReason !== undefined && !abort.signal.aborted) abort.abort(interruptedReason);
       });
+      const response = await (diagnostic ? diagnostic.run(invoke) : invoke());
+      httpStatus = response.status;
+      if (!response.ok && !abort.signal.aborted) { diagnosticFailure = true; diagnostic?.problem(new Error("HTTP request failed"), "Runtime request returned a failure response"); }
       claimUncertain = !response.ok;
       if (!response.body) {
         release();
@@ -280,6 +289,10 @@ export class HttpTurnCounter {
               controller.enqueue(chunk.value);
             } catch (error) {
               claimUncertain = true;
+              if (!abort.signal.aborted && !diagnosticCancelled && !isDiagnosticCancellation(error)) {
+                if (!diagnosticFailure) diagnostic?.problem(error, "Runtime response stream ended unexpectedly");
+                diagnosticFailure = true;
+              } else diagnosticCancelled = true;
               if (!abort.signal.aborted) {
                 emitHttpStreamFailure(reportStreamFailure, streamFailureEvidence(
                   error,
@@ -297,6 +310,7 @@ export class HttpTurnCounter {
           },
           async cancel(reason) {
             claimUncertain = true;
+            diagnosticCancelled = true;
             try {
               await reader.cancel(reason);
             } finally {
@@ -337,6 +351,10 @@ export class HttpTurnCounter {
           }
         } catch (error) {
           claimUncertain = true;
+          if (!abort.signal.aborted && !diagnosticCancelled && !isDiagnosticCancellation(error)) {
+            if (!diagnosticFailure) diagnostic?.problem(error, "Runtime response stream ended unexpectedly");
+            diagnosticFailure = true;
+          } else diagnosticCancelled = true;
           if (!abort.signal.aborted) {
             emitHttpStreamFailure(this.reportStreamFailure, streamFailureEvidence(
               error,
@@ -360,6 +378,10 @@ export class HttpTurnCounter {
       });
     } catch (error) {
       claimUncertain = true;
+      if (!abort.signal.aborted && !diagnosticCancelled && !isDiagnosticCancellation(error)) {
+        if (!diagnosticFailure) diagnostic?.problem(error, "Runtime request failed before completing its response");
+        diagnosticFailure = true;
+      } else diagnosticCancelled = true;
       release();
       throw error;
     }
@@ -1060,6 +1082,7 @@ export function startServer(
         }
       }
       await server.stop(true);
+      await closeRuntimeDiagnostics();
     })().catch(error => {
       process.exitCode = 1;
       console.error(`[codex-chatgpt-web] server shutdown failed: ${error instanceof Error ? error.message : String(error)}`);
@@ -1069,3 +1092,5 @@ export function startServer(
   process.once("SIGTERM", shutdown);
   return server;
 }
+import { closeRuntimeDiagnostics, runtimeDiagnostics } from "./diagnostics/runtime";
+import { isDiagnosticCancellation, terminalOutcome } from "./diagnostics/outcome";

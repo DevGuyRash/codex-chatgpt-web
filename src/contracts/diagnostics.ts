@@ -1,12 +1,9 @@
 /** Data only: recovery actions navigate to existing owners; they never authorize a mutation. */
-export type RecoveryAction = "run-doctor" | "review-configuration" | "review-setup" | "export-logs";
-export interface DiagnosticFinding { path?: string; message: string }
-export interface DiagnosticProblem {
-  code: string;
-  message: string;
-  findings: DiagnosticFinding[];
-  actions: RecoveryAction[];
-}
+import type { Problem } from "../diagnostics/contracts";
+export type RecoveryAction = Problem["actions"][number];
+export type DiagnosticFinding = Problem["findings"][number];
+/** Older Doctor producers may omit the new fields; runtime validation supplies defaults at ingress. */
+export type DiagnosticProblem = Pick<Problem, "code" | "message" | "findings" | "actions"> & Partial<Omit<Problem, "code" | "message" | "findings" | "actions">>;
 export interface DoctorCheck {
   id: string;
   status: "ok" | "warning" | "error";

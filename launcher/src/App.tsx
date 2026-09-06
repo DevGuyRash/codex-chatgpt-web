@@ -12,7 +12,14 @@ import { createPortal } from "react-dom";
 import { ConfigurationRepair, SetupConfigurationReview } from "./ConfigurationRepair";
 import { IntegrationTargets } from "./IntegrationTargets";
 import { CodexRestartContext, CodexRestartDialog, RestartOptions } from "./CodexRestart";
-import { DiagnosticChecks, ErrorToast, RecoveryContext, RecoveryDialog } from "./Recovery";
+import { DiagnosticChecks, ErrorToast, RecoveryContext, RecoveryBusyContext, RecoveryDialog } from "./Recovery";
+import { DiagnosticRequestError } from "../../src/diagnostics/request-error";
+import { DiagnosticsWorkspace } from "./DiagnosticsWorkspace";
+import { DiagnosticsNavigationContext } from "./diagnostics/navigation";
+import { CaptureIndicator } from "./diagnostics/CaptureIndicator";
+import { ActionFeedback } from "./actions/feedback";
+import { withActionFeedback, actionErrorMessage, observeLauncherOperation } from "./actions/api";
+import { launcherActions } from "./actions/controller";
 import { copyFor, type Copy } from "./i18n";
 import { Icon, type IconName } from "./icons";
 import type {
@@ -22,14 +29,13 @@ import type {
   Language,
   LauncherSnapshot,
   LauncherState,
-  LogRecord,
   OperationState,
   Surface,
   CodexRepairPreview,
   RecoveryAction,
 } from "./types";
 
-const api = window.codexWebLauncher;
+const api = window.codexWebLauncher ? withActionFeedback(window.codexWebLauncher) : undefined;
 const PANEL_TRANSITION = { duration: 0.3, ease: [0.16, 1, 0.3, 1] } as const;
 const COMPACT_SIDEBAR_QUERY = "(max-width: 820px)";
 const MCP_GUIDE_MEDIA = [
@@ -42,14 +48,21 @@ export function App() {
   const [snapshot, setSnapshot] = useState<LauncherSnapshot | null>(null);
   const [browser, setBrowser] = useState<BrowserState | null>(null);
   const [operation, setOperation] = useState<OperationState | null>(null);
-  const [logs, setLogs] = useState<LogRecord[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [configurationPreview, setConfigurationPreview] = useState<CodexRepairPreview | null>(null);
   const [recovery, setRecovery] = useState<{ action: "run-doctor" | "review-configuration"; request: number } | null>(null);
   const [recoveryBusy, setRecoveryBusy] = useState(false);
   const [restartRequested, setRestartRequested] = useState(false);
-  const recover = (action: RecoveryAction) => {
-    if (!api || recoveryBusy || configurationPreview || operation?.status === "running") return;
+  const [diagnosticsRequest, setDiagnosticsRequest] = useState<{ traceId?: string; request: number }>();
+  const openDiagnostics = (traceId?: string) => { setRecovery(null); setError(null); setDiagnosticsRequest({ traceId, request: Date.now() }); };
+  const recover = (action: RecoveryAction, context?: { traceId?: string }) => {
+    const traceId = context?.traceId ?? operation?.problem?.traceId;
+    if (action === "open-diagnostics") { openDiagnostics(traceId); return; }
+    if (!api) return;
+    if (recoveryBusy || configurationPreview || operation?.status === "running") {
+      void launcherActions.run(action, async () => { throw new DiagnosticRequestError("busy"); }, { traceId });
+      return;
+    }
     setError(null);
     if (action === "run-doctor" || action === "review-configuration") {
       void api.setBrowserSurfaceActive(false).catch(cause => setError(messageOf(cause)));
@@ -57,7 +70,16 @@ export function App() {
     } else if (action === "review-setup" || action === "export-logs") {
       setRecovery(null);
       setRecoveryBusy(true);
-      void (action === "review-setup" ? api.setupCore() : api.exportLogs()).catch(cause => setError(messageOf(cause))).finally(() => setRecoveryBusy(false));
+      if (action === "review-setup") {
+        void launcherActions.run("review-setup", async () => {
+          if (!traceId || !api.diagnostics.reviewSetup) throw new DiagnosticRequestError("recovery_unavailable");
+          return api.diagnostics.reviewSetup(traceId);
+        }, { traceId }).finally(() => setRecoveryBusy(false));
+      } else {
+        void launcherActions.run("export", () => api.diagnostics.export({ format: "bundle", selection: traceId ? { kind: "operation", traceId } : { kind: "all" } }), { traceId,
+          describe: result => result.cancelled ? undefined : `${result.records ?? "—"} · ${result.incomplete ? "Incomplete · " : ""}${result.path ?? ""}`,
+        }).finally(() => setRecoveryBusy(false));
+      }
     }
   };
   const documentLanguage = snapshot?.state.language ?? "en";
@@ -74,12 +96,9 @@ export function App() {
       if (cancelled) return;
       setSnapshot(next);
       setBrowser(next.browser);
-      setLogs(next.logs);
       setOperation(next.operation);
       if (!previewEventSeen) setConfigurationPreview(next.configurationPreview ?? null);
-      if (next.operation?.status === "failed" && next.operation.name !== "mcp-verification") {
-        setError(next.operation.message);
-      }
+      if (next.operation?.status === "failed") observeLauncherOperation(next.operation);
     }).catch((cause) => setError(messageOf(cause)));
     const unsubscribeState = api.onStateChanged((state) => {
       setSnapshot((current) => current
@@ -96,9 +115,8 @@ export function App() {
     const unsubscribeRestart = api.onCodexRestartRequired?.(() => setRestartRequested(true));
     const unsubscribeOperation = api.onOperation((next) => {
       setOperation(next);
-      if (next.status === "failed" && next.name !== "mcp-verification") setError(next.message);
+      observeLauncherOperation(next);
     });
-    const unsubscribeLog = api.onLog((record) => setLogs((current) => [...current.slice(-299), record]));
     const unsubscribeUpdate = api.onUpdateState((update) => {
       setSnapshot((current) => current ? { ...current, update } : current);
     });
@@ -109,7 +127,6 @@ export function App() {
       unsubscribeConfiguration();
       unsubscribeRestart?.();
       unsubscribeOperation();
-      unsubscribeLog();
       unsubscribeUpdate();
     };
   }, []);
@@ -132,7 +149,7 @@ export function App() {
   const copy = copyFor(language);
 
   return (
-    <CodexRestartContext.Provider value={() => setRestartRequested(true)}><RecoveryContext.Provider value={recover}><div
+    <DiagnosticsNavigationContext.Provider value={openDiagnostics}><CodexRestartContext.Provider value={() => setRestartRequested(true)}><RecoveryContext.Provider value={recover}><RecoveryBusyContext.Provider value={recoveryBusy || operation?.status === "running" || configurationPreview !== null}><div
       className="app-root"
       data-language={language}
       data-platform={snapshot.platform}
@@ -150,12 +167,12 @@ export function App() {
           />
         ) : (
           <LauncherShell
+            diagnosticsRequest={diagnosticsRequest}
             configurationReviewOpen={configurationPreview !== null || recovery !== null || restartRequested}
             browser={browser}
             copy={copy}
             key="launcher"
             language={language}
-            logs={logs}
             operation={operation}
             setError={setError}
             snapshot={snapshot}
@@ -169,7 +186,8 @@ export function App() {
       <AnimatePresence>
         {error ? <ErrorToast copy={copy} language={language} message={error} problem={operation?.status === "failed" && (error === operation.message || error.endsWith(`: ${operation.message}`)) ? operation.problem : undefined} disabled={recoveryBusy || operation?.status === "running" || configurationPreview !== null} onDismiss={() => setError(null)} /> : null}
       </AnimatePresence>
-    </div></RecoveryContext.Provider></CodexRestartContext.Provider>
+      <ActionFeedback language={language} />
+    </div></RecoveryBusyContext.Provider></RecoveryContext.Provider></CodexRestartContext.Provider></DiagnosticsNavigationContext.Provider>
   );
 }
 
@@ -355,21 +373,21 @@ function Onboarding({
 }
 
 function LauncherShell({
+  diagnosticsRequest,
   configurationReviewOpen,
   browser,
   copy,
   language,
-  logs,
   operation,
   setError,
   snapshot,
   updateState,
 }: {
+  diagnosticsRequest?: { traceId?: string; request: number };
   configurationReviewOpen: boolean;
   browser: BrowserState | null;
   copy: Copy;
   language: Language;
-  logs: LogRecord[];
   operation: OperationState | null;
   setError: (error: string | null) => void;
   snapshot: LauncherSnapshot;
@@ -384,6 +402,8 @@ function LauncherShell({
     firstRunZeroRiskSetup ? "mcp" : interactionSetupComplete ? "browser" : "setup",
   );
   const devProfile = snapshot.profile === "development";
+  const [captureRequest, setCaptureRequest] = useState(0);
+  useEffect(() => { if (diagnosticsRequest) setSurface("activity"); }, [diagnosticsRequest]);
   const compactAtMount = useRef(window.matchMedia(COMPACT_SIDEBAR_QUERY).matches).current;
   const [sidebarOpen, setSidebarOpen] = useState(!compactAtMount);
   const [compactSidebar, setCompactSidebar] = useState(compactAtMount);
@@ -675,6 +695,7 @@ function LauncherShell({
       </motion.aside>
 
       <section className="workspace">
+        {api?.diagnostics ? <CaptureIndicator api={api.diagnostics} language={language} open={() => { setCaptureRequest(Date.now()); navigateSurface("activity"); }} /> : null}
         <AnimatePresence mode="wait" initial={false}>
           <motion.div
             animate={{ opacity: 1 }}
@@ -727,7 +748,7 @@ function LauncherShell({
               />
             ) : null}
             {surface === "activity" ? (
-              <ActivitySurface copy={copy} language={language} logs={logs} setError={setError} />
+              <DiagnosticsWorkspace api={api!.diagnostics} language={language} initialTrace={diagnosticsRequest?.traceId} captureRequest={captureRequest > (diagnosticsRequest?.request ?? 0) ? captureRequest : undefined} />
             ) : null}
             {surface === "settings" ? (
               <SettingsSurface
@@ -1562,49 +1583,6 @@ function McpSurface({
   );
 }
 
-function ActivitySurface({
-  copy,
-  language,
-  logs,
-  setError,
-}: {
-  copy: Copy;
-  language: Language;
-  logs: LogRecord[];
-  setError: (error: string | null) => void;
-}) {
-  return (
-    <ContentSurface subtitle={copy.activitySubtitle} title={copy.activityTitle}>
-      <div className="section-heading activity-heading">
-        <span>{copy.recentActivity}</span>
-        <SecondaryButton
-          icon="external"
-          onClick={() => void api!.exportLogs().catch((cause) => setError(messageOf(cause)))}
-        >
-          {copy.exportSafeLog}
-        </SecondaryButton>
-      </div>
-      <div className="activity-table">
-        {logs.length === 0 ? (
-          <div className="surface-empty">
-            <Icon name="logs" />
-            <span>{copy.noLogs}</span>
-          </div>
-        ) : null}
-        {[...logs].reverse().map((record, index) => (
-          <div className="activity-row" key={`${record.at}-${record.event}-${index}`}>
-            <StateDot state={record.level === "error" ? "error" : record.level === "warning" ? "busy" : "ready"} />
-            <div>
-              <strong>{humanEvent(record.event)}</strong>
-              <span>{logDetail(record.detail)}</span>
-            </div>
-            <time>{formatTime(record.at, language)}</time>
-          </div>
-        ))}
-      </div>
-    </ContentSurface>
-  );
-}
 
 function SettingsSurface({
   configureInteractionMode,
@@ -2538,33 +2516,9 @@ function formatBrowserAddress(url: string | undefined, copy: Copy): string {
 }
 
 function messageOf(value: unknown): string {
-  return value instanceof Error ? value.message : String(value);
+  return actionErrorMessage(value);
 }
 
 function platformLabel(value: string): string {
   return value === "darwin" ? "macOS" : value === "win32" ? "Windows" : value === "linux" ? "Linux" : value;
-}
-
-function humanEvent(value: string): string {
-  return value.split(".").map((part) => part.replaceAll("_", " ")).join(" · ");
-}
-
-function logDetail(detail: Record<string, unknown>): string {
-  const entries = Object.entries(detail).filter(([, value]) => value !== undefined && value !== null);
-  if (entries.length === 0) return "";
-  return entries
-    .slice(0, 3)
-    .map(([key, value]) => `${key}: ${typeof value === "string" ? value : JSON.stringify(value)}`)
-    .join(" · ");
-}
-
-function formatTime(value: string, language: Language): string {
-  const date = new Date(value);
-  return Number.isNaN(date.getTime())
-    ? value
-    : date.toLocaleTimeString(language === "ja" ? "ja-JP" : language === "zh-CN" ? "zh-CN" : "en", {
-        hour: "2-digit",
-        minute: "2-digit",
-        second: "2-digit",
-      });
 }

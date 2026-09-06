@@ -53,7 +53,7 @@ test("cancelled and blocked configuration reviews cannot authorize setup", async
   const result = review.request({ ...preview, status: "blocked", approvalId: "" });
   assert.throws(() => review.decide("", true), /Resolve configuration conflicts/);
   review.decide("", false);
-  await assert.rejects(result, /no setup changes were applied/);
+  await assert.rejects(result, { name: "AbortError", code: "ABORT_ERR", message: "Setup preview cancelled; no setup changes were applied" });
   const next = review.request(preview);
   review.cancel("Window closed");
   await assert.rejects(next, /Window closed/);

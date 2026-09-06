@@ -1,3 +1,4 @@
+import { actionErrorMessage } from "./actions/api";
 import { useEffect, useId, useRef, useState } from "react";
 import type { CodexRepairPreview, Language, LauncherApi, LauncherState, SubagentProtocol } from "./types";
 import { ConfigurationCards } from "./ConfigurationCards";
@@ -78,7 +79,7 @@ export function ConfigurationRepair({ api, language, disabled, onBusyChange, onR
       }
     } catch (cause) {
       discard();
-      onError(cause instanceof Error ? cause.message : String(cause));
+      onError(actionErrorMessage(cause));
     } finally {
       setBusy(false);
       onBusyChange(false);
@@ -182,7 +183,7 @@ export function SetupConfigurationReview({ preview, language, decide }: {
     setError(null);
     if (typeof accept === "boolean") setBusy(true);
     try { await decide(preview.approvalId, accept); }
-    catch (cause) { setError(cause instanceof Error ? cause.message : String(cause)); }
+    catch (cause) { setError(actionErrorMessage(cause)); }
     finally { setBusy(false); }
   };
   return <dialog ref={dialog} className="configuration-review-dialog" aria-labelledby={`${id}-title`} onCancel={event => { event.preventDefault(); void submit(false); }}>

@@ -4,6 +4,7 @@ import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { defaultBrokerEndpoint } from "../src/config";
 import { VERSION } from "../src/version";
+import { smokeDiagnostics } from "./smoke-diagnostics";
 
 const require = createRequire(import.meta.url);
 const { validateRuntimeBundle } = require("../launcher/electron/runtime-install.cjs") as {
@@ -171,6 +172,9 @@ try {
     Bun.sleep(10_000).then(() => { throw new Error("relocated daemon did not exit after graceful shutdown"); }),
   ]);
   stoppedGracefully = true;
+  const diagnosticsHome = join(root, "diagnostics state 日本語");
+  mkdirSync(diagnosticsHome, { recursive: true });
+  await smokeDiagnostics(runtimeExecutable, entrypoint, diagnosticsHome);
   process.stdout.write("RELOCATABLE_RUNTIME_SMOKE_OK\n");
 } finally {
   if (!stoppedGracefully) {

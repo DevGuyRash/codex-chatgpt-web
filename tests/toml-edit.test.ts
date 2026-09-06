@@ -67,3 +67,12 @@ test("subtree removal owns contiguous inline siblings and their separators toget
     expect(Bun.TOML.parse(removeTomlPath(text, ["config", "owned"]))).toEqual({ config: { keep: 3 } });
   }
 });
+
+test("scalar editing supports existing indexed tables and inline arrays without moving siblings", () => {
+  const block = '[[hooks.Interrupt]]\n[[hooks.Interrupt.hooks]]\ncommand="keep"\n  timeout  = 30 # explanation\n[[hooks.Interrupt]]\n[[hooks.Interrupt.hooks]]\ncommand="other"\ntimeout=40\n';
+  expect(setTomlScalar(block, ["hooks", "Interrupt", 0, "hooks", 0, "timeout"], 3)).toBe(block.replace('= 30', '= 3'));
+  const inline = 'hooks={Interrupt=[{hooks=[{command="keep", timeout=30}]}, {hooks=[{command="other"}]}]}\n';
+  expect(setTomlScalar(inline, ["hooks", "Interrupt", 0, "hooks", 0, "timeout"], 3)).toBe(inline.replace('timeout=30', 'timeout=3'));
+  expect(setTomlScalar(inline, ["hooks", "Interrupt", 1, "hooks", 0, "timeout"], 3)).toContain('command="other", timeout = 3');
+  expect(() => setTomlScalar(inline, ["hooks", "Interrupt", 9, "hooks", 0, "timeout"], 3)).toThrow();
+});

@@ -19,6 +19,7 @@ import { prepareProfileModelCatalog } from "./profile-model-catalog";
 import { assertProfileBaseLayer } from "./codex-profile-layers";
 import { resolveIntegrationTarget } from "./codex-integration-target";
 import { resolveConfigurationSource } from "./codex-config-occurrences";
+import { prepareCodexInterruptHookRepair } from "./codex-interrupt-hook";
 import type { IntegrationTarget, ConfigurationResolutionSelection } from "./contracts/codex-integration";
 export type { CodexRepairPreview, CodexRepairChange } from "./contracts/codex-integration";
 
@@ -60,12 +61,26 @@ function materialize(protocol: SubagentProtocol, options: RepairOptions = {}): M
   const original = snapshots[0]!.data?.toString("utf8");
   if (original === undefined) return blocked("Codex configuration is missing; restore or review it before repair");
   let prepared: ReturnType<typeof prepareOwnedCodexConfiguration>;
+  let commentedHookPaths: string[] = [];
   try {
     if (target?.kind === "profile") {
       const path = join(target.codexHome, "config.toml");
       assertProfileBaseLayer(snapshots.find(input => input.path === path)?.data?.toString("utf8") ?? "", path);
     }
-    prepared = prepareOwnedCodexConfiguration(resolveConfigurationSource(original, options.resolutions ?? []), journal, { ...config, subagentProtocol: protocol });
+    const source = resolveConfigurationSource(original, options.resolutions ?? []);
+    const conflicts = inspectInstalledCodexConfig(source, journal);
+    const hook = conflicts.some(conflict => conflict.category === "hook_changed")
+      && !conflicts.some(conflict => ["invalid_config", "ownership_conflict"].includes(conflict.category))
+      ? prepareCodexInterruptHookRepair(source, journal.configPath, journal.interruptHook) : undefined;
+    commentedHookPaths = hook?.commentedPaths ?? [];
+    prepared = prepareOwnedCodexConfiguration(hook?.text ?? source,
+      hook ? { ...journal, interruptHook: hook.installed } : journal, { ...config, subagentProtocol: protocol });
+    if (hook) prepared.conflicts = conflicts.flatMap(conflict => conflict.category === "hook_changed"
+      ? describeCodexConfigurationChanges(source, hook.text).map(change => ({
+        path: change.path, category: commentedHookPaths.includes(change.path) || change.currentState === "commented_out" ? "commented_out" as const : change.current === null ? "missing" as const : "value_changed" as const,
+        current: change.current, ...(change.proposed !== null ? { expected: change.proposed } : {}),
+        message: `Managed Interrupt setting ${change.path} ${commentedHookPaths.includes(change.path) || change.currentState === "commented_out" ? "is commented out" : change.current === null ? "is missing" : "differs from its installed value"}; review the proposed restoration`,
+      })) : [conflict]);
   } catch (error) {
     if (!(error instanceof CodexConfigurationError)) throw error;
     preview.conflicts = error.conflicts;
@@ -76,7 +91,7 @@ function materialize(protocol: SubagentProtocol, options: RepairOptions = {}): M
   if (catalog) snapshots.push(...catalog.expected);
   preview.conflicts = prepared.conflicts;
   preview.textChanges = describeCodexSourceChange(getCodexConfigPath(target), original, text);
-  preview.changes = describeCodexConfigurationChanges(original, text);
+  preview.changes = describeCodexConfigurationChanges(original, text).map(change => commentedHookPaths.includes(change.path) ? { ...change, currentState: "commented_out" } : change);
   if (journal.installed.subagent_protocol !== protocol) preview.changes.push({ path: "integration.subagent_protocol", current: journal.installed.subagent_protocol, proposed: protocol });
   const journalData = serializeJournal(next);
   const writes = [{ path: getCodexJournalRecoveryPath(target), data: journalData }];

@@ -7,6 +7,7 @@ const {
   app,
   BrowserWindow,
   dialog,
+  clipboard,
   ipcMain,
   Menu,
   nativeImage,
@@ -20,15 +21,17 @@ const { BrowserControlServer } = require("./control-server.cjs");
 const { getAutostart, setAutostart } = require("./autostart.cjs");
 const {
   createLogger,
-  exportSanitizedLogs,
+  registerDiagnosticsIpc,
   installProcessDiagnosticGuards,
   registerLoggedIpc,
+  verifyPackagedDiagnostics,
 } = require("./logging.cjs");
 const { RuntimeHost } = require("./runtime.cjs");
 const { ConfigurationReview } = require("./configuration-review.cjs");
 const { CodexRestartController } = require("./codex-restart.cjs");
 const { createRestartAdapter } = require("./codex-restart-platforms.cjs");
 let codexRestartController;
+let diagnosticsLogger;
 const { ensurePackagedRuntime, waitForPackagedRuntimeSource } = require("./runtime-install.cjs");
 const { RuntimeSupervisor } = require("./runtime-supervisor.cjs");
 const { DEVELOPMENT_PROFILE, resolveLauncherProfile } = require("./profile.cjs");
@@ -352,7 +355,7 @@ function createWindow({ logger, stateStore, windowStatePath, startHidden }) {
       },
     }),
     webPreferences: {
-      preload: path.join(__dirname, "preload.cjs"),
+      preload: path.join(__dirname, "generated", "preload.cjs"),
       contextIsolation: true,
       nodeIntegration: false,
       sandbox: true,
@@ -468,7 +471,6 @@ function registerIpc({ logger, stateStore }) {
       manual: require("./integration-target.cjs").integrationConnectorNames(LAUNCHER_PROFILE.integrationTarget).manual,
     },
     mcpCredentialsConfigured: runtimeHost?.mcpCredentialsConfigured() ?? false,
-    logs: logger.recent(),
     urls: { github: GITHUB_URL, x: X_URL, connectors: CONNECTORS_URL, tunnels: TUNNELS_URL, keys: KEYS_URL },
     platform: process.platform,
     packaged: app.isPackaged,
@@ -924,22 +926,32 @@ function registerIpc({ logger, stateStore }) {
     return stateStore.update({ [key]: value === true });
   });
   handle("launcher:sidebar-state", (_event, value) => stateStore.update(validateSidebarState(value)));
-  handle("launcher:logs", (_event, limit) => logger.recent(limit));
-  handle("launcher:export-logs", async () => {
-    const date = new Date().toISOString().slice(0, 10);
+  const chooseDiagnosticExport = async (format) => {
+    const date = new Date().toISOString().replace(/[:.]/g, "-");
     const copy = nativeCopyFor(stateStore.read().language);
+    const extension = format === "bundle" ? "zip" : format === "html" ? "html" : "json";
     const result = await dialog.showSaveDialog(mainWindow, {
       title: copy.exportDiagnostics,
-      defaultPath: path.join(app.getPath("documents"), `codex-web-gpt-diagnostics-${date}.jsonl`),
-      filters: [{ name: "JSON Lines", extensions: ["jsonl"] }],
+      defaultPath: path.join(app.getPath("documents"), `codex-web-gpt-diagnostics-${date}.${extension}`),
+      filters: [{ name: "Diagnostic report", extensions: [extension] }],
     });
-    if (result.canceled || !result.filePath) return null;
-    const recordCount = exportSanitizedLogs({
-      filePath: logger.filePath,
-      destinationPath: result.filePath,
-    });
-    logger.info("launcher.logs_exported", { recordCount });
-    return result.filePath;
+    return result.canceled ? undefined : result.filePath;
+  };
+  registerDiagnosticsIpc({ handle, logger, chooseExport: chooseDiagnosticExport, copyText: text => clipboard.writeText(text), runtime: runtimeSupervisor, reviewUpgrade: async () => {
+    const upgrade = await runtimeHost.upgradeManagedRuntime();
+    if (upgrade.updated) {
+      const state = stateStore.update({ coreSetupComplete: true, codexCatalogVerified: false, codexRestartRequired: true });
+      send("launcher:state-changed", state);
+      startCatalogVerificationMonitor({ logger, stateStore });
+      send("launcher:codex-restart-required", null);
+    }
+    return upgrade;
+  } });
+  handle("launcher:export-logs", async () => {
+    const destination = await chooseDiagnosticExport("bundle");
+    if (!destination) return null;
+    await logger.client.export({ format: "bundle" }, destination);
+    return destination;
   });
   handle("launcher:update-install", async () => {
     if (!updateController) throw new Error("Launcher updates are unavailable");
@@ -981,6 +993,7 @@ async function requestQuit({ idleOnly = false, beforeClose } = {}) {
     await beforeClose?.();
     browserHost?.destroy();
     await browserControl?.close();
+    await diagnosticsLogger?.close();
     exitCommitted = true;
     app.quit();
     return { ok: true };
@@ -1061,8 +1074,14 @@ async function start() {
   }
   const logger = createLogger({
     filePath: path.join(app.getPath("logs"), "launcher.jsonl"),
-    publish: (record) => send("launcher:log", record),
+    invocation: require("./runtime-command.cjs").embeddedRuntimeInvocation({ app, sourceRoot: SOURCE_ROOT, args: ["--home", CORE_HOME, "diagnostics", "worker"] }),
+    target: LAUNCHER_PROFILE.integrationTarget?.id || "base",
+    environment: IS_DEV_PROFILE ? "development" : "production",
+    version: app.getVersion(),
   });
+  diagnosticsLogger = logger;
+  logger.client?.subscribe(() => send("launcher:diagnostics-changed", {}));
+  await logger.ready;
   const startHidden = process.argv.includes("--hidden") && stateStore.read().onboardingComplete;
   nativeTheme.themeSource = "system";
   mainWindow = createWindow({
@@ -1181,15 +1200,20 @@ async function start() {
       throw new Error("Packaged launcher smoke test requires an absolute CODEX_WEB_GPT_SMOKE_FILE");
     }
     fs.mkdirSync(path.dirname(markerPath), { recursive: true });
+    // The isolated package fixture tests the workspace, not external onboarding links.
+    send("launcher:state-changed", stateStore.update({ onboardingComplete: true, language: "en" }));
+    await verifyPackagedDiagnostics(logger, path.join(path.dirname(markerPath), "diagnostics-report.html"), mainWindow.webContents);
     fs.writeFileSync(markerPath, `${JSON.stringify({
       ok: true,
       version: app.getVersion(),
       platform: process.platform,
       packaged: app.isPackaged,
       runtimeVerified: true,
+      diagnosticsVerified: true,
     })}\n`);
     browserHost.destroy();
     await browserControl.close();
+    await logger.close();
     mainWindow.destroy();
     app.quit();
     return;

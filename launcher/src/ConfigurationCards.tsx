@@ -1,4 +1,5 @@
 import { useId, useState } from "react";
+import { integrationSummary, settingLabel } from "./diagnostics/setting-labels";
 import type { CodexRepairPreview, Language } from "./types";
 
 const copy = {
@@ -57,15 +58,15 @@ export function ConfigurationCards({ preview, language, selectOccurrence }: {
         const hook = group.id === "interrupt";
         const trust = hook && setting.path.endsWith("trusted_hash");
         const command = hook && setting.path.endsWith("command");
-        const name = command ? review.cleanup : trust ? labels.trust : hook && setting.path.endsWith("timeout") ? labels.timeout : setting.path.endsWith("base_url") ? review.address : group.id === "subagents" ? review.compatibility : (group.id === "integrations" ? review.integrations : labels[group.id])[0];
+        const name = settingLabel(setting.path, language, command ? review.cleanup : trust ? labels.trust : hook && setting.path.endsWith("timeout") ? labels.timeout : setting.path.endsWith("base_url") ? review.address : group.id === "subagents" ? review.compatibility : (group.id === "integrations" ? review.integrations : labels[group.id])[0]);
         const changeKind = kind(setting);
-        const display = (item: unknown, proposed = false) => item == null ? labels.missing : trust ? proposed && setting.current !== setting.proposed ? labels.approve : labels.approved : command ? proposed && changeKind === "changed" ? review.helper : labels.execute : value(item);
+        const display = (item: unknown, proposed = false) => item == null ? labels.missing : trust ? proposed && setting.current !== setting.proposed ? labels.approve : labels.approved : command ? proposed && changeKind === "changed" ? review.helper : labels.execute : typeof item === "boolean" ? language === "en" ? item ? "Enabled" : "Disabled" : language === "zh-CN" ? item ? "启用" : "禁用" : item ? "有効" : "無効" : value(item);
         return <article className={`configuration-change-card change-${changeKind}`} key={setting.path}>
           <h4>{name} <small>{review[changeKind]}</small></h4>
-          <div className="configuration-value-pair"><section className="configuration-before"><h5>{review.before}</h5>
+          {changeKind === "unchanged" ? <p className="configuration-unchanged-value">{group.id === "integrations" ? integrationSummary(setting.current, language) : display(setting.current)}</p> : <div className="configuration-value-pair"><section className="configuration-before"><h5>{review.before}</h5>
             <p>{setting.state === "ambiguous" ? labels.ambiguous : setting.state === "commented_out" ? labels.inactive : <code>{display(setting.current)}</code>}</p>
             {setting.inherited ? <small>{labels.inherited}</small> : null}
-          </section><section className="configuration-after"><h5>{review.after}</h5><p>{preview.status !== "ready" ? labels.blocked : <code>{display(setting.proposed, true)}</code>}</p></section></div>
+          </section><section className="configuration-after"><h5>{review.after}</h5><p>{preview.status !== "ready" ? labels.blocked : <code>{display(setting.proposed, true)}</code>}</p></section></div>}
           {trust ? <p>{labels.hash}</p> : null}
           {setting.findings.length ? <ul className="diagnostic-findings">{setting.findings.map((finding, index) => <li key={index}>{finding.message}</li>)}</ul> : null}
           {setting.occurrences.length ? <details open={setting.resolutionRequired || undefined} className="configuration-occurrences"><summary>{labels.sources} ({setting.occurrences.length})</summary>

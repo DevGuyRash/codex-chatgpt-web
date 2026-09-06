@@ -32,7 +32,9 @@ export function describeCodexConfigurationChanges(before: string, after: string)
     } else if ((record(left) || left === undefined) && (record(right) || right === undefined)) {
       for (const key of new Set([...Object.keys(left ?? {}), ...Object.keys(right ?? {})])) walk(left?.[key], right?.[key], [...path, key]);
     } else {
-      const locations = sourceAssignments(source, path.map(String));
+      const locations = path.some(key => typeof key === "number")
+        ? discoverConfigurationSource(before).occurrences.filter(item => item.kind === "assignment" && JSON.stringify(item.path) === JSON.stringify(path))
+        : sourceAssignments(source, path.map(String));
       changes.push({ path: configurationPathName(path), current: scalar(left), proposed: scalar(right),
         currentState: left !== undefined ? "active" : locations.length ? "commented_out" : "missing",
         currentLines: locations.map(item => item.line),

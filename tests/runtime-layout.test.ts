@@ -1,5 +1,5 @@
 import { afterEach, expect, test } from "bun:test";
-import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -64,6 +64,24 @@ test("installed Bun discovery ignores a temporary self-extract executable", () =
     pathValue: "",
     candidates: [ephemeralBun, process.execPath],
   })).toBe(process.execPath);
+});
+
+test("installed Bun discovery keeps the running durable runtime ahead of a PATH wrapper", () => {
+  // Service commands must not replace the runtime already executing setup with a shell shim.
+  const root = mkdtempSync(join(process.cwd(), ".runtime-layout-test-"));
+  roots.push(root);
+  writeFileSync(join(root, process.platform === "win32" ? "bun.exe" : "bun"), "not a working Bun runtime", { mode: 0o755 });
+  const overrides = [process.env.CODEX_CHATGPT_WEB_BUN, process.env.CODEX_WEB_GPT_BUN];
+  delete process.env.CODEX_CHATGPT_WEB_BUN;
+  delete process.env.CODEX_WEB_GPT_BUN;
+  try {
+    expect(installedBunExecutable({ pathValue: root })).toBe(process.execPath);
+  } finally {
+    for (const [index, key] of ["CODEX_CHATGPT_WEB_BUN", "CODEX_WEB_GPT_BUN"].entries()) {
+      const value = overrides[index];
+      if (value === undefined) delete process.env[key]; else process.env[key] = value;
+    }
+  }
 });
 
 test("Windows uses a stable native named pipe for the outer Codex tool broker", () => {

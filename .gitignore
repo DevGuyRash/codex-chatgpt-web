@@ -14,6 +14,9 @@ runtime/
 launcher/build/
 launcher/release/
 launcher/artifacts/
+launcher/electron/generated/
 .playwright-cli/
 output/
 notes.md
+context/verify-scratch-*/
+context/*-failure.png

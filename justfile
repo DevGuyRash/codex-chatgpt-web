@@ -23,8 +23,8 @@ browser-install:
 
 # Verify root and launcher code, audits, builds, offline Chromium fixtures, and workflows
 ci:
-    CHATGPT_TEST_CHROME_EXECUTABLE="${CHATGPT_TEST_CHROME_EXECUTABLE:-$({{ quote(bun) }} -e 'import { chromium } from "playwright-core"; console.log(chromium.executablePath())')}" {{ quote(bun) }} run verify
     actionlint .github/workflows/*.yml
+    CHATGPT_TEST_CHROME_EXECUTABLE="${CHATGPT_TEST_CHROME_EXECUTABLE:-$({{ quote(bun) }} -e 'import { chromium } from "playwright-core"; console.log(chromium.executablePath())')}" {{ quote(bun) }} run verify
 
 # Run root and launcher behavior tests without packaging or dependency audits
 test:

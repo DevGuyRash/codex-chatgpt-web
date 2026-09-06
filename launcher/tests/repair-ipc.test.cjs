@@ -2,7 +2,7 @@ const test = require("node:test");
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const vm = require("node:vm");
-const { registerLoggedIpc } = require("../electron/logging.cjs");
+const { registerLoggedIpc, registerDiagnosticsIpc } = require("../electron/logging.cjs");
 const { ConfigurationReview } = require("../electron/configuration-review.cjs");
 
 test("profile migration uses the existing setup IPC owner and preserves its explicit migration option", async () => {
@@ -14,14 +14,14 @@ test("profile migration uses the existing setup IPC owner and preserves its expl
   const registration = main.slice(main.indexOf("function registerIpc("), main.indexOf("async function requestQuit("));
   const stateStore = { read: () => ({ browserInteractionMode: "manual" }), update() {} };
   vm.runInNewContext(`${registration}\nregisterIpc({ logger: { error() {}, warn() {} }, stateStore });`, {
-    stateStore, IS_DEV_PROFILE: false, IS_CODEX_PROFILE: true, registerLoggedIpc,
+    stateStore, IS_DEV_PROFILE: false, IS_CODEX_PROFILE: true, registerLoggedIpc, registerDiagnosticsIpc, runtimeSupervisor: null,
     ipcMain: { handle: (name, handler) => handlers.set(name, handler), on() {} }, publishOperation() {},
     runtimeHost: { setupCore: async options => { if (failSetup) throw new Error("Setup cancelled"); calls.push(JSON.parse(JSON.stringify(options))); return { mode: "browser-only", stdout: "" }; }, runtimeConfigSnapshot: () => ({ config: {} }) },
     send: name => events.push(name),
     browserHost: { returnToIdle: async () => {} }, startCatalogVerificationMonitor() {},
   });
   let api;
-  vm.runInNewContext(fs.readFileSync(require.resolve("../electron/preload.cjs"), "utf8"), {
+  vm.runInNewContext(fs.readFileSync(require.resolve("../electron/generated/preload.cjs"), "utf8"), {
     require: () => ({ contextBridge: { exposeInMainWorld: (_name, value) => { api = value; } }, ipcRenderer: { invoke: (name, ...args) => handlers.get(name)({}, ...args) } }),
   });
   await api.setupCore({ migrateBase: true });
@@ -42,7 +42,7 @@ test("repair preload arguments reach the registered main handlers without the El
   const state = { codexRestartRequired: true };
   const context = {
     configurationReview: new ConfigurationReview({ publish() {} }),
-    registerLoggedIpc,
+    registerLoggedIpc, registerDiagnosticsIpc, runtimeSupervisor: null,
     publishOperation: operation => operations.push(operation),
     ipcMain: { handle: (name, handler) => handlers.set(name, handler), on() {} },
     runtimeHost: {
@@ -53,7 +53,7 @@ test("repair preload arguments reach the registered main handlers without the El
   };
   vm.runInNewContext(`${registration}\nregisterIpc({ logger: { error() {} }, stateStore: { update() { return state; } } });`, { ...context, state });
   let api;
-  vm.runInNewContext(fs.readFileSync(require.resolve("../electron/preload.cjs"), "utf8"), {
+  vm.runInNewContext(fs.readFileSync(require.resolve("../electron/generated/preload.cjs"), "utf8"), {
     require: name => { assert.equal(name, "electron"); return {
       contextBridge: { exposeInMainWorld: (_name, value) => { api = value; } },
       ipcRenderer: { invoke: (name, ...args) => handlers.get(name)({ sender: {} }, ...args) },

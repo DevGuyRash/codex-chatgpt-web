@@ -6,19 +6,19 @@ test("operation and doctor findings use the same allowlisted recovery policy", (
   const source = { code: "codex_configuration_conflict", message: "Configuration differs", findings: [{ path: "features.multi_agent_v2", message: "Changed by the user" }] };
   const error = runtimeFailure(`CGW_ERROR_V1 ${JSON.stringify({ version: 1, ...source, actions: ["delete-files"] })}\n`, "failed");
   const problem = problemFor(error);
-  assert.deepEqual(problem.actions, ["review-configuration", "run-doctor"]);
+  assert.deepEqual(problem.actions, ["review-configuration", "open-diagnostics", "run-doctor"]);
   assert.deepEqual(withRecovery({ ok: false, checks: [{ id: "codex", status: "error", ...source }] }).checks[0].problem, problem);
   assert.deepEqual(problem.findings, source.findings);
 });
 test("unknown messages never imply mutation or configuration ownership", () => {
   for (const message of ["Please repair Codex", "CGW_ERROR_V1 invalid", 'CGW_ERROR_V1 {"version":1,"code":"delete-files"}']) {
-    assert.deepEqual(problemFor(runtimeFailure(message, message)).actions, ["run-doctor", "export-logs"]);
+    assert.deepEqual(problemFor(runtimeFailure(message, message)).actions, ["open-diagnostics", "run-doctor", "export-logs"]);
   }
-  assert.deepEqual(problemFor({ code: "codex_route_missing", message: "Absent" }).actions, ["review-setup", "run-doctor"]);
+  assert.deepEqual(problemFor({ code: "codex_route_missing", message: "Absent" }).actions, ["review-setup", "open-diagnostics"]);
   assert.doesNotMatch(runtimeFailure('CGW_ERROR_V1 {"private":"not-for-logs"}', "not-for-logs").message, /not-for-logs/);
 });
 
 test("Doctor does not route an unsupported diagnosis back into the same diagnosis", () => {
   const report = withRecovery({ ok: true, checks: [{ id: "optional", status: "warning", code: "target_unavailable", message: "Optional profile is unavailable", actions: ["delete-files"] }] });
-  assert.deepEqual(report.checks[0].problem.actions, ["export-logs"]);
+  assert.deepEqual(report.checks[0].problem.actions, ["open-diagnostics", "export-logs"]);
 });

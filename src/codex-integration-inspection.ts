@@ -2,6 +2,7 @@ import { parseTomlValue } from "./toml-edit";
 import { inspectCodexInterruptHook } from "./codex-interrupt-hook";
 import { inspectCodexConfigSource, sourceAssignments } from "./codex-config-source";
 import type { AnyCodexIntegrationJournal } from "./codex-integration-shared";
+import { ownedCodexScalarSettings } from "./codex-owned-settings";
 
 import type { CodexIntegrationConflict } from "./contracts/codex-integration";
 export type { CodexIntegrationConflict } from "./contracts/codex-integration";
@@ -47,22 +48,11 @@ export function inspectInstalledCodexConfig(text: string, journal: InspectableJo
       message: `Codex ${key} ${current === undefined ? disabled.length ? `is commented out at line${disabled.length > 1 ? "s" : ""} ${disabled.map(item => item.line).join(", ")} (inactive)` : "is missing" : "differs from the installed value"}; review the proposed repair before changing it`,
     });
   };
-  check(["openai_base_url"], journal.installed.openai_base_url);
-  if (journal.version === 10 && journal.installed.model_catalog_json) check(["model_catalog_json"], journal.installed.model_catalog_json);
-  if (journal.version === 10 && journal.installed.model_provider) check(["model_provider"], journal.installed.model_provider);
-  if (journal.version === 9 || journal.version === 10) {
-    check(["experimental_realtime_webrtc_call_base_url"], journal.installed.experimental_realtime_webrtc_call_base_url);
-  }
+  for (const setting of ownedCodexScalarSettings(journal, document)) check(setting.path, setting.expected);
   if (journal.installed.subagent_protocol === "compatibility-v1") {
     if (!journal.previousMultiAgent || !journal.previousMultiAgentV2 || !journal.previousAgentMaxDepth
       || !Number.isSafeInteger(journal.installed.agent_max_depth) || journal.installed.agent_max_depth! < 2) {
       conflicts.push({ path: "journal", category: "ownership_conflict", message: "The installation journal is missing its Compatibility V1 ownership evidence" });
-    } else {
-      check(["features", "multi_agent"], true);
-      const v2 = at(document, ["features", "multi_agent_v2"]);
-      // Both Codex's legacy boolean and its structured feature syntax describe the same flag.
-      check(table(v2) ? ["features", "multi_agent_v2", "enabled"] : ["features", "multi_agent_v2"], false);
-      check(["agents", "max_depth"], journal.installed.agent_max_depth!);
     }
   }
   if (journal.version === 10 && inspectCodexInterruptHook(document, journal.interruptHook) !== "valid") {

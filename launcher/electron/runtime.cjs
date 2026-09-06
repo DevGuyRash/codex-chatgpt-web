@@ -13,6 +13,7 @@ const {
 } = require("./connector-identity.cjs");
 const { embeddedRuntimeInvocation, runtimeInvocation } = require("./runtime-command.cjs");
 const { redactText } = require("./logging.cjs");
+const { isDiagnosticCancellation } = require("./generated/diagnostics.cjs");
 const { parseConfigurationPreview, resolutionArguments } = require("./configuration-review.cjs");
 const { problemFor, runtimeFailure, withRecovery } = require("./problems.cjs");
 const { DETACH_OWNED_CHILD, terminateOwnedProcessTree } = require("./process-tree.cjs");
@@ -596,6 +597,10 @@ class RuntimeHost {
   }
 
   async run(name, args, options = {}) {
+    return this.logger.operation ? this.logger.operation(options.diagnosticStage || `${name}: ${args[0] || "runtime"}`, () => this.runCommand(name, args, options)) : this.runCommand(name, args, options);
+  }
+
+  async runCommand(name, args, options = {}) {
     if (this.integrationTarget) args = ["--home", this.integrationTarget.kind === "profile" ? path.dirname(path.dirname(this.coreHome)) : this.coreHome, "--codex-home", this.integrationTarget.codexHome, ...(this.integrationTarget.kind === "profile" ? ["--codex-profile", this.integrationTarget.profile] : []), ...args];
     if (this.active) throw new Error(`Another launcher operation is active: ${this.active}`);
     if (this.activeChild
@@ -621,7 +626,8 @@ class RuntimeHost {
           ? { ...options.environment }
           : { ...process.env };
         Object.assign(environment, {
-          CODEX_CHATGPT_WEB_STRUCTURED_ERRORS: "1",
+          CODEX_CHATGPT_WEB_STRUCTURED_ERRORS: "2",
+          ...(this.logger.environment?.() || {}),
           CODEX_CHATGPT_WEB_BROWSER_HOST_DESCRIPTOR: this.browserDescriptorPath,
           ...(options.env || {}),
           ...(this.coreHome ? { CODEX_CHATGPT_WEB_HOME: this.coreHome } : {}),
@@ -631,9 +637,10 @@ class RuntimeHost {
           cwd: invocation.cwd,
           detached: DETACH_OWNED_CHILD,
           env: environment,
-          stdio: [options.controlStdin ? "pipe" : "ignore", "pipe", "pipe"],
+          stdio: [options.controlStdin ? "pipe" : "ignore", "pipe", "pipe", ...(this.logger.attachChild ? ["pipe"] : [])],
           windowsHide: true,
         });
+        this.logger.attachChild?.(child);
         this.activeChild = child;
         const stdout = [];
         const stderr = [];
@@ -650,7 +657,7 @@ class RuntimeHost {
           if (options.privateOutput) return;
           this.logger.warn("runtime.stderr", { operation: name, line });
           this.publishOperation?.({ name, status: "running", message: redactText(line) });
-        }, recordPipeError("stderr"), "CGW_ERROR_V1 ");
+        }, recordPipeError("stderr"), "CGW_ERROR_V");
         let settled = false;
         let timedOut = null;
         let terminationTimeout = null;
@@ -737,19 +744,16 @@ class RuntimeHost {
       });
       const acceptedExitCodes = options.acceptedExitCodes || [0];
       if (!acceptedExitCodes.includes(result.code)) {
-        const detail = result.stderr.trim() || result.stdout.trim() || `exit ${result.code}`;
-        throw runtimeFailure(result.stderr, detail);
+        const detail = `${name} failed (exit ${result.code}); open Diagnostics to inspect the failed stage`;
+        throw runtimeFailure(result.stderr, detail, { exitCode: result.code, signal: result.signal, ...this.logger.currentContext?.() });
       }
       this.logger.info("runtime.operation_completed", { name });
       this.publishOperation?.({ name, status: "completed", message: options.successMessage || "Completed" });
       return result;
     } catch (error) {
-      const message = options.privateOutput
-        ? error?.code === "codex_configuration_conflict" ? "Codex configuration differs from this installation. Review the proposed repair before changing it."
-          : "The operation did not complete. Run Doctor or export diagnostic logs for more information."
-        : redactText(error instanceof Error ? error.message : String(error));
-      const problem = problemFor(error, message);
-      if (options.privateOutput) problem.message = message;
+      if (isDiagnosticCancellation(error)) { this.publishOperation?.({ name, status: "cancelled", message: "Operation cancelled" }); throw error; }
+      const problem = problemFor(error, options.privateOutput ? `${name} could not complete; open Diagnostics for its stage and recovery information` : redactText(error instanceof Error ? error.message : String(error)), this.logger.currentContext?.());
+      const message = problem.message;
       this.logger.error("runtime.operation_failed", { name, message });
       this.publishOperation?.({ name, status: "failed", message, problem });
       throw Object.assign(new Error(message), { problem, code: problem.code, findings: problem.findings });
@@ -1402,6 +1406,10 @@ class RuntimeHost {
   }
 
   async runSetup(name, args, options) {
+    return this.logger.operation ? this.logger.operation(name, () => this.runSetupTransaction(name, args, options)) : this.runSetupTransaction(name, args, options);
+  }
+
+  async runSetupTransaction(name, args, options) {
     if (this.integrationTarget?.kind === "profile" && !args.includes("--port")) args = [...args, "--port", String(this.runtimePort)];
     if (this.currentOperation()) throw new Error(`Another launcher operation is active: ${this.currentOperation()}`);
     let previousRuntime = this.runtimeConfigSnapshot();
@@ -1414,13 +1422,17 @@ class RuntimeHost {
         if (!this.reviewConfiguration) throw new Error("Setup requires a configuration preview in the launcher");
         const preparePreview = async requestedArgs => {
           const result = await this.run(name, [...requestedArgs, "--preview-json"], {
+            diagnosticStage: "setup.preview",
             ...options, privateOutput: true, message: "Preparing configuration changes for review",
             successMessage: "Configuration preview ready", timeoutMs: 15_000,
           });
-          return parseConfigurationPreview(result.stdout);
+          const preview = parseConfigurationPreview(result.stdout);
+          this.logger.event?.("setup.preview_ready", "Configuration review prepared", { protocol: preview.protocol, previewFingerprint: preview.approvalId, status: preview.status, changes: preview.changes.length });
+          return preview;
         };
         let preview = await preparePreview(args);
         const approved = await this.reviewConfiguration(preview, async decision => {
+          this.logger.event?.("setup.preview_changed", "Configuration review choices changed", { protocol: typeof decision === "string" ? decision : preview.protocol });
           const nextArgs = [...args];
           if (typeof decision === "string") {
             if (!["native", "compatibility-v1"].includes(decision)) throw new Error("Choose a supported subagent protocol");
@@ -1438,8 +1450,10 @@ class RuntimeHost {
           return next;
         });
         if (approved !== preview.approvalId || preview.status !== "ready") throw new Error("Exact setup preview approval is required");
+        this.logger.event?.("setup.approved", "User approved this configuration preview", { protocol: preview.protocol, previewFingerprint: preview.approvalId });
         args = [...args, "--approve-configuration", approved];
         await this.run(name, [...args, "--preflight-only"], {
+          diagnosticStage: "setup.preflight",
           ...options,
           privateOutput: true,
           message: "Validating Codex configuration before changing the runtime",
@@ -1453,7 +1467,8 @@ class RuntimeHost {
       if (previousRuntime.owner === "external") this.supervisor.prepareExternalMigration();
       else await this.supervisor.stopForSetup();
       setupCommandStarted = true;
-      const result = await this.run(name, args, { ...options, privateOutput: this.launcherProfile === "production" });
+      const result = await this.run(name, args, { ...options, diagnosticStage: "setup.apply", privateOutput: this.launcherProfile === "production" });
+      this.logger.event?.("setup.runtime_starting", "Starting the configured runtime");
       const runtime = await this.supervisor.startIfConfigured();
       if (runtime.status !== "ready") {
         throw new Error(`Setup completed, but the launcher-owned runtime is ${runtime.status}: ${runtime.detail || "not ready"}`);
@@ -1509,7 +1524,12 @@ class RuntimeHost {
         ...(rolledBack ? ["incomplete first-time setup was rolled back"] : []),
         ...failures,
       ].join("\n");
-      const problem = error?.problem || problemFor(error, message);
+      if (isDiagnosticCancellation(error) && failures.length === 0) {
+        this.publishOperation?.({ name, status: "cancelled", message: "Setup cancelled" });
+        throw error;
+      }
+      const problem = problemFor(error, message, { recovery: !runtimeTransitionStarted ? "not-needed" : failures.length ? "incomplete" : "completed", ...this.logger.currentContext?.() });
+      this.logger.event?.("setup.recovery", "Setup recovery outcome recorded", { runtimeTransitionStarted, setupCommandStarted, recovery: problem.recovery, rollbackFailures: failures.length });
       this.publishOperation?.({ name, status: "failed", message, problem });
       const failure = new Error(message);
       failure.problem = problem;

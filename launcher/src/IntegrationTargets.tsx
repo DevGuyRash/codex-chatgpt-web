@@ -1,3 +1,4 @@
+import { actionErrorMessage } from "./actions/api";
 import { useEffect, useState } from "react";
 import type { Language, LauncherApi } from "./types";
 
@@ -30,12 +31,12 @@ export function IntegrationTargets({ api, language, disabled }: { api: Pick<Laun
   };
   useEffect(() => { let mounted = true; void api.integrationTargets().then(result => {
     if (mounted) { setData(result); setSelected(result.selected.id); setHome(result.selected.codexHome); setName(suggestedName(result)); }
-  }, cause => { if (mounted) setError(cause instanceof Error ? cause.message : String(cause)); }); return () => { mounted = false; }; }, [api]);
+  }, cause => { if (mounted) setError(actionErrorMessage(cause)); }); return () => { mounted = false; }; }, [api]);
   const perform = async (operation: () => Promise<void>) => {
     if (disabled || busy) return;
     const invokingControl = document.activeElement instanceof HTMLElement ? document.activeElement : null;
     setBusy(true); setError(""); setMessage("");
-    try { await operation(); } catch (cause) { setError(cause instanceof Error ? cause.message : String(cause)); } finally {
+    try { await operation(); } catch (cause) { setError(actionErrorMessage(cause)); } finally {
       setBusy(false);
       requestAnimationFrame(() => { if (invokingControl?.isConnected) invokingControl.focus(); });
     }

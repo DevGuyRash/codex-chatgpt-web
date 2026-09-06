@@ -7,7 +7,7 @@ const vm = require("node:vm");
 const { EventEmitter } = require("node:events");
 const { RuntimeRegistry } = require("../electron/runtime-registry.cjs");
 const { resolveIntegrationTarget } = require("../electron/integration-target.cjs");
-const { registerLoggedIpc } = require("../electron/logging.cjs");
+const { registerLoggedIpc, registerDiagnosticsIpc } = require("../electron/logging.cjs");
 
 test("target selection and native capability picker cross real preload/main IPC with isolated spawn authority", async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "cgw-target-ipc-"));
@@ -20,7 +20,7 @@ test("target selection and native capability picker cross real preload/main IPC 
     const main = fs.readFileSync(require.resolve("../electron/main.cjs"), "utf8");
     const registration = main.slice(main.indexOf("function registerIpc("), main.indexOf("async function requestQuit("));
     vm.runInNewContext(`${registration}\nregisterIpc({ logger: { error() {} }, stateStore: {} });`, {
-      registerLoggedIpc, resolveIntegrationTarget, runtimeRegistry: registry, IS_CODEX_PROFILE: true,
+      registerLoggedIpc, registerDiagnosticsIpc, resolveIntegrationTarget, runtimeRegistry: registry, IS_CODEX_PROFILE: true, runtimeSupervisor: null,
       LAUNCHER_PROFILE: { integrationTarget: selected, codexHome: selected.codexHome }, SOURCE_ROOT: root, path,
       app: { isPackaged: false }, mainWindow: {}, publishOperation() {},
       process: { execPath: "/absolute/electron", env: { CODEX_CHATGPT_WEB_HOME: selected.runtimeHome, CODEX_HOME: selected.codexHome, OPENAI_API_KEY: "unit-only", CODEX_WEB_GPT_LAUNCHER_CONTROL_TOKEN: "unit-only", CODEX_CHATGPT_WEB_BROWSER_HOST_DESCRIPTOR: "old-descriptor", ELECTRON_RUN_AS_NODE: "1" } },
@@ -30,7 +30,7 @@ test("target selection and native capability picker cross real preload/main IPC 
       runtimeHost: { run: async (name, args) => { checks.push({ name, args: [...args] }); return { stdout: "{}" }; } },
     });
     let api;
-    vm.runInNewContext(fs.readFileSync(require.resolve("../electron/preload.cjs"), "utf8"), {
+    vm.runInNewContext(fs.readFileSync(require.resolve("../electron/generated/preload.cjs"), "utf8"), {
       require: () => ({ contextBridge: { exposeInMainWorld: (_name, value) => { api = value; } }, ipcRenderer: { invoke: (name, ...args) => handlers.get(name)({}, ...args) } }),
     });
     const opened = await api.openIntegrationTarget({ codexHome: selected.codexHome, profile: "compatibility" });

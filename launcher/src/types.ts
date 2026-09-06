@@ -1,5 +1,6 @@
 import type { CodexRepairPreview, SubagentProtocol, ConfigurationResolutionSelection } from "../../src/contracts/codex-integration";
 import type { DoctorReport, DiagnosticProblem } from "../../src/contracts/diagnostics";
+import type { DiagnosticsBridgeApi } from "../../src/diagnostics/request-error";
 export type { DoctorReport, DoctorCheck, DiagnosticProblem, RecoveryAction } from "../../src/contracts/diagnostics";
 export type { CodexRepairPreview, SubagentProtocol } from "../../src/contracts/codex-integration";
 export type Language = "en" | "zh-CN" | "ja";
@@ -64,16 +65,9 @@ export interface BrowserTabState {
   canConfirmSent?: boolean;
 }
 
-export interface LogRecord {
-  at: string;
-  level: "debug" | "info" | "warning" | "error";
-  event: string;
-  detail: Record<string, unknown>;
-}
-
 export interface OperationState {
   name: string;
-  status: "running" | "completed" | "failed";
+  status: "running" | "completed" | "failed" | "cancelled";
   message: string;
   problem?: DiagnosticProblem;
 }
@@ -96,7 +90,6 @@ export interface LauncherSnapshot {
   connectorName: string;
   connectorNames: Record<BrowserInteractionMode, string>;
   mcpCredentialsConfigured: boolean;
-  logs: LogRecord[];
   urls: {
     github: string;
     x: string;
@@ -114,6 +107,7 @@ export interface LauncherSnapshot {
 }
 
 export interface LauncherApi {
+  diagnostics: import("../../src/diagnostics/contracts").DiagnosticsApi;
   integrationTargets(): Promise<{ selected: import("../../src/contracts/codex-integration").IntegrationTarget; targets: import("../../src/contracts/codex-integration").IntegrationTarget[]; discovery?: import("../../src/contracts/codex-integration").IntegrationTargetDiscovery; inspectionError?: string; launchCommand?: string; capabilityError?: string }>;
   chooseCodexHome(): Promise<string | null>;
   codexRestartAvailability(): Promise<import("../../src/contracts/codex-restart").CodexRestartAvailability>;
@@ -171,7 +165,6 @@ export interface LauncherApi {
     value: boolean,
   ): Promise<LauncherState>;
   setSidebarState(state: { open: boolean; width: number }): Promise<LauncherState>;
-  logs(limit?: number): Promise<LogRecord[]>;
   exportLogs(): Promise<string | null>;
   installUpdate(): Promise<boolean>;
   windowState(): Promise<{ fullScreen: boolean; maximized: boolean }>;
@@ -180,12 +173,13 @@ export interface LauncherApi {
   onStateChanged(listener: (state: LauncherState) => void): () => void;
   onBrowserState(listener: (state: BrowserState) => void): () => void;
   onOperation(listener: (state: OperationState) => void): () => void;
-  onLog(listener: (record: LogRecord) => void): () => void;
   onUpdateState(listener: (state: UpdateState) => void): () => void;
 }
 
+export type LauncherBridgeApi = Omit<LauncherApi, "diagnostics"> & { diagnostics: DiagnosticsBridgeApi };
+
 declare global {
   interface Window {
-    codexWebLauncher?: LauncherApi;
+    codexWebLauncher?: LauncherBridgeApi;
   }
 }

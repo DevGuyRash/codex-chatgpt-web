@@ -11,7 +11,7 @@ import type { CodexRepairPreview, ConfigurationResolutionSelection } from "../sr
 
 const require = createRequire(import.meta.url);
 const { ConfigurationReview } = require("../launcher/electron/configuration-review.cjs");
-const { registerLoggedIpc } = require("../launcher/electron/logging.cjs");
+const { registerLoggedIpc, registerDiagnosticsIpc } = require("../launcher/electron/logging.cjs");
 
 test.skipIf(!process.env.CHATGPT_TEST_CHROME_EXECUTABLE)("grouped review sends source choices through main/preload, preserves focus and invalidates approval", async () => {
   const root = mkdtempSync(join(tmpdir(), "cgw-grouped-review-"));
@@ -37,11 +37,11 @@ test.skipIf(!process.env.CHATGPT_TEST_CHROME_EXECUTABLE)("grouped review sends s
     const main = readFileSync(resolve("launcher/electron/main.cjs"), "utf8");
     const registration = main.slice(main.indexOf("function registerIpc("), main.indexOf("async function requestQuit("));
     runInNewContext(`${registration}\nregisterIpc({ logger: { error() {} }, stateStore: { update() { return {}; } } });`, {
-      configurationReview: review, registerLoggedIpc, ipcMain: { handle: (name: string, handler: (...args: unknown[]) => unknown) => handlers.set(name, handler), on() {} },
-      browserHost: { setSurfaceActive: (value: boolean) => surfaceStates.push(value) },
+      configurationReview: review, registerLoggedIpc, registerDiagnosticsIpc, ipcMain: { handle: (name: string, handler: (...args: unknown[]) => unknown) => handlers.set(name, handler), on() {} },
+      browserHost: { setSurfaceActive: (value: boolean) => surfaceStates.push(value) }, runtimeSupervisor: null,
     });
     let api: { decideConfiguration: (id: string, choice: unknown) => Promise<unknown> };
-    runInNewContext(readFileSync(resolve("launcher/electron/preload.cjs"), "utf8"), {
+    runInNewContext(readFileSync(resolve("launcher/electron/generated/preload.cjs"), "utf8"), {
       require: () => ({ contextBridge: { exposeInMainWorld: (_name: string, value: typeof api) => { api = value; } },
         ipcRenderer: { invoke: (name: string, ...args: unknown[]) => handlers.get(name)!({}, ...args) } }),
     });

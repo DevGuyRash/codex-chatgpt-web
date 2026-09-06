@@ -4,6 +4,8 @@ const { createHash } = require("node:crypto");
 const { EventEmitter } = require("node:events");
 const fs = require("node:fs");
 const { resolve } = require("node:path");
+const { createRequire } = require("node:module");
+const vm = require("node:vm");
 const {
   browserViewVisible,
   constrainBrowserBounds,
@@ -353,6 +355,56 @@ test("descriptor-owned home surface stays attached offscreen while another launc
     ["bounds", hiddenBounds],
     ["visible", true],
   ]);
+});
+
+test("growing the native window repositions hidden browser surfaces after native bounds settle", async () => {
+  const filename = resolve(__dirname, "../electron/browser-host.cjs");
+  const requireHost = createRequire(filename), module = { exports: {} };
+  const window = new EventEmitter();
+  let contentSize = [1120, 720], primaryBounds, placements = 0, closed = false;
+  const contents = { setZoomFactor() {}, isDestroyed: () => closed, close: () => { closed = true; } };
+  class View {
+    webContents = contents;
+    setBounds(bounds) { primaryBounds = bounds; placements++; }
+    setVisible() {}
+  }
+  vm.runInNewContext(fs.readFileSync(filename, "utf8"), {
+    require: name => name === "electron" ? { WebContentsView: View } : requireHost(name),
+    module, setInterval, clearInterval, setTimeout, clearTimeout, setImmediate, clearImmediate, Buffer, process,
+  }, { filename });
+  class IsolatedHost extends module.exports.BrowserHost {
+    bindShellZoomShortcuts() {}
+    bindChatGptBackendRecovery() {}
+    bindWebContents() {}
+    async initializePrimaryView() { this.syncViewVisibility(); }
+  }
+  Object.assign(window, {
+    contentView: { addChildView() {} },
+    getContentSize: () => contentSize,
+    isVisible: () => true,
+    isMinimized: () => false,
+  });
+  const host = new IsolatedHost({ window, getConnectorName() {}, loginWithPasskey() {}, logger: { error() {} } });
+  try {
+    assert.ok(primaryBounds.x > 1120 && primaryBounds.y > 720);
+    window.emit("resize");
+    window.emit("resize");
+    // Electron/X11 can publish resize before getContentSize reflects the new frame.
+    contentSize = [1920, 1036];
+    await new Promise(setImmediate);
+    assert.ok(primaryBounds.x > 1920 && primaryBounds.y > 1036, "a hidden surface must not become visible after window growth");
+    assert.equal(primaryBounds.width, 1920);
+    assert.equal(primaryBounds.height, 1036);
+    assert.equal(placements, 2, "a resize burst should admit only one pending refresh");
+    window.emit("resize");
+    host.destroy();
+    await new Promise(setImmediate);
+    assert.equal(placements, 2, "shutdown must cancel pending placement work");
+    assert.equal(window.listenerCount("resize"), 0);
+  } finally {
+    clearInterval(host.turnLeaseSweep);
+    window.removeAllListeners();
+  }
 });
 
 test("smoke preserves an already-hydrated Temporary Chat page", () => {

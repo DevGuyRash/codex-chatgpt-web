@@ -34,6 +34,8 @@ try {
     "--include-launcher",
   ]);
   await run(["run", "scripts/smoke-release.ts", runtimeBundle]);
+  // Browser acceptance begins only after every non-UI gate above has completed successfully.
+  if (!process.argv.includes("--non-ui")) await run(["run", "test:ui"]);
 } finally {
   rmSync(scratch, { recursive: true, force: true });
 }

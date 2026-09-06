@@ -1,5 +1,7 @@
 import { createInterface } from "node:readline";
 import { stdin, stderr, stdout } from "node:process";
+import { initializeRuntimeDiagnostics, closeRuntimeDiagnostics } from "../../diagnostics/runtime";
+import { parseTraceparent } from "../../diagnostics/instrumentation";
 import type { CodexProviderConfig } from "../../types";
 import { ChatGptBrowserWorker, closeChatGptBrowserWorkers, type BrowserTurn } from "./browser-worker";
 import { ChatGptWebAdapterError } from "./adapter-error";
@@ -9,6 +11,8 @@ import { createBrowserHelperPromptSelection } from "./browser-helper-prompt-sele
 import type { CompiledChatGptWebPrompt } from "./prompt";
 import { ChatGptMirroredTurnProgress } from "./turn-progress";
 import type { ChatGptExternalTurnProgressSnapshot } from "./turn-progress";
+
+initializeRuntimeDiagnostics({ component: "browser-helper" });
 
 interface RunMessage {
   type: "run";
@@ -22,6 +26,7 @@ interface RunMessage {
   };
   turn: {
     traceId: string;
+    diagnosticsParent?: string;
     modelId: string;
     reasoning?: string;
     capabilities: ChatGptWebCapabilities;
@@ -133,7 +138,7 @@ function requestShutdown(): Promise<void> {
   }
   completionFenceCommitWaiters.clear();
   input.close();
-  void closeChatGptBrowserWorkers().then(
+  void closeChatGptBrowserWorkers().then(() => closeRuntimeDiagnostics()).then(
     () => {
       completeShutdown();
       process.exit(0);
@@ -148,6 +153,8 @@ function requestShutdown(): Promise<void> {
 }
 
 async function run(message: RunMessage): Promise<void> {
+  initializeRuntimeDiagnostics({ component: "browser-helper" });
+  if (message.turn.diagnosticsParent !== undefined && !parseTraceparent(message.turn.diagnosticsParent)) throw new Error("Invalid browser diagnostics correlation");
   if (!/^[A-Za-z0-9_-]{6,128}$/.test(message.id) || message.id !== message.turn.traceId) {
     throw new Error("Browser helper turn identity is invalid");
   }
@@ -208,6 +215,7 @@ async function run(message: RunMessage): Promise<void> {
   const prepareSelected = async () => ({ ...await promptSelection.wait(), release: () => {} });
   const turn: BrowserTurn = {
     traceId: message.turn.traceId,
+    diagnosticsParent: message.turn.diagnosticsParent,
     modelId: message.turn.modelId,
     reasoning: message.turn.reasoning,
     capabilities: message.turn.capabilities,

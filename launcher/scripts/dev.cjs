@@ -6,6 +6,9 @@ const vitePackage = require.resolve("vite/package.json", { paths: [root] });
 const viteBin = path.join(path.dirname(vitePackage), "bin", "vite.js");
 const electronBin = require("electron");
 const bun = process.env.CODEX_WEB_GPT_BUN || process.execPath;
+const diagnosticsBuild = spawnSync(bun, ["run", "scripts/build-diagnostics.ts"], { cwd: path.resolve(root, ".."), env: process.env, stdio: "inherit" });
+if (diagnosticsBuild.error) throw diagnosticsBuild.error;
+if (diagnosticsBuild.status !== 0) process.exit(diagnosticsBuild.status ?? 1);
 
 const helperBuild = spawnSync(bun, ["run", "scripts/build-browser-helper.ts"], {
   cwd: path.resolve(root, ".."),

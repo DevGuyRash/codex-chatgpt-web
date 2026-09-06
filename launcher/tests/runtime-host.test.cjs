@@ -57,7 +57,7 @@ test("production setup cancellation at preview leaves the runtime and configurat
   const host = new RuntimeHost({
     app: { getPath: () => path.join(os.tmpdir(), "codex-web-gpt-preview-test") }, logger: { info() {}, warn() {}, error() {} }, sourceRoot: "/source",
     browserDescriptorPath: "/runtime/launcher-browser.json",
-    reviewConfiguration: async () => { throw new Error("Setup preview cancelled"); },
+    reviewConfiguration: async () => { throw Object.assign(new Error("Setup preview cancelled"), { name: "AbortError", code: "ABORT_ERR" }); },
     supervisor: { readConfig: () => null, stopForSetup: async () => { effects.push("stop"); }, startIfConfigured: async () => ({ status: "ready" }) },
   });
   host.captureSetupCheckpoint = () => null;
@@ -65,7 +65,7 @@ test("production setup cancellation at preview leaves the runtime and configurat
     if (!args.includes("--preview-json") && !args.includes("--preflight-only")) effects.push("write");
     return { stdout: JSON.stringify({ version: 1, operation: "setup", status: "ready", protocol: "native", approvalId: "a".repeat(64), changes: [], conflicts: [], codexRestartRequired: true, launcherRestartRequired: false }) };
   };
-  await assert.rejects(host.runSetup("setup", ["setup", "--browser-only"], {}), /preview cancelled/);
+  await assert.rejects(host.runSetup("setup", ["setup", "--browser-only"], {}), { name: "AbortError", code: "ABORT_ERR" });
   assert.deepEqual(effects, []);
 });
 
@@ -194,7 +194,7 @@ test("structured child conflicts survive private operations without logging sour
   host.command = () => ({ executable: process.execPath, args: ["-e", `console.error(${JSON.stringify(`CGW_ERROR_V1 ${JSON.stringify(envelope)}`)}); process.exitCode = 1`], cwd: os.tmpdir() });
   await assert.rejects(host.run("setup", [], { privateOutput: true }), error => {
     assert.equal(error.code, envelope.code);
-    assert.deepEqual(error.problem.actions, ["review-configuration", "run-doctor"]);
+    assert.deepEqual(error.problem.actions, ["review-configuration", "open-diagnostics", "run-doctor"]);
     return true;
   });
   assert.deepEqual(events.at(-1).problem.findings, envelope.findings);
@@ -206,7 +206,7 @@ test("long structured stderr findings stay private across stream chunks while or
   const logs = [];
   host.logger = { info: (...args) => logs.push(args), warn: (...args) => logs.push(args), error: (...args) => logs.push(args) };
   host.command = () => ({ executable: process.execPath, args: ["-e", 'const data = {version:1,code:"codex_configuration_conflict",message:"Configuration differs",findings:[{message:"PRIVATE_CHUNK".repeat(30000)}]}; process.stderr.write("CGW_ERROR_V1 " + JSON.stringify(data) + "\\n"); console.error("Ordinary diagnostic warning"); process.exitCode = 1;'], cwd: os.tmpdir() });
-  await assert.rejects(host.run("route", []), /Configuration differs/);
+  await assert.rejects(host.run("route", []), error => error.code === "unsupported_problem");
   assert.doesNotMatch(JSON.stringify(logs), /PRIVATE_CHUNK/);
   assert.match(JSON.stringify(logs), /Ordinary diagnostic warning/);
 });

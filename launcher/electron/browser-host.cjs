@@ -410,6 +410,17 @@ class BrowserHost {
     for (const event of WINDOW_VISIBILITY_EVENTS) {
       this.window.on(event, this.windowVisibilityListener);
     }
+    this.windowResizeRefresh = null;
+    this.windowResizeListener = () => {
+      // Electron/X11 can emit resize before getContentSize reflects the new frame.
+      // Coalesce one placement refresh after native bounds settle, including when no browser slot is mounted.
+      if (this.windowResizeRefresh) return;
+      this.windowResizeRefresh = setImmediate(() => {
+        this.windowResizeRefresh = null;
+        this.syncViewVisibility();
+      });
+    };
+    this.window.on("resize", this.windowResizeListener);
     this.view.webContents.setZoomFactor(this.state.zoomFactor);
     this.bindShellZoomShortcuts(this.window.webContents);
     this.bindShellZoomShortcuts(this.view.webContents);
@@ -2856,6 +2867,9 @@ class BrowserHost {
     for (const event of WINDOW_VISIBILITY_EVENTS) {
       this.window.off(event, this.windowVisibilityListener);
     }
+    this.window.off("resize", this.windowResizeListener);
+    if (this.windowResizeRefresh) clearImmediate(this.windowResizeRefresh);
+    this.windowResizeRefresh = null;
     this.closeAuthView(this.authView, true);
     this.clearHomeNavigationTimeout();
     if (this.turnLeaseSweep) clearInterval(this.turnLeaseSweep);

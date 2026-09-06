@@ -1,7 +1,7 @@
 import { createRoot } from "react-dom/client";
 import { useState } from "react";
 import { copyFor } from "../../src/i18n";
-import { ErrorToast, RecoveryContext, RecoveryDialog } from "../../src/Recovery";
+import { ErrorToast, RecoveryContext, RecoveryBusyContext, RecoveryDialog } from "../../src/Recovery";
 import type { DiagnosticProblem, LauncherApi, LauncherState, RecoveryAction } from "../../src/types";
 import "../../src/tokens.css";
 import "../../src/styles.css";
@@ -21,9 +21,11 @@ const api = {
 function Fixture() {
   const [action, setAction] = useState<RecoveryAction | null>(null);
   const [dismissed, setDismissed] = useState(false);
-  return <RecoveryContext.Provider value={setAction}><main>
+  const [busy, setBusy] = useState(false);
+  return <RecoveryContext.Provider value={setAction}><RecoveryBusyContext.Provider value={busy}><main>
+    <label><input type="checkbox" checked={busy} onChange={event => setBusy(event.target.checked)} />Other launcher operation in progress</label>
     {action === "run-doctor" || action === "review-configuration" ? <RecoveryDialog key={action} action={action} api={api} language="en" devProfile={false} onClose={() => setAction(null)} onRepaired={() => fixture.recoveryCalls.push("repaired")} /> : null}
     {!dismissed ? <ErrorToast copy={copyFor("en")} language="en" message={problem.message} problem={problem} disabled={false} onDismiss={() => setDismissed(true)} /> : <p role="status">Dismissed</p>}
-  </main></RecoveryContext.Provider>;
+  </main></RecoveryBusyContext.Provider></RecoveryContext.Provider>;
 }
 createRoot(document.getElementById("root")!).render(<Fixture />);

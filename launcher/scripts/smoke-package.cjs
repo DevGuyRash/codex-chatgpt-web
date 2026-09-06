@@ -93,7 +93,7 @@ try {
       timeout: 120_000,
     });
     command = "xvfb-run";
-    args = ["-a", executable, "--launcher-smoke-test"];
+    args = ["-a", executable, "--launcher-smoke-test", "--ozone-platform=x11"];
     env.APPIMAGE_EXTRACT_AND_RUN = "1";
   } else if (process.platform === "win32") {
     const installer = artifact(/-win-x64\.exe$/, "Windows installer");
@@ -112,6 +112,7 @@ try {
   if (marker.ok !== true
     || marker.packaged !== true
     || marker.runtimeVerified !== true
+    || marker.diagnosticsVerified !== true
     || marker.version !== expectedVersion
     || marker.platform !== process.platform) {
     throw new Error(`Unexpected packaged launcher marker: ${JSON.stringify(marker)}`);

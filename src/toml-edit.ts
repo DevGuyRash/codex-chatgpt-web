@@ -123,22 +123,25 @@ function parse(text: string): { ast: AST.TOMLProgram; value: Table } {
 }
 
 /** Edit one scalar by syntax range, with an independent semantic check of all other values. */
-export function setTomlScalar(text: string, path: readonly string[], value: string | number | boolean | undefined): string {
-  if (path.length === 0 || path.some(key => typeof key !== "string")
+export function setTomlScalar(text: string, path: readonly (string | number)[], value: string | number | boolean | undefined): string {
+  if (path.length === 0 || typeof path.at(-1) !== "string" || path.some(key => typeof key !== "string" && !(Number.isSafeInteger(key) && key >= 0))
     || (typeof value === "number" && !Number.isFinite(value))) throw new Error("Invalid scalar edit");
   const parsed = parse(text);
-  let expected = parsed.value;
-  for (const key of path.slice(0, -1)) {
-    let child = own(expected, key);
+  let expected: Table | unknown[] = parsed.value;
+  for (const [index, key] of path.slice(0, -1).entries()) {
+    if (Array.isArray(expected) !== (typeof key === "number")) throw new Error("Invalid indexed setting path");
+    let child: unknown = Object.hasOwn(expected, key) ? (expected as Record<string | number, unknown>)[key] : undefined;
     if (child === undefined) {
       if (value === undefined) return text;
+      if (typeof key === "number" || typeof path[index + 1] === "number") throw new Error("Cannot infer missing array entries");
       child = {};
       Object.defineProperty(expected, key, { value: child, enumerable: true, configurable: true, writable: true });
     }
-    if (!table(child)) throw new Error("Cannot add a setting beneath a non-table value");
+    if (!table(child) && !Array.isArray(child)) throw new Error("Cannot add a setting beneath a non-table value");
     expected = child;
   }
-  const last = path.at(-1)!;
+  if (!table(expected)) throw new Error("A scalar setting must belong to a table");
+  const last = path.at(-1)! as string;
   const current = own(expected, last);
   if (current === value) return text;
   if (current !== undefined && !["string", "boolean", "number"].includes(typeof current)) {
@@ -159,10 +162,13 @@ export function setTomlScalar(text: string, path: readonly string[], value: stri
       if (target) throw new Error("Ambiguous setting; no configuration changes were made");
       target = entry;
     }
-    if (entry.value.type === "TOMLInlineTable") {
-      consider(entry.value, resolved);
-      entry.value.body.forEach(child => visit(child, resolved));
-    }
+    content(entry.value, resolved);
+  };
+  const content = (node: AST.TOMLContentNode, resolved: (string | number)[]): void => {
+    if (node.type === "TOMLInlineTable") {
+      consider(node, resolved);
+      node.body.forEach(child => visit(child, resolved));
+    } else if (node.type === "TOMLArray") node.elements.forEach((child, index) => content(child, [...resolved, index]));
   };
   for (const entry of parsed.ast.body[0].body) {
     if (entry.type === "TOMLKeyValue") visit(entry, []);
@@ -180,8 +186,9 @@ export function setTomlScalar(text: string, path: readonly string[], value: stri
     [start, end] = target.value.range;
     replacement = encoded!;
   } else {
-    const relative = path.slice(container?.path.length ?? 0)
-      .map(key => /^[A-Za-z0-9_-]+$/.test(key) ? key : JSON.stringify(key)).join(".");
+    const relativePath = path.slice(container?.path.length ?? 0);
+    if (relativePath.some(key => typeof key !== "string")) throw new Error("Cannot infer an indexed table location");
+    const relative = relativePath.map(key => /^[A-Za-z0-9_-]+$/.test(String(key)) ? key : JSON.stringify(key)).join(".");
     const assignment = `${relative} = ${encoded}`;
     if (container?.node.type === "TOMLInlineTable") {
       start = end = container.node.body.at(-1)?.range[1] ?? container.node.range[1] - 1;

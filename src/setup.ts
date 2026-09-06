@@ -1,4 +1,6 @@
 import { existsSync } from "node:fs";
+import { DiagnosticError } from "./diagnostics/problems";
+import { runtimeDiagnostics } from "./diagnostics/runtime";
 import { randomBytes } from "node:crypto";
 import { createServer } from "node:net";
 import { join } from "node:path";
@@ -86,6 +88,18 @@ export interface SetupResult {
   tunnelReady: boolean | null;
   codexRestartRequired: true;
   connectorSetupRequired: boolean;
+}
+
+function observeSetupStage<T>(name: string, action: () => Promise<T>): Promise<T> {
+  const diagnostics = runtimeDiagnostics();
+  return diagnostics ? diagnostics.run(name, action) : action();
+}
+
+export function verifySetupReadiness(name: string, check: () => Promise<{ ok: boolean; detail: string }>): Promise<void> {
+  return observeSetupStage(name, async () => {
+    const status = await check();
+    if (!status.ok) throw new DiagnosticError({ code: "tunnel_not_ready", message: "The tunnel did not become healthy and ready", stage: name, recovery: "incomplete" });
+  });
 }
 
 interface PreparedSetup {
@@ -367,7 +381,7 @@ async function configureTunnel(config: AppConfig, existing: AppConfig | undefine
   if (!runtimeKeyFile || !existsSync(runtimeKeyFile)) {
     throw new Error(`${interactionMode === "manual" ? "Zero Risk" : "Automatic"} mode requires its own runtime key`);
   }
-  const installedBinary = await installTunnelClient();
+  const installedBinary = await observeSetupStage("setup.tunnel-client-install", () => installTunnelClient());
   const productionProfileName = interactionMode === "manual"
     ? "codex-chatgpt-web-zero-risk"
     : "codex-chatgpt-web";
@@ -401,8 +415,7 @@ async function bootstrapTunnelProfile(config: AppConfig): Promise<void> {
     // Readiness follows after a successful control-plane poll, so setup proves it separately before
     // stopping the validation runtime. The launcher supervisor reconnects the committed profile.
     connectTunnel(config);
-    const status = await waitForTunnelReady(config);
-    if (!status.ok) throw new Error(`Tunnel runtime did not become healthy and ready: ${status.detail}`);
+    await verifySetupReadiness("setup.tunnel-bootstrap-readiness", () => waitForTunnelReady(config));
   } catch (error) {
     bootstrapError = error;
   }
@@ -447,7 +460,7 @@ export function preflightSetup(options: SetupOptions): void {
   if (options.configurationApproval) {
     const preview = previewSetupConfiguration(options);
     if (preview.status !== "ready" || preview.approvalId !== options.configurationApproval) {
-      throw new Error("Setup configuration changed since preview; review a fresh preview before continuing");
+      throw new DiagnosticError({ code: "setup_preview_stale", message: "Setup configuration changed since preview; review a fresh preview before continuing", stage: "setup.preflight", recovery: "not-needed" });
     }
   }
   const { existing, config } = prepareSetup(options);
@@ -553,7 +566,7 @@ export async function setup(options: SetupOptions): Promise<SetupResult> {
     throw new Error("Setup includes configuration repair; approve its exact preview before continuing");
   }
   if (options.configurationApproval && prepared.preview.approvalId !== options.configurationApproval) {
-    throw new Error("Setup configuration changed since preview; review a fresh preview before continuing");
+    throw new DiagnosticError({ code: "setup_preview_stale", message: "Setup configuration changed since preview; review a fresh preview before continuing", stage: "setup.apply", recovery: "not-needed" });
   }
   const { existing, config, launcherOwned, integrationPlan, runtimeInput } = prepared;
   if (integrationPlan.migration) await assertRuntimeEndpointClosed(integrationPlan.migration.endpoint);
@@ -587,12 +600,12 @@ export async function setup(options: SetupOptions): Promise<SetupResult> {
     // authenticated surface, but setup must not inspect its model selector or infer availability.
   } else if (config.browserHost === "launcher") {
     if (options.forceLogin) throw new Error("Launcher browser login is owned by the launcher UI; --login cannot replace it");
-    const capabilities = await inspectLauncherCapabilities(
+    const capabilities = await observeSetupStage("setup.browser-capabilities", () => inspectLauncherCapabilities(
       config,
       existing,
       options.refreshAccountCapabilities === true,
       "production",
-    );
+    ));
     solAvailable = capabilities.solAvailable;
     proAvailable = capabilities.proAvailable;
   } else {
@@ -634,7 +647,7 @@ export async function setup(options: SetupOptions): Promise<SetupResult> {
     );
   }
   if (beforeService.loaded && preliminaryChange && existing) await assertServiceIdle(existing);
-  await configureTunnel(config, existing, options);
+  await observeSetupStage("setup.tunnel-configure", () => configureTunnel(config, existing, options));
 
   const changedWhileLoaded = Boolean(existing && beforeService.loaded && meaningfulRuntimeChange(existing, config));
   if (changedWhileLoaded && !options.restartService) {
@@ -666,21 +679,20 @@ export async function setup(options: SetupOptions): Promise<SetupResult> {
     if (launcherOwned) {
       if (tunnelService.installed || tunnelService.loaded) await uninstallTunnelService();
       if (needsProfile || refreshTunnelWorker || explicitTunnelChange) {
-        await bootstrapTunnelProfile(config);
+        await observeSetupStage("setup.tunnel-bootstrap", () => bootstrapTunnelProfile(config));
       }
     } else {
       const needsOwnershipMigration = !tunnelService.installed || !tunnelService.loaded || !tunnelServiceDefinitionMatches(config);
       if (needsOwnershipMigration || needsProfile) {
         await assertServiceIdle(config);
         if (tunnelService.loaded) await stopTunnelService();
-        await bootstrapTunnelProfile(config);
+        await observeSetupStage("setup.tunnel-bootstrap", () => bootstrapTunnelProfile(config));
         installTunnelService(config);
       } else if (refreshTunnelWorker) {
         await assertServiceIdle(config);
         await restartTunnelService();
       }
-      const status = await waitForTunnelReady(config);
-      if (!status.ok) throw new Error(`Tunnel runtime did not become healthy and ready: ${status.detail}`);
+      await verifySetupReadiness("setup.tunnel-service-readiness", () => waitForTunnelReady(config));
       tunnelReady = true;
     }
   }

@@ -3,9 +3,13 @@ import { isDeepStrictEqual } from "node:util";
 import { realpathSync } from "node:fs";
 import { basename, dirname, join, posix, resolve, win32 } from "node:path";
 import type { AppConfig } from "./config";
-import { getConfigDir } from "./config";
+import { getConfigDir, stripUtf8Bom } from "./config";
+import { parseTOML } from "toml-eslint-parser";
 import { parseTomlValue, removeTomlComments, removeTomlPath } from "./toml-edit";
 import type { InstalledCodexInterruptHook } from "./codex-integration-shared";
+import { setTrackedCodexScalar } from "./codex-config-source";
+import { codexSettingAt } from "./codex-owned-settings";
+import { configurationPathName, discoverConfigurationSource } from "./codex-config-occurrences";
 
 import { MANAGED_INTERRUPT_HOOK_START, MANAGED_INTERRUPT_HOOK_END } from "./codex-config-markers";
 export { MANAGED_INTERRUPT_HOOK_START, MANAGED_INTERRUPT_HOOK_END } from "./codex-config-markers";
@@ -20,16 +24,15 @@ function canonicalJson(value: unknown): unknown {
   );
 }
 
+function managedInterruptHookValues(command: string) {
+  return { type: "command", command, timeout: 3, async: false } as const;
+}
+
 /** Match codex_config::version_for_toml for the normalized Interrupt command hook. */
 export function codexInterruptHookHash(command: string): string {
   const identity = canonicalJson({
     event_name: "interrupt",
-    hooks: [{
-      type: "command",
-      command,
-      timeout: 3,
-      async: false,
-    }],
+    hooks: [managedInterruptHookValues(command)],
   });
   return `sha256:${createHash("sha256").update(JSON.stringify(identity)).digest("hex")}`;
 }
@@ -105,15 +108,16 @@ export function installCodexInterruptHookCommand(
   const groupIndex = interruptGroupCount(text);
   const stateKey = `${canonicalConfigPath(configPath)}:interrupt:${groupIndex}:0`;
   const trustedHash = codexInterruptHookHash(command);
+  const values = managedInterruptHookValues(command);
   const ending = lineEnding(text);
   const core = [
     MANAGED_INTERRUPT_HOOK_START,
     "[[hooks.Interrupt]]",
     "",
     "[[hooks.Interrupt.hooks]]",
-    'type = "command"',
+    `type = ${JSON.stringify(values.type)}`,
     `command = ${JSON.stringify(command)}`,
-    "timeout = 3",
+    `timeout = ${values.timeout}`,
     "",
     `[hooks.state.${JSON.stringify(stateKey)}]`,
     `trusted_hash = ${JSON.stringify(trustedHash)}`,
@@ -144,6 +148,104 @@ function record(value: unknown): Record<string, unknown> | undefined {
   return value !== null && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : undefined;
 }
 
+/** Prepare only a wholly absent hook; residual identity/trust or markers require separate review. */
+export function prepareMissingCodexInterruptHook(text: string, configPath: string, installed: InstalledCodexInterruptHook): { text: string; installed: InstalledCodexInterruptHook } | undefined {
+  const document = parseTomlValue(text);
+  const hooks = record(document.hooks);
+  if (document.hooks !== undefined && !hooks || hooks?.state !== undefined && !record(hooks.state)) return;
+  if (hooks?.Interrupt !== undefined || record(hooks?.state)?.[installed.stateKey] !== undefined
+    || hasManagedMarkers(text) || codexInterruptHookHash(installed.command) !== installed.trustedHash) return;
+  try { return installCodexInterruptHookCommand(text, configPath, installed.command); }
+  catch { return; } // An incompatible TOML representation retains the original repair conflict.
+}
+
+/** Prepare scalar repairs only after the journal's command has one unambiguous owner at its recorded position. */
+export function prepareCodexInterruptHookRepair(text: string, configPath: string, installed: InstalledCodexInterruptHook): { text: string; installed: InstalledCodexInterruptHook; commentedPaths?: string[] } | undefined {
+  const activation = reactivateRecordedHookBlock(text, installed);
+  text = activation?.text ?? text;
+  const missing = prepareMissingCodexInterruptHook(text, configPath, installed);
+  if (missing) return missing;
+  const document = parseTomlValue(text);
+  const hooks = record(document.hooks);
+  const groups = hooks?.Interrupt;
+  if (!Array.isArray(groups) || codexInterruptHookHash(installed.command) !== installed.trustedHash) return;
+  const base = ["hooks", "Interrupt", installed.groupIndex, "hooks", 0] as const;
+  const group = record(groups[installed.groupIndex]);
+  const entries = group?.hooks;
+  const hook = Array.isArray(entries) && entries.length === 1 ? record(entries[0]) : undefined;
+  const values = managedInterruptHookValues(installed.command);
+  if (!group || Object.keys(group).some(key => key !== "hooks") || !hook
+    || Object.keys(hook).some(key => !Object.hasOwn(values, key))) return;
+  const occurrences = groups.flatMap((candidate, index) => {
+    const list = record(candidate)?.hooks;
+    return Array.isArray(list) ? list.filter(entry => record(entry)?.command === installed.command).map(() => index) : [];
+  });
+  if (hook.command === undefined) {
+    const disabled = discoverConfigurationSource(text).occurrences.filter(item => item.kind === "assignment" && item.state === "commented_out"
+      && JSON.stringify(item.path) === JSON.stringify([...base, "command"]));
+    if (occurrences.length || disabled.length !== 1 || disabled[0]!.value !== installed.command) return;
+  } else if (hook.command !== installed.command || occurrences.length !== 1 || occurrences[0] !== installed.groupIndex) return;
+  const state = record(hooks?.state);
+  const trust = state?.[installed.stateKey];
+  const trustTable = record(trust);
+  if (hooks?.state !== undefined && !state || trust !== undefined && (!trustTable || Object.keys(trustTable).some(key => key !== "trusted_hash"))) return;
+  let repaired = text;
+  try {
+    const settings = [
+      ...Object.entries(values).filter(([key]) => key !== "async" || hook.async !== undefined).map(([key, value]) => ({ path: [...base, key], value })),
+      { path: ["hooks", "state", installed.stateKey, "trusted_hash"], value: installed.trustedHash },
+    ];
+    for (const setting of settings) if (codexSettingAt(document, setting.path) !== setting.value) repaired = setTrackedCodexScalar(repaired, setting.path, setting.value);
+    if (inspectCodexInterruptHook(parseTomlValue(repaired), installed) !== "valid") return;
+    return { text: repaired, installed, commentedPaths: activation?.commentedPaths };
+  } catch { return; }
+}
+
+/** Comments alone are not authority: enabling a block must change only the journal-owned leaves. */
+function reactivateRecordedHookBlock(text: string, installed: InstalledCodexInterruptHook): { text: string; commentedPaths: string[] } | undefined {
+  try {
+    const input = stripUtf8Bom(text).replace(/\r(?!\n)/g, "\n");
+    const bom = text.startsWith("\uFEFF") ? 1 : 0;
+    const markers = parseTOML(input, { tomlVersion: "1.0" }).comments.filter(comment => {
+      const raw = input.slice(...comment.range);
+      return [MANAGED_INTERRUPT_HOOK_START, MANAGED_INTERRUPT_HOOK_END].some(marker => raw === marker || raw.replace(/^# ?/, "") === marker);
+    });
+    if (markers.length !== 2) return;
+    const [begin, end] = markers;
+    if (!input.slice(...begin!.range).includes(MANAGED_INTERRUPT_HOOK_START.slice(2))
+      || !input.slice(...end!.range).includes(MANAGED_INTERRUPT_HOOK_END.slice(2))) return;
+    const start = begin!.range[1] + bom;
+    const stop = end!.range[0] + bom;
+    const block = text.slice(start, stop);
+    const enabled = block.replace(/^([\t ]*)# ?/gm, "$1");
+    if (enabled === block) return;
+    const candidate = text.slice(0, start) + enabled + text.slice(stop);
+    const original = parseTomlValue(text);
+    const actual = parseTomlValue(candidate);
+    const base = ["hooks", "Interrupt", installed.groupIndex, "hooks", 0];
+    if (codexSettingAt(actual, [...base, "command"]) !== installed.command) return;
+    const paths = Object.keys(managedInterruptHookValues(installed.command)).map(key => [...base, key])
+      .concat([["hooks", "state", installed.stateKey, "trusted_hash"]]);
+    const expected = structuredClone(original);
+    const commentedPaths: string[] = [];
+    for (const path of paths) {
+      const value = codexSettingAt(actual, path);
+      if (value === undefined) continue;
+      let owner: Record<string | number, unknown> = expected;
+      for (const [index, key] of path.slice(0, -1).entries()) {
+        if (!Object.hasOwn(owner, key)) Object.defineProperty(owner, key, { value: typeof path[index + 1] === "number" ? [] : {}, enumerable: true, configurable: true, writable: true });
+        const next = owner[key];
+        if (!next || typeof next !== "object") return;
+        owner = next as Record<string | number, unknown>;
+      }
+      Object.defineProperty(owner, path.at(-1)!, { value, enumerable: true, configurable: true, writable: true });
+      if (codexSettingAt(original, path) === undefined) commentedPaths.push(configurationPathName(path));
+    }
+    if (!isDeepStrictEqual(expected, actual)) return;
+    return { text: candidate, commentedPaths };
+  } catch { return; }
+}
+
 /** One semantic ownership rule shared by inspection and mutation preflight. */
 export function inspectCodexInterruptHook(document: unknown, installed: InstalledCodexInterruptHook): "valid" | "identity" | "order" {
   const hooks = record(record(document)?.hooks);
@@ -162,7 +264,7 @@ export function inspectCodexInterruptHook(document: unknown, installed: Installe
     const hook = record(entry);
     return hook ? { ...hook, async: hook.async ?? false } : entry;
   }) };
-  const expected = { hooks: [{ type: "command", command: installed.command, timeout: 3, async: false }] };
+  const expected = { hooks: [managedInterruptHookValues(installed.command)] };
   const same = (a: unknown, b: unknown): boolean => JSON.stringify(canonicalJson(a)) === JSON.stringify(canonicalJson(b));
   return same(normalized, expected) && same(record(hooks?.state)?.[installed.stateKey], { trusted_hash: installed.trustedHash }) ? "valid" : "identity";
 }

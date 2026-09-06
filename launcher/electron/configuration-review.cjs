@@ -103,7 +103,7 @@ class ConfigurationReview {
     clearTimeout(pending.timer);
     this.publish(null);
     if (approved) pending.resolve(approvalId);
-    else pending.reject(new Error("Setup preview cancelled; no setup changes were applied"));
+    else pending.reject(Object.assign(new Error("Setup preview cancelled; no setup changes were applied"), { name: "AbortError", code: "ABORT_ERR" }));
   }
   cancel(message = "Setup preview cancelled") {
     if (!this.pending) return;
@@ -111,7 +111,7 @@ class ConfigurationReview {
     this.pending = null;
     clearTimeout(pending.timer);
     this.publish(null);
-    pending.reject(new Error(message));
+    pending.reject(Object.assign(new Error(message), { name: "AbortError", code: "ABORT_ERR" }));
   }
 }
 

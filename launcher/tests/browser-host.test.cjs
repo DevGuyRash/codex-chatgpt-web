@@ -894,6 +894,33 @@ test("explicit login waits for an in-flight saved-session refresh before taking 
   assert.deepEqual(calls, ["ChatGPT login", "probe", "inspect"]);
 });
 
+test("session inspection joins the existing refresh and preserves its failure before acquiring browser ownership", async () => {
+  const calls = [];
+  let finishRefresh;
+  const fixture = {
+    sessionRefreshOperation: new Promise(resolve => { finishRefresh = resolve; }),
+    manualOperation: "session refresh",
+    withManualOperation: async (name, action) => {
+      if (fixture.manualOperation) throw new Error("already busy");
+      calls.push(name);
+      return await action();
+    },
+    runSessionInspection: async capabilities => { calls.push(capabilities); return { authenticated: true }; },
+  };
+  const inspecting = BrowserHost.prototype.inspectSession.call(fixture, true);
+  void inspecting.catch(() => {});
+  await Promise.resolve();
+  assert.deepEqual(calls, []);
+  fixture.manualOperation = null;
+  finishRefresh();
+  assert.deepEqual(await inspecting, { authenticated: true });
+  assert.deepEqual(calls, ["session inspection", true]);
+  const failure = new Error("saved session refresh failed");
+  fixture.sessionRefreshOperation = Promise.reject(failure);
+  await assert.rejects(BrowserHost.prototype.inspectSession.call(fixture, true), error => error === failure);
+  assert.deepEqual(calls, ["session inspection", true]);
+});
+
 test("passkey login imports only validated state and re-proves the Launcher session", async () => {
   const calls = [];
   const browserSession = {

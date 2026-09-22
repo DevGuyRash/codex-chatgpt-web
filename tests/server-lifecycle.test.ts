@@ -4,6 +4,7 @@ import { createConnection } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { chatGptWebTraceId } from "../src/adapters/chatgpt-web";
+import { ChatGptNativeTurnInterruptedError } from "../src/adapters/chatgpt-web/adapter-error";
 import { runStructuredCompactionOnce } from "../src/adapters/chatgpt-web/compaction-handoff";
 import { ChatGptTextFeed, ChatGptTraceFeed, chatGptTurnSessions } from "../src/adapters/chatgpt-web/turn-execution";
 import { callTurnBroker, closeTurnBrokers, RemoteTurnBroker, TurnBroker } from "../src/adapters/chatgpt-web/turn-broker";
@@ -384,6 +385,7 @@ test("authenticated Interrupt hook endpoint releases the exact routed Web turn",
   const config = { ...defaultConfig("browser-only"), port: 0 };
   const threadId = "thread_interrupt_hook";
   const turnId = "turn_interrupt_hook";
+  let interruptionReason: Error | undefined;
   let adapterAborted = false;
   let browserAborted = false;
   let rejectBrowser!: (error: Error) => void;
@@ -397,6 +399,7 @@ test("authenticated Interrupt hook endpoint releases the exact routed Web turn",
     text: new ChatGptTextFeed(),
     cancel: reason => {
       browserAborted = true;
+      interruptionReason = reason;
       rejectBrowser(reason ?? new Error("native turn interrupted"));
     },
   }), "interrupt-hook-trace", "interrupt-hook-owner", turnId, threadId);
@@ -455,6 +458,7 @@ test("authenticated Interrupt hook endpoint releases the exact routed Web turn",
     });
     expect(adapterAborted).toBeTrue();
     expect(browserAborted).toBeTrue();
+    expect(interruptionReason).toBeInstanceOf(ChatGptNativeTurnInterruptedError);
     await response;
   } finally {
     chatGptTurnSessions.clear();

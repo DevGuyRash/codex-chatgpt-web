@@ -9,7 +9,10 @@ import {
   cancelStructuredCompactionTrace,
   structuredCompactionSettlementForNativeTurn,
 } from "./adapters/chatgpt-web/compaction-handoff";
-import { chatGptBrowserTabClosedError } from "./adapters/chatgpt-web/adapter-error";
+import { ChatGptNativeTurnInterruptedError, chatGptBrowserTabClosedError } from "./adapters/chatgpt-web/adapter-error";
+import { campaignCaptureId, captureCampaignContent, omitCampaignCapture } from "./diagnostics/campaign-capture";
+import { MAX_CAPTURE_DOCUMENT_BYTES } from "./diagnostics/contracts";
+import { assertCampaignRoute, campaignGenerationRestricted } from "./campaign-policy";
 import {
   CHATGPT_TURN_REVISION_CONFLICT_MESSAGE,
   extractChatGptTurnIdentity,
@@ -18,6 +21,7 @@ import {
 } from "./adapters/chatgpt-web/environment";
 import { rememberCompactionContinuation } from "./adapters/chatgpt-web/compaction-continuation";
 import { bridgeToResponsesSSE, buildResponseJSON, formatErrorResponse } from "./bridge";
+import { adapterErrorEvent } from "./lib/errors";
 import type { AppConfig } from "./config";
 import { providerConfig } from "./config";
 import { AsyncEventQueue } from "./event-queue";
@@ -401,6 +405,7 @@ export interface ResponseRequestOptions {
 
 export function routeChatGptWebRequest(parsed: CodexParsedRequest, config: AppConfig): ChatGptWebModelRoute {
   const route = requireChatGptWebModelRoute(parsed.modelId, config);
+  assertCampaignRoute(route);
   parsed.modelId = route.backendModel;
   // Zero Risk preserves a distinct backend identity. Its immutable Codex effort is only a
   // protocol/catalog value; the manual adapter must never reinterpret it as a ChatGPT selection.
@@ -494,6 +499,7 @@ export async function responseRequest(
     return formatErrorResponse(400, "invalid_request_error", error instanceof Error ? error.message : String(error));
   }
   if (typeof requestedModel === "string" && !isChatGptWebModelSlug(requestedModel)) {
+    if (campaignGenerationRestricted()) return formatErrorResponse(403, "permission_error", "Native model fallback is disabled for this scoped ChatGPT Web campaign");
     try {
       return await forwardNativeCodexRequest(nativeRequest, "responses", undefined, raw);
     } catch (error) {
@@ -614,16 +620,37 @@ export async function responseRequest(
   if (req.signal.aborted) abort.abort();
   else req.signal.addEventListener("abort", () => abort.abort(), { once: true });
   const run = async () => {
+    const operation = runtimeDiagnostics()?.begin("adapter.turn", { "model.requested": responseModel, "model.backend": parsed.modelId, "model.effort": parsed.options.reasoning ?? "unspecified" });
+    const terminal: { outcome: "succeeded" | "failed" | "cancelled" | "unknown" } = { outcome: "unknown" };
+    const capture = Boolean(campaignCaptureId()), captured: string[] = [];
+    let capturedBytes = 0, captureOmitted = false;
+    const observe = (event: AdapterEvent) => {
+      if (capture && event.type !== "heartbeat") {
+        const line = JSON.stringify(event);
+        const bytes = Buffer.byteLength(line) + 1;
+        if (capturedBytes + bytes <= MAX_CAPTURE_DOCUMENT_BYTES) { captured.push(line); capturedBytes += bytes; }
+        else captureOmitted = true;
+      }
+      if (event.type === "error") {
+        terminal.outcome = event.status === 499 ? "cancelled" : "failed";
+        if (terminal.outcome === "failed") operation?.problem(event, "Adapter failed without complete source evidence");
+      } else if (event.type === "done" && terminal.outcome === "unknown") terminal.outcome = "succeeded";
+      else if (event.type === "incomplete" && terminal.outcome !== "failed") terminal.outcome = "unknown";
+      options.onAdapterEvent?.(event); queue.push(event);
+    };
     try {
-      await adapter.runTurn!(parsed, { headers: req.headers, abortSignal: abort.signal }, event => {
-        options.onAdapterEvent?.(event);
-        queue.push(event);
-      });
+      if (capture) await captureCampaignContent("prompt", JSON.stringify(raw), operation?.context);
+      const work = () => adapter.runTurn!(parsed, { headers: req.headers, abortSignal: abort.signal }, observe);
+      await (operation ? operation.run(work) : work());
     } catch (error) {
-      const event: AdapterEvent = { type: "error", message: error instanceof Error ? error.message : String(error) };
-      options.onAdapterEvent?.(event);
-      queue.push(event);
+      const event = adapterErrorEvent(error);
+      observe(event);
     } finally {
+      if (capture) {
+        await captureCampaignContent("output", captured.join("\n"), operation?.context);
+        if (captureOmitted) await omitCampaignCapture("too-large", operation?.context);
+      }
+      operation?.end(abort.signal.aborted && terminal.outcome !== "failed" ? "cancelled" : terminal.outcome, { "completion.observed": terminal.outcome === "succeeded" });
       queue.close();
     }
   };
@@ -719,6 +746,7 @@ export async function compactRequest(
     return formatErrorResponse(400, "invalid_request_error", "Compaction request requires a model");
   }
   if (!isChatGptWebModelSlug(raw.model)) {
+    if (campaignGenerationRestricted()) return formatErrorResponse(403, "permission_error", "Native model fallback is disabled for this scoped ChatGPT Web campaign");
     try {
       return await forwardNativeCodexRequest(nativeRequest, "responses/compact", undefined, raw);
     } catch (error) {
@@ -728,6 +756,7 @@ export async function compactRequest(
   let route: ChatGptWebModelRoute;
   try {
     route = requireChatGptWebModelRoute(raw.model, config);
+    assertCampaignRoute(route);
   } catch (error) {
     return formatErrorResponse(400, "invalid_request_error", error instanceof Error ? error.message : String(error));
   }
@@ -902,7 +931,7 @@ export function startServer(
             { status: 400 },
           );
         }
-        const reason = new DOMException("Codex turn interrupted", "AbortError");
+        const reason = new ChatGptNativeTurnInterruptedError();
         const releaseClaims = dependencies.cleanupClaims?.captureSettlement(identity);
         const browserCancellation = chatGptTurnSessions.cancelNativeTurn(
           identity.threadId,
@@ -1066,7 +1095,6 @@ export function startServer(
     if (shutdownPromise) return;
     draining = true;
     chatGptTurnSessions.clear();
-    flushResponseState();
     shutdownPromise = (async () => {
       const results = await Promise.allSettled([
         closeChatGptBrowserWorkers(),
@@ -1082,6 +1110,7 @@ export function startServer(
         }
       }
       await server.stop(true);
+      await flushResponseState();
       await closeRuntimeDiagnostics();
     })().catch(error => {
       process.exitCode = 1;

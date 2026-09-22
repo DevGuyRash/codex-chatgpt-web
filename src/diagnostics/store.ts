@@ -5,6 +5,8 @@ import { createHash, randomUUID } from "node:crypto";
 import { CaptureCommandSchema, CaptureStateSchema, DEFAULT_RETENTION, QuerySchema, TraceIdSchema, type CaptureWriteResult, type CaptureCommand, type CaptureState, type DiagnosticEvent, type DiagnosticQuery, type DiagnosticStatus, type QueryResult } from "./contracts";
 import { safeAttributes, safeLegacyAttributes, safeText, sanitizeEvent } from "./privacy";
 import { addEvidenceProjections, SCHEMA_VERSION } from "./schema";
+import { captureContent, contentManifest, contentReportScope, contentAttachments, contentAttachment, type ContentUpload } from "./content";
+import type { ContentCaptureCommand, DiagnosticWritePhase } from "./contracts";
 
 export const STORE_FILENAME = "diagnostics.sqlite";
 const PRIVATE_FILENAME = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}\.png$/;
@@ -21,6 +23,27 @@ const PROBLEM_SIGNATURE = `json_array(COALESCE(json_extract(e.data,'$.problem.co
     CASE WHEN e.body IN ('Runtime response stream ended unexpectedly','Runtime request returned a failure response','Runtime request failed before completing its response') THEN e.body ELSE COALESCE(e.trace_id,e.id) END
   ELSE '' END)`;
 const QUERY_COLUMNS = [["eventId", "id"], ["traceId", "trace_id"], ["taskId", "task_id"], ["target", "target"], ["component", "component"], ["severity", "severity"], ["outcome", "outcome"]] as const;
+
+function applyFilters(query: ReturnType<typeof QuerySchema.parse>, where: string[], values: SQLQueryBindings[]): void {
+  for (const [key, column] of QUERY_COLUMNS) if (query[key]) { where.push(`e.${column}=?`); values.push(query[key]); }
+  // Identifiers and JSON paths are application-owned; every selected value is bound.
+  const columns = { targets: "e.target", components: "e.component", severities: "e.severity", outcomes: "e.outcome", kinds: "e.kind",
+    operationTypes: `COALESCE(json_extract(e.data,'$.attributes."operation.type"'),'operation')`,
+    exitCodes: "COALESCE(json_extract(e.data,'$.problem.exitCode'),json_extract(e.data,'$.attributes.exitCode'))",
+    signals: "COALESCE(json_extract(e.data,'$.problem.signal'),json_extract(e.data,'$.attributes.signal'))" } as const;
+  for (const [key, column] of Object.entries(columns)) {
+    const selected = query[key as keyof typeof columns];
+    if (selected?.length) { where.push(`${column} IN (${selected.map(() => "?").join(",")})`); values.push(...selected); }
+  }
+  // Explicit selections are a union of events and complete operations, not an intersection.
+  if (query.eventIds !== undefined || query.traceIds !== undefined) {
+    const selections: string[] = [];
+    for (const [selected, column] of [[query.eventIds, "e.id"], [query.traceIds, "e.trace_id"]] as const) {
+      if (selected?.length) { selections.push(`${column} IN (${selected.map(() => "?").join(",")})`); values.push(...selected); }
+    }
+    where.push(selections.length ? `(${selections.join(" OR ")})` : "0=1");
+  }
+}
 
 function fileBytes(path: string): number { try { return statSync(path).size; } catch { return 0; } }
 export function privateDirectory(path: string): void {
@@ -39,6 +62,15 @@ export class DiagnosticStore {
   private readonly now: () => number;
   private readonly notices: string[] = [];
   private writes = 0;
+  private readonly contentUploads = new Map<string, ContentUpload>();
+  contentCapture(command: ContentCaptureCommand, progress?: (phase: DiagnosticWritePhase) => void): unknown { return captureContent(this.writable(), command, this.now(), this.contentUploads, progress); }
+  contentManifest(campaignId: string) { if (!this.database) throw new Error("Collection unavailable"); return contentManifest(this.database, campaignId); }
+  contentReportScope(campaignId: string, traceIds: string[], snapshotSequence: number) {
+    if (!this.database) throw new Error("Collection unavailable");
+    return contentReportScope(this.database, campaignId, traceIds, snapshotSequence);
+  }
+  contentAttachments(campaignId: string, acknowledged: true) { if (!this.database) throw new Error("Collection unavailable"); return contentAttachments(this.database, campaignId, acknowledged); }
+  contentAttachment(campaignId: string, attachment: ReturnType<typeof contentManifest>["attachments"][number], acknowledged: true) { if (!this.database) throw new Error("Collection unavailable"); return contentAttachment(this.database, campaignId, attachment, acknowledged); }
 
   constructor(directory: string, options: { readonly?: boolean; retention?: Partial<Retention>; now?: () => number } = {}) {
     this.directory = resolve(directory);
@@ -78,7 +110,7 @@ export class DiagnosticStore {
             PRAGMA user_version=1;
           `);
         }).immediate();
-        if (version < 2) addEvidenceProjections(database);
+        if (version < SCHEMA_VERSION) addEvidenceProjections(database);
       }
       database.query("SELECT count(*) FROM event_search").get();
       this.database = database;
@@ -110,13 +142,15 @@ export class DiagnosticStore {
     }).immediate();
   }
 
-  append(inputs: unknown[]): number {
+  append(inputs: unknown[], progress?: (phase: DiagnosticWritePhase) => void): number {
     const db = this.writable();
     if (inputs.length > 128) throw new Error("Diagnostics batches are limited to 128 records");
+    progress?.("validation");
     const events = inputs.map(input => sanitizeEvent(input));
     const insert = db.query("INSERT OR IGNORE INTO events(id,time,kind,name,severity,component,target,trace_id,span_id,task_id,outcome,body,data) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)");
     const span = db.query(`INSERT INTO spans(trace_id,span_id,parent_span_id,event_id,terminal) VALUES(?,?,?,?,?)
       ON CONFLICT(trace_id,span_id) DO UPDATE SET event_id=excluded.event_id,terminal=excluded.terminal WHERE spans.terminal=0`);
+    progress?.("transaction");
     const count = db.transaction(() => {
       let count = 0;
       for (const event of events) {
@@ -127,10 +161,13 @@ export class DiagnosticStore {
         count += inserted;
         if (inserted && event.span && event.spanId && event.traceId) span.run(event.traceId, event.spanId, event.parentSpanId ?? null, event.id, event.span.outcome === "running" ? 0 : 1);
       }
+      // Returning from this callback enters SQLite's commit/checkpoint path.
+      // Distinguish that wait from record insertion without inspecting SQL or payloads.
+      progress?.("commit");
       return count;
     })();
     this.writes += count;
-    if (this.writes >= 64 || this.bytes() > this.retention.bytes) { this.writes = 0; this.prune(); }
+    if (this.writes >= 64 || this.bytes() > this.retention.bytes) { progress?.("retention"); this.writes = 0; this.prune(); }
     return count;
   }
 
@@ -156,9 +193,7 @@ export class DiagnosticStore {
       where.push(`e.seq${query.ascending ? ">" : "<"}?`); values.push(cursor.seq);
     }
     where.push("e.seq<=?"); values.push(bound);
-    for (const [key, column] of QUERY_COLUMNS) {
-      if (query[key]) { where.push(`e.${column}=?`); values.push(query[key]); }
-    }
+    applyFilters(query, where, values);
     if (query.to !== undefined) { where.push("e.time<=?"); values.push(query.to); }
     if (query.view === "problems") where.push("e.kind='problem'");
     if (query.view === "overview") where.push("(e.kind='problem' OR (e.outcome IN ('failed','interrupted','unknown') AND e.id IN (SELECT event_id FROM spans WHERE parent_span_id IS NULL)))");
@@ -202,7 +237,7 @@ export class DiagnosticStore {
     }
     const where = ["e.seq<=?", "e.time>=?", PROBLEM_CANDIDATE];
     const values: SQLQueryBindings[] = [bound, Math.max(query.from ?? 0, this.now() - this.retention.days * 86_400_000), bound];
-    for (const [key, column] of QUERY_COLUMNS) if (query[key]) { where.push(`e.${column}=?`); values.push(query[key]); }
+    applyFilters(query, where, values);
     if (query.to !== undefined) { where.push("e.time<=?"); values.push(query.to); }
     if (query.text?.trim()) {
       where.push("e.seq IN (SELECT rowid FROM event_search WHERE event_search MATCH ?)");
@@ -280,7 +315,9 @@ export class DiagnosticStore {
       return { status: "stored", id, expires: this.now() + this.retention.privateMs };
     }).immediate();
   }
-  dropped(count: number): void { this.setMeta("dropped", String(Number(this.meta("dropped") ?? 0) + count)); }
+  dropped(count: number): void {
+    this.writable().query("INSERT INTO metadata(key,value) VALUES('dropped',?) ON CONFLICT(key) DO UPDATE SET value=CAST(metadata.value AS INTEGER)+CAST(excluded.value AS INTEGER)").run(String(count));
+  }
   collectionFailure(notice: string): void { if (!this.notices.includes(notice) && this.notices.length < 32) this.notices.push(notice); }
   status(): DiagnosticStatus {
     const db = this.database;
@@ -290,25 +327,37 @@ export class DiagnosticStore {
       problemCount: counts?.problems ?? 0, oldestTime: counts?.oldest ?? null, newestTime: counts?.newest ?? null,
       lastSequence: counts?.sequence ?? 0,
       bytes: this.bytes(), privateBytes: this.privateBytes(), dropped: Number(this.meta("dropped") ?? 0), captures: this.captures(), retention: this.retention,
+      content: db ? {
+        ...(db.query("SELECT COUNT(*) AS campaigns, COALESCE(SUM(finished=0 AND deadline>?),0) AS active, COALESCE(SUM(omitted),0) AS omitted FROM capture_campaigns").get(this.now()) as { campaigns: number; active: number; omitted: number }),
+        bytes: Number((db.query("SELECT COALESCE(SUM(bytes),0) AS n FROM capture_content").get() as { n: number }).n),
+      } : undefined,
       components: db ? (db.query("SELECT DISTINCT component FROM events ORDER BY component LIMIT 100").all() as { component: string }[]).map(row => row.component) : [],
       targets: db ? (db.query("SELECT DISTINCT target FROM events ORDER BY target LIMIT 100").all() as { target: string }[]).map(row => row.target) : [], notices: this.evidenceNotices(),
     };
   }
   prune(): void {
     const db = this.writable();
-    this.removeRetained("DELETE FROM events WHERE time<?", this.now() - this.retention.days * 86_400_000);
+    db.query("DELETE FROM capture_campaigns WHERE deadline<=?").run(this.now() - this.retention.days * 86_400_000);
+    const unpinned = "NOT EXISTS (SELECT 1 FROM capture_traces t JOIN capture_campaigns c ON c.id=t.campaign_id WHERE t.trace_id=events.trace_id AND c.finished=0 AND c.deadline>?)";
+    this.removeRetained(`DELETE FROM events WHERE time<? AND ${unpinned}`, this.now() - this.retention.days * 86_400_000, this.now());
     this.prunePrivate();
     // WAL auto-checkpointing already owns routine flushes. An explicit checkpoint
     // on every ingestion batch turns local backfill into repeated disk-sync waits.
     // Reclaim explicitly only when the complete database/WAL budget requires it.
-    if (this.bytes() <= this.retention.bytes) return;
+    const contentBytes = Number((db.query("SELECT COALESCE(SUM(bytes),0) AS n FROM capture_content").get() as { n: number }).n);
+    const budget = this.retention.bytes + 2 * contentBytes;
+    if (this.bytes() <= budget) return;
     db.exec("PRAGMA wal_checkpoint(PASSIVE)");
-    if (this.bytes() <= this.retention.bytes) return;
-    for (let attempt = 0; attempt < 16 && this.bytes() > this.retention.bytes; attempt++) {
-      this.removeRetained("DELETE FROM events WHERE seq IN (SELECT seq FROM events ORDER BY seq LIMIT 512)");
+    if (this.bytes() <= budget) return;
+    // Cleared or expired captures leave reusable pages behind. Reclaim those pages
+    // before sacrificing unrelated retained evidence to the physical-file budget.
+    db.exec("PRAGMA wal_checkpoint(TRUNCATE); VACUUM; PRAGMA wal_checkpoint(TRUNCATE)");
+    for (let attempt = 0; attempt < 16 && this.bytes() > budget; attempt++) {
+      if (!db.query(`SELECT 1 FROM events WHERE ${unpinned} LIMIT 1`).get(this.now())) break;
+      this.removeRetained(`DELETE FROM events WHERE seq IN (SELECT seq FROM events WHERE ${unpinned} ORDER BY seq LIMIT 512)`, this.now());
       db.exec("PRAGMA wal_checkpoint(TRUNCATE); VACUUM; PRAGMA wal_checkpoint(TRUNCATE)");
     }
-    if (this.bytes() > this.retention.bytes && !this.notices.includes("Storage is above its limit; readers or filesystem constraints may be preventing reclamation")) this.notices.push("Storage is above its limit; readers or filesystem constraints may be preventing reclamation");
+    if (this.bytes() > budget && !this.notices.includes("Storage is above its limit; readers, active captures or filesystem constraints may be preventing reclamation")) this.notices.push("Storage is above its limit; readers, active captures or filesystem constraints may be preventing reclamation");
   }
   private prunePrivate(): void {
     const db = this.writable();
@@ -338,7 +387,10 @@ export class DiagnosticStore {
   clear(scope: "normal" | "private", confirmed: boolean): DiagnosticStatus {
     if (!confirmed) throw new Error("Clearing diagnostics requires confirmation");
     const db = this.writable();
-    if (scope === "normal") { db.exec("DELETE FROM events; PRAGMA wal_checkpoint(TRUNCATE); VACUUM; PRAGMA wal_checkpoint(TRUNCATE)"); }
+    if (scope === "normal") {
+      if (db.query("SELECT 1 FROM capture_campaigns WHERE finished=0 AND deadline>? LIMIT 1").get(this.now())) throw new Error("Finish active capture campaigns before clearing their diagnostic evidence");
+      db.exec("DELETE FROM events; PRAGMA wal_checkpoint(TRUNCATE); VACUUM; PRAGMA wal_checkpoint(TRUNCATE)");
+    }
     else {
       db.transaction(() => {
       this.setMeta("captures", JSON.stringify({ ...this.captures(), privateUntil: 0, privateScope: "" }));
@@ -346,8 +398,9 @@ export class DiagnosticStore {
       for (const entry of entries) if (basename(entry.filename) === entry.filename) rmSync(join(this.directory, "private", entry.filename), { force: true });
       const directory = join(this.directory, "private");
       if (existsSync(directory)) for (const file of readdirSync(directory)) if (PRIVATE_FILENAME.test(file) && lstatSync(join(directory, file)).isFile()) rmSync(join(directory, file));
-      db.exec("DELETE FROM attachments");
+      db.exec("DELETE FROM attachments; DELETE FROM capture_campaigns");
       }).immediate();
+      this.contentUploads.clear();
     }
     return this.status();
   }
@@ -389,5 +442,5 @@ export class DiagnosticStore {
     if (this.meta("legacyImportPending") === "1") this.setMeta("legacyImportPending", "0");
     return imported;
   }
-  close(): void { this.database?.close(); }
+  close(): void { this.contentUploads.clear(); this.database?.close(); }
 }

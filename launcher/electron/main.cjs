@@ -1,6 +1,7 @@
 const fs = require("node:fs");
 const net = require("node:net");
 const path = require("node:path");
+const { createHash } = require("node:crypto");
 const { spawn, spawnSync } = require("node:child_process");
 const { pathToFileURL } = require("node:url");
 const {
@@ -25,10 +26,12 @@ const {
   installProcessDiagnosticGuards,
   registerLoggedIpc,
   verifyPackagedDiagnostics,
+  DiagnosticError,
 } = require("./logging.cjs");
 const { RuntimeHost } = require("./runtime.cjs");
 const { ConfigurationReview } = require("./configuration-review.cjs");
 const { CodexRestartController } = require("./codex-restart.cjs");
+const { catalogConfigurationKey } = require("./generated/configuration-summary.cjs");
 const { createRestartAdapter } = require("./codex-restart-platforms.cjs");
 let codexRestartController;
 let diagnosticsLogger;
@@ -56,6 +59,7 @@ const LAUNCHER_PROFILE = resolveLauncherProfile({ appData: app.getPath("appData"
 const IS_DEV_PROFILE = LAUNCHER_PROFILE.kind === DEVELOPMENT_PROFILE;
 const CORE_HOME = LAUNCHER_PROFILE.coreHome;
 const IS_CODEX_PROFILE = LAUNCHER_PROFILE.integrationTarget?.kind === "profile";
+const IS_ISOLATED_CAMPAIGN = LAUNCHER_PROFILE.isolatedCampaign === true;
 const runtimeRegistry = IS_DEV_PROFILE ? null : new RuntimeRegistry({ runtimeRoot: LAUNCHER_PROFILE.runtimeRoot });
 const BROWSER_DESCRIPTOR_PATH = path.join(CORE_HOME, "runtime", "launcher-browser.json");
 const BROWSER_HELPER_PATH = app.isPackaged
@@ -148,6 +152,7 @@ function startCatalogVerificationMonitor({ logger, stateStore }) {
     if (catalogVerificationInFlight || !runtimeSupervisor) return;
     catalogVerificationInFlight = true;
     try {
+      await codexRestartController?.reconcileConfiguration?.();
       const config = runtimeSupervisor.readConfig();
       const health = await runtimeSupervisor.proxyHealthPayload(config);
       if (config.integrationTarget?.kind === "profile") {
@@ -201,9 +206,8 @@ async function restoreCodexRouteAfterRuntimeFailure({ logger, stateStore }) {
     });
     return { restored: true };
   } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    logger.error("bridge.route_restore_after_runtime_failure_failed", { message });
-    return { restored: false, error: message };
+    const problem = require("./problems.cjs").problemFor(error, "The previous Codex route could not be restored; inspect configuration before retrying");
+    return { restored: false, error: problem.message, problem };
   }
 }
 
@@ -504,15 +508,25 @@ function registerIpc({ logger, stateStore }) {
     return choice.canceled || choice.filePaths.length !== 1 ? null : choice.filePaths[0];
   });
   const restartController = () => {
-    if (!codexRestartController) codexRestartController = new CodexRestartController({ adapter: createRestartAdapter(), withIdleBridge: operation => {
+    if (!codexRestartController) codexRestartController = new CodexRestartController({ adapter: createRestartAdapter(),
+      readRevision: () => {
+        let content;
+        try { content = fs.readFileSync(path.join(LAUNCHER_PROFILE.codexHome, "config.toml")); }
+        catch (error) { if (error.code !== "ENOENT") throw error; content = "missing-config"; }
+        return createHash("sha256").update(LAUNCHER_PROFILE.codexHome).update("\0").update(content).update("\0").update(catalogConfigurationKey(runtimeHost.runtimeConfigSnapshot().config)).digest("hex");
+      },
+      savedEvidence: stateStore.read().codexRestartEvidence,
+      saveEvidence: evidence => stateStore.update({ codexRestartEvidence: evidence }),
+      withIdleBridge: operation => {
       if (browserHost.activeTraceId || browserHost.currentOperation() || configurationReview.snapshot()) throw new Error("Finish active work before restarting Codex");
       return runtimeHost.withCodexRestartGuard(operation);
     } });
     return codexRestartController;
   };
-  handle("launcher:codex-restart-availability", () => IS_DEV_PROFILE || IS_CODEX_PROFILE ? { status: "manual", reason: "unsupported" } : restartController().availability());
+  if (!IS_DEV_PROFILE && !IS_CODEX_PROFILE && !IS_ISOLATED_CAMPAIGN) restartController();
+  handle("launcher:codex-restart-availability", () => IS_DEV_PROFILE || IS_CODEX_PROFILE || IS_ISOLATED_CAMPAIGN ? { status: "manual", reason: "unsupported" } : restartController().availability());
   handle("launcher:codex-restart-execute", async (_event, token) => {
-    if (IS_DEV_PROFILE || IS_CODEX_PROFILE || typeof token !== "string") return { status: "manual", reason: "unsupported" };
+    if (IS_DEV_PROFILE || IS_CODEX_PROFILE || IS_ISOLATED_CAMPAIGN || typeof token !== "string") return { status: "manual", reason: "unsupported" };
     const result = await restartController().execute(token);
     if (result.status === "launched") startCatalogVerificationMonitor({ logger, stateStore });
     return result;
@@ -547,7 +561,7 @@ function registerIpc({ logger, stateStore }) {
   handle("launcher:complete-onboarding", (_event, language, rawInteractionMode) => {
     const current = stateStore.read();
     if (!current.githubOpened || !current.xOpened) throw new Error("Open the GitHub and X pages before continuing");
-    if (current.autoStart) setAutostart(app, true);
+    if (current.autoStart && !IS_ISOLATED_CAMPAIGN) setAutostart(app, true);
     const next = stateStore.update({
       language: validateLanguage(language),
       browserInteractionMode: validateBrowserInteractionMode(rawInteractionMode),
@@ -711,12 +725,14 @@ function registerIpc({ logger, stateStore }) {
   handle("launcher:configuration-decision", (_event, approvalId, approved) => configurationReview.decide(approvalId, approved));
   handle("launcher:repair-preview", (_event, protocol, resolutions) => runtimeHost.previewIntegrationRepair(protocol, undefined, resolutions));
   handle("launcher:repair-apply", async (_event, protocol, approvalId, resolutions) => {
-    await runtimeHost.applyIntegrationRepair(protocol, approvalId, resolutions);
-    const state = stateStore.update({ codexRestartRequired: true, codexCatalogVerified: false });
+    const result = await runtimeHost.applyIntegrationRepair(protocol, approvalId, resolutions);
+    const changed = result?.codexRestartRequired !== false;
+    const state = stateStore.update(changed ? { codexRestartRequired: true, codexCatalogVerified: false } : {});
     send("launcher:state-changed", state);
     stopCatalogVerificationMonitor();
-    if (typeof codexRestartController !== "undefined") codexRestartController?.resetEvidence();
-    send("launcher:codex-restart-required", null);
+    await codexRestartController?.reconcileConfiguration().catch(error => logger.warn("codex.restart_baseline_unavailable", { code: error?.code ?? "discovery_failed" }));
+    startCatalogVerificationMonitor({ logger, stateStore });
+    if (changed) send("launcher:codex-restart-required", null);
     return { state };
   });
   handle("launcher:cancel-turns", () => {
@@ -781,10 +797,11 @@ function registerIpc({ logger, stateStore }) {
       );
     }
     const result = IS_DEV_PROFILE ? await runtimeHost.setupDevCore() : await runtimeHost.setupCore(options);
+    const restartRequired = !IS_DEV_PROFILE && result.codexRestartRequired !== false;
     stateStore.update({
       coreSetupComplete: true,
-      codexCatalogVerified: IS_DEV_PROFILE ? true : false,
-      codexRestartRequired: IS_DEV_PROFILE ? false : true,
+      codexCatalogVerified: IS_DEV_PROFILE || (!restartRequired && setupState.codexCatalogVerified === true),
+      codexRestartRequired: restartRequired || (!IS_DEV_PROFILE && setupState.codexRestartRequired === true),
       zeroRiskProEnabled: runtimeHost.runtimeConfigSnapshot().config?.zeroRiskProEnabled === true,
       ...(result.mode === "full" ? {
         mcpRuntimeInstalled: true,
@@ -801,10 +818,10 @@ function registerIpc({ logger, stateStore }) {
         message: error instanceof Error ? error.message : String(error),
       });
     });
-    if (typeof codexRestartController !== "undefined") codexRestartController?.resetEvidence();
+    await codexRestartController?.reconcileConfiguration().catch(error => logger.warn("codex.restart_baseline_unavailable", { code: error?.code ?? "discovery_failed" }));
     if (!IS_DEV_PROFILE) startCatalogVerificationMonitor({ logger, stateStore });
-    if (!IS_DEV_PROFILE) send("launcher:codex-restart-required", null);
-    return { ok: true, stdout: result.stdout, restartRequired: !IS_DEV_PROFILE };
+    if (restartRequired) send("launcher:codex-restart-required", null);
+    return { ok: true, stdout: result.stdout, restartRequired: restartRequired || (!IS_DEV_PROFILE && setupState.codexRestartRequired === true) };
   });
   handle("launcher:setup-mcp", async (_event, input) => {
     const currentMode = stateStore.read().browserInteractionMode;
@@ -848,7 +865,7 @@ function registerIpc({ logger, stateStore }) {
 
   handle("launcher:autostart", (_event, enabled) => {
     if (IS_DEV_PROFILE) throw new Error("The isolated DEV launcher is started explicitly from the repository CLI");
-    if (IS_CODEX_PROFILE) throw new Error("Named profile launchers are started explicitly; changing the desktop-wide login item from a profile is not supported");
+    if (IS_CODEX_PROFILE || IS_ISOLATED_CAMPAIGN) throw new Error("Isolated and named profile launchers are started explicitly; changing the desktop-wide login item is not supported");
     const desired = enabled === true;
     const autostart = setAutostart(app, desired);
     return {
@@ -1065,8 +1082,8 @@ async function start() {
       codexRestartRequired: false,
     });
   }
-  const autostart = IS_DEV_PROFILE || IS_CODEX_PROFILE ? { supported: false, enabled: false } : getAutostart(app);
-  if (!IS_DEV_PROFILE && !IS_CODEX_PROFILE
+  const autostart = IS_DEV_PROFILE || IS_CODEX_PROFILE || IS_ISOLATED_CAMPAIGN ? { supported: false, enabled: false } : getAutostart(app);
+  if (!IS_DEV_PROFILE && !IS_CODEX_PROFILE && !IS_ISOLATED_CAMPAIGN
     && stateStore.read().onboardingComplete
     && autostart.supported
     && stateStore.read().autoStart !== autostart.enabled) {
@@ -1202,7 +1219,12 @@ async function start() {
     fs.mkdirSync(path.dirname(markerPath), { recursive: true });
     // The isolated package fixture tests the workspace, not external onboarding links.
     send("launcher:state-changed", stateStore.update({ onboardingComplete: true, language: "en" }));
-    await verifyPackagedDiagnostics(logger, path.join(path.dirname(markerPath), "diagnostics-report.html"), mainWindow.webContents);
+    // Exercise a normal action across real IPC/contextBridge without invoking live Doctor.
+    ipcMain.removeHandler("launcher:doctor");
+    registerLoggedIpc(ipcMain, logger, "launcher:doctor", async () => {
+      throw new DiagnosticError({ code: "packaged_action_failure", message: "Synthetic action boundary failure", findings: [{ path: "fixture.action", message: "Structured action evidence survived" }], actions: ["open-diagnostics"] });
+    });
+    await verifyPackagedDiagnostics(logger, path.join(path.dirname(markerPath), "diagnostics-report.html"), mainWindow.webContents, problem => publishOperation({ name: "runtime-start", status: "failed", message: problem.message, problem }));
     fs.writeFileSync(markerPath, `${JSON.stringify({
       ok: true,
       version: app.getVersion(),
@@ -1252,7 +1274,7 @@ async function start() {
         send("launcher:state-changed", failed);
       });
     }
-  } else void (async () => {
+  } else void require("./startup.cjs").runStartup({ logger, start: async (observeRuntime) => {
     await startupAuthenticationRefresh;
     const upgrade = await runtimeHost.upgradeManagedRuntime();
     if (upgrade.updated) {
@@ -1292,11 +1314,11 @@ async function start() {
       }
     }
     const runtime = await runtimeSupervisor.startIfConfigured();
+    observeRuntime(runtime.status);
     if (runtime.status !== "ready") return runtime;
     const route = await runtimeHost.connectBridgeRoute();
     return { ...runtime, bridgeRouteChanged: route.changed === true };
-  })().then(async (runtime) => {
-    if (runtime.status === "ready") {
+  }, ready: async (runtime) => {
       const config = runtimeSupervisor.readConfig();
       const current = stateStore.read();
       const patch = {
@@ -1318,10 +1340,7 @@ async function start() {
         send("launcher:state-changed", state);
       }
       startCatalogVerificationMonitor({ logger, stateStore });
-      return;
-    }
-    if (runtime.status === "not-configured") {
-      const routeRecovery = await restoreCodexRouteAfterRuntimeFailure({ logger, stateStore });
+  }, notConfigured: async () => {
       const current = stateStore.read();
       if (current.coreSetupComplete || current.mcpRuntimeInstalled || current.mcpSetupComplete) {
         const state = stateStore.update({
@@ -1333,47 +1352,15 @@ async function start() {
         });
         send("launcher:state-changed", state);
       }
-      if (routeRecovery.error) {
-        publishOperation({
-          name: "runtime-start",
-          status: "failed",
-          message: `Local runtime is not configured; restoring the previous Codex route also failed: ${routeRecovery.error}`,
-        });
-      }
-      return;
-    }
-    const routeRecovery = await restoreCodexRouteAfterRuntimeFailure({ logger, stateStore });
+  }, recover: () => restoreCodexRouteAfterRuntimeFailure({ logger, stateStore }), cancelled: () => publishOperation({ name: "runtime-start", status: "cancelled", message: "Startup review cancelled" }), failed: async (problem) => {
     const state = stateStore.update({ coreSetupComplete: false, codexCatalogVerified: false });
     send("launcher:state-changed", state);
-    if (runtime.status === "external" || runtime.status === "needs-setup") {
-      const detail = runtime.detail || (
-        runtime.status === "external"
-          ? "Another process owns the configured Codex Web GPT runtime"
-          : "The installed runtime configuration must be repaired from Setup"
-      );
-      publishOperation({
-        name: "runtime-start",
-        status: "failed",
-        message: routeRecovery.error
-          ? `${detail}; restoring the previous Codex route also failed: ${routeRecovery.error}`
-          : routeRecovery.restored
-            ? `${detail}; the previous Codex route was restored, restart Codex once`
-            : detail,
-      });
-    }
-  }).catch(async (error) => {
-    const primary = error instanceof Error ? error.message : String(error);
-    const routeRecovery = error?.code === "CONFIGURATION_REVIEW_REQUIRED"
-      ? {} : await restoreCodexRouteAfterRuntimeFailure({ logger, stateStore });
-    const message = routeRecovery.error
-      ? `${primary}\nRestoring the previous Codex route also failed: ${routeRecovery.error}`
-      : routeRecovery.restored
-        ? `${primary}\nThe previous Codex route was restored; restart Codex once.`
-        : primary;
-    logger.error("runtime.startup_failed", { message });
-    const state = stateStore.update({ coreSetupComplete: false, codexCatalogVerified: false });
-    send("launcher:state-changed", state);
-    publishOperation({ name: "runtime-start", status: "failed", message, problem: error?.problem });
+    publishOperation({ name: "runtime-start", status: "failed", message: problem.message, problem });
+  } }).catch(error => {
+    // Keep failures of startup's state/notification handoff observable too.
+    const operation = logger.diagnostics.begin("runtime-start-handoff");
+    operation.problem(error, "Startup could not publish its final state");
+    operation.end("failed");
   });
 
   app.on("activate", () => showMainWindow());

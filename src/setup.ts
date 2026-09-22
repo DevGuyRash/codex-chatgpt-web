@@ -1,4 +1,5 @@
 import { existsSync } from "node:fs";
+import { catalogConfigurationKey } from "./configuration-summary";
 import { DiagnosticError } from "./diagnostics/problems";
 import { runtimeDiagnostics } from "./diagnostics/runtime";
 import { randomBytes } from "node:crypto";
@@ -48,7 +49,7 @@ import { connectTunnel, createTunnelConfig, installRuntimeKey, installRuntimeKey
 import { getTunnelServiceStatus, installTunnelService, restartTunnelService, stopTunnelService, tunnelServiceDefinitionMatches, uninstallTunnelService } from "./tunnel-service";
 import { VERSION } from "./version";
 import { configurationApprovalId, describeCodexConfigurationChanges, describeCodexSourceChange } from "./codex-configuration-plan";
-import { getCodexConfigPath, serializeJournal, snapshotFile, writeFilesWithCompensation } from "./codex-integration-shared";
+import { configurationWritesChanged, getCodexConfigPath, serializeJournal, snapshotFile, writeFilesWithCompensation } from "./codex-integration-shared";
 import { inspectCodexConfigSource } from "./codex-config-source";
 import { CodexConfigurationError } from "./codex-configuration-error";
 import type { CodexRepairPreview, IntegrationTarget, ConfigurationResolutionSelection } from "./contracts/codex-integration";
@@ -86,7 +87,7 @@ export interface SetupResult {
   loginCreated: boolean;
   serviceLoaded: boolean;
   tunnelReady: boolean | null;
-  codexRestartRequired: true;
+  codexRestartRequired: boolean;
   connectorSetupRequired: boolean;
 }
 
@@ -509,7 +510,7 @@ function prepareSetupConfiguration(options: SetupOptions) {
   const integrationPlan = prepareCodexIntegration(prepared.config, { target: options.target, resolutions: options.resolutions, replaceExistingRoute: options.replaceCodexRoute, reviewOwnedChanges: true, migrateBase: options.migrateBase });
   const original = integrationPlan.expected.find(file => file.path === getCodexConfigPath(options.target))?.data?.toString("utf8") ?? "";
   const changes = describeCodexConfigurationChanges(original, integrationPlan.configWrite.data);
-  const configKeys = ["mode", "subagentProtocol", "releaseVersion", "host", "port", "browserHost", "browserInteractionMode", "appName", "experimentalBiggerContext", "zeroRiskProEnabled", "autoApproveToolCalls"] as const;
+  const configKeys = ["mode", "subagentProtocol", "releaseVersion", "host", "port", "browserHost", "browserInteractionMode", "appName", "solAvailable", "proAvailable", "experimentalBiggerContext", "zeroRiskProEnabled", "autoApproveToolCalls"] as const;
   for (const key of configKeys) {
     const current = prepared.existing?.[key] ?? null;
     const proposed = prepared.config[key];
@@ -525,7 +526,7 @@ function prepareSetupConfiguration(options: SetupOptions) {
     changes, conflicts: integrationPlan.conflicts ?? [],
     textChanges: [...describeCodexSourceChange(getCodexConfigPath(options.target), original, integrationPlan.configWrite.data), ...(integrationPlan.migration ? describeCodexSourceChange(integrationPlan.migration.base.configPath, integrationPlan.migration.original, integrationPlan.migration.restored) : [])],
     resolutions: options.resolutions ?? [],
-    codexRestartRequired: true, launcherRestartRequired: false,
+    codexRestartRequired: Boolean(integrationPlan.migration) || configurationWritesChanged([integrationPlan.configWrite, ...(integrationPlan.additionalWrites ?? [])], integrationPlan.expected) || catalogConfigurationKey(prepared.existing) !== catalogConfigurationKey(prepared.config), launcherRestartRequired: false,
     effects: [
       options.target?.kind === "profile" ? "Update only this profile's configuration, ownership records, and generated model catalog; leave the shared native model cache unchanged." : "Apply the listed Codex configuration changes and update their installation ownership records; invalidate the cached Codex model catalog.",
       ...(integrationPlan.migration ? [`Also restore still-owned base routing, protocol settings, and Interrupt cleanup in ${integrationPlan.migration.base.configPath}. Preserve original restoration records in ${integrationPlan.migration.archive}. Quit the base launcher and stop its service before applying; migration does not stop or restart that runtime.`] : []),
@@ -715,7 +716,7 @@ export async function setup(options: SetupOptions): Promise<SetupResult> {
     loginCreated,
     serviceLoaded: launcherOwned ? false : getServiceStatus().loaded,
     tunnelReady,
-    codexRestartRequired: true,
+    codexRestartRequired: prepared.preview.codexRestartRequired,
     connectorSetupRequired: config.mode === "full",
   };
 }

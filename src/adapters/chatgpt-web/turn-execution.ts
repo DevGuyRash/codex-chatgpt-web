@@ -1,11 +1,12 @@
 import { createHash } from "node:crypto";
 import type { AdapterEvent, CodexParsedRequest } from "../../types";
 import type { BrokerToolRequest } from "./turn-broker";
-import { chatGptBrowserTabClosedError } from "./adapter-error";
+import { ChatGptWebAdapterError, chatGptBrowserTabClosedError, chatGptTurnSupersededError } from "./adapter-error";
 import {
   extractChatGptCompactionSourceRevision,
   extractChatGptTurnIdentity,
   extractChatGptTurnUserRevision,
+  extractChatGptTurnUserRevisionIdentity,
 } from "./environment";
 import { MAX_CHATGPT_BROWSER_TABS } from "./concurrency";
 import type { ChatGptExternalTurnProgress } from "./turn-progress";
@@ -183,16 +184,41 @@ function compactionInputRevision(parsed: CodexParsedRequest): unknown[] {
   return input;
 }
 
+export interface ChatGptTurnInputLineage {
+  readonly head: string;
+  readonly ancestors: ReadonlySet<string>;
+}
+
+/** Exact native input prefixes establish direction; matching prompt text alone does not. */
+export function chatGptTurnInputLineage(parsed: CodexParsedRequest): ChatGptTurnInputLineage {
+  const revision = extractChatGptTurnUserRevision(parsed);
+  const input = compactionInputRevision(parsed);
+  const digest = createHash("sha256");
+  const ancestors = new Set<string>();
+  for (const value of input) {
+    digest.update(JSON.stringify(value)).update("\n");
+    if (!value || typeof value !== "object" || Array.isArray(value)) continue;
+    const item = value as Record<string, unknown>;
+    if (item.type !== "message" || item.role !== "user") continue;
+    const head = digest.copy().digest("hex");
+    if (item.content === revision) return { head, ancestors };
+    ancestors.add(head);
+  }
+  throw new Error("ChatGPT web cannot locate the native user revision in its input history");
+}
+
 export function chatGptTurnExecutionKey(parsed: CodexParsedRequest): string {
   const identity = extractChatGptTurnIdentity(parsed);
   if (!identity.turnId) throw new Error("ChatGPT web requires native Codex turn_id metadata for browser-session replay");
+  const revision = parsed._compactionRequest ? undefined : extractChatGptTurnUserRevisionIdentity(parsed);
   return executionKey(parsed, {
     threadId: identity.threadId,
     turnId: identity.turnId,
     purpose: parsed._compactionRequest ? "compaction" : "response",
     revision: parsed._compactionRequest
       ? compactionInputRevision(parsed)
-      : extractChatGptTurnUserRevision(parsed),
+      : revision!.content,
+    nativeMessageId: revision?.messageId,
   });
 }
 
@@ -248,6 +274,7 @@ export function chatGptCompactionSourceExecutionKey(parsed: CodexParsedRequest):
     turnId: source.turnId ?? identity.turnId,
     purpose: "response",
     revision: source.content,
+    nativeMessageId: source.messageId,
   });
 }
 
@@ -274,12 +301,23 @@ export class ChatGptTurnSession {
     failure?: Error;
   }>();
 
+  private superseded = false;
+
+  assertNotSuperseded(): void {
+    if (this.superseded) throw chatGptTurnSupersededError();
+  }
+
+  markSuperseded(): void {
+    this.superseded = true;
+  }
+
   constructor(
     readonly runtime: ChatGptTurnRuntime,
     readonly traceId?: string,
     readonly ownerKey?: string,
     readonly nativeTurnId?: string,
     readonly nativeThreadId?: string,
+    readonly inputLineage?: ChatGptTurnInputLineage,
   ) {
     this.attachedConversationKey = runtime.conversationKey;
     this.physicalSettlement = runtime.physicalSettlement.then(
@@ -494,10 +532,12 @@ export class ChatGptTurnSessions {
     ownerKey?: string,
     nativeTurnId?: string,
     nativeThreadId?: string,
+    inputLineage?: ChatGptTurnInputLineage,
   ): ChatGptTurnSession {
     this.prune();
     const existing = this.entries.get(key);
     if (existing) {
+      existing.assertNotSuperseded();
       existing.touch();
       return existing;
     }
@@ -508,7 +548,7 @@ export class ChatGptTurnSessions {
       );
     }
     if (this.entries.size >= this.maxEntries) throw new Error(`ChatGPT web session registry is full (${this.maxEntries} entries)`);
-    const session = new ChatGptTurnSession(start(), traceId, ownerKey, nativeTurnId, nativeThreadId);
+    const session = new ChatGptTurnSession(start(), traceId, ownerKey, nativeTurnId, nativeThreadId, inputLineage);
     this.entries.set(key, session);
     const conversationKey = session.conversationKey();
     if (conversationKey) this.conversationHeads.set(conversationKey, session);
@@ -523,11 +563,33 @@ export class ChatGptTurnSessions {
     signal?: AbortSignal,
     nativeTurnId?: string,
     nativeThreadId?: string,
+    inputLineage?: ChatGptTurnInputLineage,
   ): Promise<ChatGptTurnSession> {
     for (;;) {
       if (signal?.aborted) throw new DOMException("ChatGPT web turn aborted", "AbortError");
+      if (inputLineage && nativeTurnId && nativeThreadId) {
+        // Include terminal sessions: a delayed predecessor is stale after the newer response
+        // finishes too. This evidence shares the registry's bounded replay retention.
+        for (const [knownKey, session] of this.entries) {
+          if (session.ownerKey === ownerKey && session.nativeTurnId === nativeTurnId
+            && session.nativeThreadId === nativeThreadId && session.inputLineage) {
+            if (session.inputLineage.ancestors.has(inputLineage.head)) throw chatGptTurnSupersededError();
+            if (knownKey !== key && inputLineage.ancestors.has(session.inputLineage.head)) {
+              // Keep the predecessor tombstone even if a later failure retires the replacement.
+              session.markSuperseded();
+            }
+          }
+        }
+      }
       const existing = this.entries.get(key);
       if (existing) {
+        existing.assertNotSuperseded();
+        if (inputLineage && existing.inputLineage && inputLineage.ancestors.has(existing.inputLineage.head)) {
+          throw new ChatGptWebAdapterError(
+            "The new native instruction repeats an existing execution revision; it cannot safely reuse that browser response.",
+            { status: 409, errorType: "invalid_request_error", code: "chatgpt_turn_revision_conflict", retryable: false },
+          );
+        }
         existing.touch();
         return existing;
       }
@@ -540,21 +602,30 @@ export class ChatGptTurnSessions {
         ownedKey !== key && session.ownerKey === ownerKey && !session.isPhysicallySettled()
       ));
       if (activeOwner) {
-        const [, ownedSession] = activeOwner;
+        const [ownedKey, ownedSession] = activeOwner;
+        if (nativeTurnId && nativeThreadId && ownedSession.nativeTurnId === nativeTurnId
+          && ownedSession.nativeThreadId === nativeThreadId && ownedSession.inputLineage
+          && inputLineage?.ancestors.has(ownedSession.inputLineage.head)) {
+          ownedSession.markSuperseded();
+          this.forgetConversationHead(ownedSession);
+          await awaitWithAbort(this.beginRetirement(ownedKey, ownedSession, chatGptTurnSupersededError()), signal);
+          continue;
+        }
         // A different native message for the same thread is sequential work, not permission to
         // kill the response already using that retained conversation. Wait for its complete
         // browser/launcher settlement; explicit tab close and lifecycle cancellation remain the
-        // only paths that preempt an active owner.
+        // other paths that preempt an active owner, alongside proved same-turn steering above.
         await awaitWithAbort(ownedSession.physicalSettlement, signal);
         continue;
       }
       if (signal?.aborted) throw new DOMException("ChatGPT web turn aborted", "AbortError");
-      return this.getOrCreate(key, start, traceId, ownerKey, nativeTurnId, nativeThreadId);
+      return this.getOrCreate(key, start, traceId, ownerKey, nativeTurnId, nativeThreadId, inputLineage);
     }
   }
 
   find(key: string): ChatGptTurnSession | undefined {
     const session = this.entries.get(key);
+    session?.assertNotSuperseded();
     session?.touch();
     return session;
   }

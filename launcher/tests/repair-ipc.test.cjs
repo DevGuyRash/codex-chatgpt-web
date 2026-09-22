@@ -14,7 +14,7 @@ test("profile migration uses the existing setup IPC owner and preserves its expl
   const registration = main.slice(main.indexOf("function registerIpc("), main.indexOf("async function requestQuit("));
   const stateStore = { read: () => ({ browserInteractionMode: "manual" }), update() {} };
   vm.runInNewContext(`${registration}\nregisterIpc({ logger: { error() {}, warn() {} }, stateStore });`, {
-    stateStore, IS_DEV_PROFILE: false, IS_CODEX_PROFILE: true, registerLoggedIpc, registerDiagnosticsIpc, runtimeSupervisor: null,
+    codexRestartController: undefined, stateStore, IS_DEV_PROFILE: false, IS_CODEX_PROFILE: true, registerLoggedIpc, registerDiagnosticsIpc, runtimeSupervisor: null,
     ipcMain: { handle: (name, handler) => handlers.set(name, handler), on() {} }, publishOperation() {},
     runtimeHost: { setupCore: async options => { if (failSetup) throw new Error("Setup cancelled"); calls.push(JSON.parse(JSON.stringify(options))); return { mode: "browser-only", stdout: "" }; }, runtimeConfigSnapshot: () => ({ config: {} }) },
     send: name => events.push(name),
@@ -41,6 +41,7 @@ test("repair preload arguments reach the registered main handlers without the El
   const registration = main.slice(main.indexOf("function registerIpc("), main.indexOf("async function requestQuit("));
   const state = { codexRestartRequired: true };
   const context = {
+    IS_DEV_PROFILE: false, IS_CODEX_PROFILE: false, IS_ISOLATED_CAMPAIGN: false, codexRestartController: { reconcileConfiguration: async () => {} }, startCatalogVerificationMonitor() {},
     configurationReview: new ConfigurationReview({ publish() {} }),
     registerLoggedIpc, registerDiagnosticsIpc, runtimeSupervisor: null,
     publishOperation: operation => operations.push(operation),
@@ -68,6 +69,6 @@ test("repair preload arguments reach the registered main handlers without the El
   assert.equal(context.configurationReview.snapshot(), null);
   const problem = { code: "codex_configuration_conflict", message: "Configuration differs", findings: [], actions: ["review-configuration"] };
   context.runtimeHost.previewIntegrationRepair = async () => { throw Object.assign(new Error(problem.message), { problem }); };
-  await assert.rejects(api.previewIntegrationRepair("native"), /Configuration differs/);
+  assert.equal((await api.previewIntegrationRepair("native")).problem.message, "Configuration differs");
   assert.equal(operations.at(-1).problem, problem);
 });

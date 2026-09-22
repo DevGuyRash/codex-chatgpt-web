@@ -6,6 +6,39 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { callTurnBroker, TurnBroker } from "../src/adapters/chatgpt-web/turn-broker";
 import { defaultBrokerEndpoint, isWindowsPipeEndpoint } from "../src/config";
+import { ChatGptNativeTurnInterruptedError, chatGptTurnSupersededError } from "../src/adapters/chatgpt-web/adapter-error";
+import { DiagnosticStore } from "../src/diagnostics/store";
+import { Diagnostics } from "../src/diagnostics/instrumentation";
+import { runtimeDiagnostics, setRuntimeDiagnostics } from "../src/diagnostics/runtime";
+
+test("broker terminal evidence distinguishes authenticated native interruption and supersession from generic abort", async () => {
+  const root = mkdtempSync(join(tmpdir(), "cgw-broker-termination-"));
+  const store = new DiagnosticStore(join(root, "diagnostics"));
+  const diagnostics = new Diagnostics({ emit: event => { store.append([event]); } }, { component: "runtime", target: "fixture", environment: "test" });
+  const prior = runtimeDiagnostics(); setRuntimeDiagnostics(diagnostics);
+  const socketPath = defaultBrokerEndpoint(root), broker = TurnBroker.forSocket(socketPath);
+  try {
+    const reasons = [new ChatGptNativeTurnInterruptedError(), chatGptTurnSupersededError(), new DOMException("Codex turn interrupted", "AbortError")];
+    for (const [index, reason] of reasons.entries()) {
+      const token = await broker.register({ cwd: root, roots: [root], writableRoots: [root], sandboxPolicy: { type: "dangerFullAccess" }, tools: [] }, 10_000, `browser-${index}`);
+      const { bindingId } = await callTurnBroker<{ bindingId: string }>(socketPath, { method: "claim", token });
+      const invocation = callTurnBroker(socketPath, { method: "invoke", bindingId, wireName: "exec_command", arguments: {} });
+      const rejected = invocation.then(() => undefined, error => error);
+      const calls = await broker.nextToolBatch(token);
+      expect(calls).toHaveLength(1);
+      broker.revoke(token, reason);
+      expect(await rejected).toMatchObject({ message: reason.message });
+    }
+    const terminals = store.query({ ascending: true }).events.filter(event => event.name === "mcp.tool" && event.span?.endTime !== undefined);
+    expect(terminals).toHaveLength(3);
+    expect(terminals.map(event => [event.taskId, event.span?.outcome, event.attributes.termination])).toEqual([
+      ["browser-0", "cancelled", "native_interrupt"], ["browser-1", "interrupted", "superseded"], ["browser-2", "cancelled", undefined],
+    ]);
+    expect(new Set(terminals.map(event => event.attributes.callId)).size).toBe(3);
+  } finally {
+    await broker.close(); await diagnostics.close(); setRuntimeDiagnostics(prior); store.close(); rmSync(root, { recursive: true, force: true });
+  }
+});
 
 test("explicit browser-turn cancellation aborts and removes every registered session", async () => {
   const sessions = new ChatGptTurnSessions();

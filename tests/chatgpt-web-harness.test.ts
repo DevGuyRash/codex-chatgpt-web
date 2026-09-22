@@ -2064,6 +2064,76 @@ describe("ChatGPT outer-native harness v4", () => {
     await broker.close();
   });
 
+  test("steering with completed native tool results replaces the waiting browser without replaying the tool", async () => {
+    const socketPath = brokerTestEndpoint(`cgw-steer-${process.pid}-${Date.now()}`);
+    const provider: CodexProviderConfig = {
+      adapter: "chatgpt-web", baseUrl: `browser://chatgpt-steer-${Date.now()}`,
+      chatgptWeb: { brokerSocketPath: socketPath, localToolsEnabled: true, solAvailable: true, proAvailable: false },
+    };
+    const worker = ChatGptBrowserWorker.forProvider(provider);
+    const originalRun = worker.run.bind(worker);
+    let browserStarts = 0;
+    let releaseCleanup!: () => void;
+    const cleanup = new Promise<void>(resolve => { releaseCleanup = resolve; });
+    (worker as unknown as { run: (turn: BrowserTurn) => Promise<string> }).run = async turn => {
+      const ordinal = ++browserStarts;
+      const prepared = await turn.prepare();
+      try {
+        if (ordinal === 2) {
+          expect(prepared.text).toContain("already-executed-native-output");
+          expect(prepared.text).toContain("Also write steering.txt");
+          turn.onTextDelta("Corrected task complete");
+          return "Corrected task complete";
+        }
+        const token = prepared.text.match(/turn_token (turn_[A-Za-z0-9_-]+)/)?.[1];
+        if (!token) throw new Error("turn token missing");
+        const claimed = await callTurnBroker<{ bindingId: string }>(socketPath, { method: "claim", token });
+        await invokeAfterBrowserBoundary(turn, () => callTurnBroker(socketPath, {
+          method: "invoke", bindingId: claimed.bindingId, wireName: "exec_command", freeform: false,
+          arguments: { cmd: "cat input.json", workdir: tempRoot },
+        }, 5_000));
+        throw new Error("Superseded browser must not continue its tool loop");
+      } finally {
+        if (ordinal === 1) await cleanup;
+        prepared.release();
+      }
+    };
+    const adapter = createChatGptWebAdapter(provider);
+    const initial = rawWireRequest(environmentXml);
+    try {
+      const firstEvents: AdapterEvent[] = [];
+      await adapter.runTurn!(initial, { headers: new Headers() }, event => firstEvents.push(event));
+      const call = firstEvents.find((event): event is Extract<AdapterEvent, { type: "tool_call_start" }> => event.type === "tool_call_start");
+      expect(call?.name).toBe("exec_command");
+      const steered = structuredClone(initial);
+      steered.context.messages.push(
+        { role: "toolResult", toolCallId: call!.id, toolName: "exec_command", content: "already-executed-native-output", isError: false, timestamp: 3 },
+        { role: "user", content: "Also write steering.txt", timestamp: 4 },
+      );
+      (steered._rawBody as { input: unknown[] }).input.push(
+        { type: "function_call", call_id: call!.id, name: "exec_command", arguments: '{"cmd":"cat input.json"}' },
+        { type: "function_call_output", call_id: call!.id, output: "already-executed-native-output" },
+        structuredClone((initial._rawBody as { input: unknown[] }).input[0]),
+        { type: "message", role: "user", id: "msg_steer", content: [{ type: "input_text", text: "Also write steering.txt" }], internal_chat_message_metadata_passthrough: { turn_id: "turn_test_123" } },
+      );
+      const nextEvents: AdapterEvent[] = [];
+      const replacement = adapter.runTurn!(steered, { headers: new Headers() }, event => nextEvents.push(event));
+      await Bun.sleep(10);
+      expect(browserStarts).toBe(1);
+      releaseCleanup();
+      await replacement;
+      expect(browserStarts).toBe(2);
+      expect(nextEvents.some(event => event.type === "tool_call_start")).toBeFalse();
+      expect(nextEvents.at(-1)).toMatchObject({ type: "done", endTurn: true });
+      await expect(adapter.runTurn!(initial, { headers: new Headers() }, () => {})).rejects.toMatchObject({ code: "chatgpt_turn_superseded" });
+      expect(browserStarts).toBe(2);
+    } finally {
+      releaseCleanup();
+      (worker as unknown as { run: (turn: BrowserTurn) => Promise<string> }).run = originalRun;
+      await TurnBroker.forSocket(socketPath).close();
+    }
+  });
+
   test("recalculates usage from tool results added during the active browser turn", async () => {
     const socketPath = brokerTestEndpoint(`cgw-h3-usage-${process.pid}-${Date.now()}`);
     const provider: CodexProviderConfig = {

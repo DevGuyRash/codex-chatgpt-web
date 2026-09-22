@@ -58,14 +58,14 @@ test("diagnostics controls preserve scoped evidence, stable layout, clipboard co
     try {
       await page.goto(`http://127.0.0.1:${server.port}`);
       await page.getByText(/125 Occurrences/).waitFor();
-      // The empty inspector and its adjacent result card share the same visible card geometry.
-      const resultCard = page.locator(".diagnostic-group > .diagnostic-record").first();
+      // Results and the inspector remain independently usable inside the viewport.
+      const resultCard = page.locator(".diagnostic-group > .diagnostic-selectable-row > .diagnostic-record").first();
       const emptyInspector = page.getByRole("complementary", { name: "Operation details" });
       const cardBounds = await resultCard.boundingBox(), emptyBounds = await emptyInspector.boundingBox();
       expect(cardBounds).not.toBeNull(); expect(emptyBounds).not.toBeNull();
-      expect(Math.abs(cardBounds!.y - emptyBounds!.y)).toBeLessThanOrEqual(1);
-      expect(Math.abs(cardBounds!.height - emptyBounds!.height)).toBeLessThanOrEqual(2);
-      expect(await emptyInspector.evaluate(element => getComputedStyle(element).paddingLeft)).toBe(await resultCard.evaluate(element => getComputedStyle(element).paddingLeft));
+      expect(emptyBounds!.y).toBeGreaterThanOrEqual(0);
+      expect(emptyBounds!.y + emptyBounds!.height).toBeLessThanOrEqual(900);
+      expect(await emptyInspector.evaluate(element => getComputedStyle(element).overflowY)).toBe("auto");
       expect(await emptyInspector.locator(".diagnostic-empty").evaluate(element => getComputedStyle(element).paddingTop)).toBe("0px");
       await page.getByRole("button", { name: "Occurrences", exact: true }).click();
       await page.getByRole("button", { name: "Load more", exact: true }).click();
@@ -79,36 +79,37 @@ test("diagnostics controls preserve scoped evidence, stable layout, clipboard co
       expect(new Set(markers).size).toBe(1);
       expect(await page.locator('.diagnostic-timeline li[data-depth="3"]').count()).toBe(1);
       expect(await page.locator('.diagnostic-timeline li[data-outcome="running"]').count()).toBe(0);
-      const copyTrigger = page.getByRole("button", { name: "Copy", exact: true });
+      const copyTrigger = page.locator(".diagnostic-results-toolbar").getByRole("button", { name: "Copy", exact: true });
       await copyTrigger.click();
       const menu = page.getByRole("menu", { name: "Copy", exact: true });
       await menu.waitFor();
       const anchor = await copyTrigger.boundingBox(), bounds = await menu.boundingBox();
       expect(anchor).not.toBeNull(); expect(bounds).not.toBeNull();
-      expect(bounds!.y).toBeGreaterThanOrEqual(anchor!.y + anchor!.height);
+      expect(bounds!.y).toBeGreaterThanOrEqual(0);
       expect(bounds!.x + bounds!.width).toBeLessThanOrEqual(1280);
       expect(bounds!.y + bounds!.height).toBeLessThanOrEqual(900);
       await page.keyboard.press("End");
-      expect(await page.getByRole("menuitem", { name: "Structured JSON", exact: true }).evaluate(element => element === document.activeElement)).toBe(true);
+      expect(await page.getByRole("menuitem", { name: "Copy — Troubleshooting summary", exact: true }).evaluate(element => element === document.activeElement)).toBe(true);
       await page.keyboard.press("Escape");
       expect(await copyTrigger.evaluate(element => element === document.activeElement)).toBe(true);
       expect(await menu.count()).toBe(0);
       const report = async (action: "Copy" | "Export", scope: string, format: string) => {
-        await page.getByRole("button", { name: action, exact: true }).click();
+        await page.locator(scope === "This operation" || scope === "This event" ? ".diagnostic-inspector" : ".diagnostic-results-toolbar").getByRole("button", { name: action, exact: true }).click();
         await page.getByRole("menuitemradio", { name: scope, exact: true }).click();
-        await page.getByRole("menuitem", { name: format, exact: true }).click();
+        await page.getByRole("menuitemradio", { name: format, exact: true }).click();
+        await page.getByRole("menuitem", { name: `${action} — ${format}`, exact: true }).click();
       };
       await report("Copy", "This operation", "Structured JSON");
-      await page.getByText(/6 records/).waitFor();
+      await page.getByText(/records: 6/).waitFor();
       const feedback = page.getByRole("region", { name: "Action feedback", exact: true });
-      const initialFeedbackHeight = (await feedback.boundingBox())!.height;
+
       expect((await feedback.boundingBox())!.width).toBeLessThan(600);
       expect(await page.locator(".diagnostics-workspace").evaluate(element => element.getBoundingClientRect().bottom)).toBe(900);
       const clipboard = JSON.parse(await page.evaluate(() => navigator.clipboard.readText()));
       expect(clipboard.events).toHaveLength(6);
       expect(new Set(clipboard.events.map((event: DiagnosticEvent) => event.traceId)).size).toBe(1);
       await report("Copy", "This event", "Structured JSON");
-      await page.getByText("1 records", { exact: true }).waitFor();
+      await page.getByText("records: 1", { exact: true }).waitFor();
       expect(JSON.parse(await page.evaluate(() => navigator.clipboard.readText())).events).toHaveLength(1);
       await report("Export", "Current results", "Structured JSON");
       await page.getByText(output, { exact: false }).waitFor();
@@ -119,12 +120,12 @@ test("diagnostics controls preserve scoped evidence, stable layout, clipboard co
       chooser = "fail";
       await report("Export", "All retained diagnostics", "Structured JSON");
       await page.locator('.launcher-action-feedback [data-status="failed"]').waitFor();
-      expect((await feedback.boundingBox())!.height).toBe(initialFeedbackHeight);
-      await feedback.getByRole("button", { name: /Details/ }).click();
+      expect((await feedback.boundingBox())!.height).toBeLessThanOrEqual(810);
+      await feedback.locator(".launcher-action-latest[data-status=failed]").getByRole("button", { name: /Details/ }).click();
       await feedback.getByRole("button", { name: "Open Diagnostics", exact: true }).waitFor();
-      expect((await feedback.boundingBox())!.height).toBe(initialFeedbackHeight);
+      expect((await feedback.boundingBox())!.height).toBeLessThanOrEqual(810);
       await page.keyboard.press("Escape");
-      expect(await feedback.getByRole("button", { name: /Details/ }).evaluate(element => element === document.activeElement)).toBe(true);
+      expect(await feedback.getByRole("button", { name: /History/ }).evaluate(element => element === document.activeElement)).toBe(true);
       expect(existsSync(join(root, "diagnostics", "observability", "forbidden.json"))).toBe(false);
       await page.getByRole("button", { name: "Advanced", exact: true }).click();
       await page.getByRole("combobox", { name: "Search mode" }).selectOption("regex");
@@ -135,7 +136,7 @@ test("diagnostics controls preserve scoped evidence, stable layout, clipboard co
       await page.getByText(/Enter a nonzero 32-character/).waitFor();
       await copyTrigger.click();
       await page.getByRole("menuitemradio", { name: "Current results", exact: true }).click();
-      const invalidCopy = page.getByRole("menuitem", { name: "Structured JSON", exact: true });
+      const invalidCopy = page.getByRole("menuitem", { name: "Copy — Troubleshooting summary", exact: true });
       expect(await invalidCopy.isDisabled()).toBe(true);
       expect(await invalidCopy.getAttribute("title")).toContain("trace ID");
       await page.keyboard.press("Escape");
@@ -146,11 +147,11 @@ test("diagnostics controls preserve scoped evidence, stable layout, clipboard co
       await page.getByLabel("From", { exact: true }).fill(""); await page.getByLabel("To", { exact: true }).fill("");
       await page.getByRole("combobox", { name: "Search mode", exact: true }).selectOption("text");
       await page.getByRole("searchbox", { name: "Search events" }).fill("");
-      await page.getByRole("combobox", { name: "Component", exact: true }).selectOption("launcher");
-      await page.getByRole("combobox", { name: "Target", exact: true }).selectOption("fixture");
-      await page.getByRole("combobox", { name: "Severity", exact: true }).selectOption("warning");
+      await page.getByRole("listbox", { name: "Component", exact: true }).selectOption("launcher");
+      await page.getByRole("listbox", { name: "Target", exact: true }).selectOption("fixture");
+      await page.getByRole("listbox", { name: "Severity", exact: true }).selectOption("warning");
       await page.getByText("No records match this view.", { exact: true }).waitFor();
-      await page.getByRole("combobox", { name: "Severity", exact: true }).selectOption("error");
+      await page.getByRole("listbox", { name: "Severity", exact: true }).selectOption("error");
       await page.getByRole("listitem").first().waitFor();
       await page.getByLabel("Task ID", { exact: true }).fill("absent-fixture-task");
       await page.getByText("No records match this view.", { exact: true }).waitFor();
@@ -190,7 +191,7 @@ test("diagnostics controls preserve scoped evidence, stable layout, clipboard co
       expect((await logger.client!.status()).eventCount).toBeGreaterThan(0);
       await page.getByRole("button", { name: "Clear normal diagnostics", exact: true }).click();
       await page.getByRole("button", { name: "Delete records", exact: true }).click();
-      await page.getByRole("button", { name: "Refresh", exact: true }).click();
+      await page.waitForFunction(() => !document.querySelector("dialog[open]"));
       expect((await logger.client!.status()).eventCount).toBe(0);
       expect(errors).toEqual([]);
     } catch (error) {

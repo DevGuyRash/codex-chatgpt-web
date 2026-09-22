@@ -20,7 +20,7 @@ test("target selection and native capability picker cross real preload/main IPC 
     const main = fs.readFileSync(require.resolve("../electron/main.cjs"), "utf8");
     const registration = main.slice(main.indexOf("function registerIpc("), main.indexOf("async function requestQuit("));
     vm.runInNewContext(`${registration}\nregisterIpc({ logger: { error() {} }, stateStore: {} });`, {
-      registerLoggedIpc, registerDiagnosticsIpc, resolveIntegrationTarget, runtimeRegistry: registry, IS_CODEX_PROFILE: true, runtimeSupervisor: null,
+      registerLoggedIpc, registerDiagnosticsIpc, resolveIntegrationTarget, runtimeRegistry: registry, IS_DEV_PROFILE: false, IS_CODEX_PROFILE: true, runtimeSupervisor: null,
       LAUNCHER_PROFILE: { integrationTarget: selected, codexHome: selected.codexHome }, SOURCE_ROOT: root, path,
       app: { isPackaged: false }, mainWindow: {}, publishOperation() {},
       process: { execPath: "/absolute/electron", env: { CODEX_CHATGPT_WEB_HOME: selected.runtimeHome, CODEX_HOME: selected.codexHome, OPENAI_API_KEY: "unit-only", CODEX_WEB_GPT_LAUNCHER_CONTROL_TOKEN: "unit-only", CODEX_CHATGPT_WEB_BROWSER_HOST_DESCRIPTOR: "old-descriptor", ELECTRON_RUN_AS_NODE: "1" } },

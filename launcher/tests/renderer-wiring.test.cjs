@@ -102,7 +102,7 @@ test("packaged runtime is verified before launcher browser surfaces can bind por
 
 test("DEV launcher exposes its profile and supervises only its Full-mode MCP runtime", () => {
   assert.match(electronMain, /profile:\s*LAUNCHER_PROFILE\.kind/);
-  assert.match(electronMain, /if \(IS_DEV_PROFILE\) \{[\s\S]*?config\?\.mode === "full"[\s\S]*?runtimeSupervisor\.startIfConfigured\(\)[\s\S]*?\} else void \(async \(\) => \{/);
+  assert.match(electronMain, /if \(IS_DEV_PROFILE\) \{[\s\S]*?config\?\.mode === "full"[\s\S]*?runtimeSupervisor\.startIfConfigured\(\)[\s\S]*?\} else void require\("\.\/startup.cjs"\)\.runStartup\(/);
   assert.match(electronMain, /async function requestQuit\(\{ idleOnly = false, beforeClose \} = \{\}\)/);
   assert.match(electronMain, /await runtimeSupervisor\?\.shutdown\(\{ cancelActiveTurns: !idleOnly, force: !idleOnly \}\)/);
   assert.match(electronMain, /shutdownIdle: beforeClose => requestQuit\(\{ idleOnly: true, beforeClose \}\)/);
@@ -245,7 +245,8 @@ test("MCP verification proves runtime health before checking the connector", () 
 
 test("saved ChatGPT authentication is refreshed before setup is presented", () => {
   assert.match(electronMain, /browserHost\.refreshAuthentication\(\)/);
-  const productionStartup = electronMain.indexOf("} else void (async () => {");
+  const productionStartup = electronMain.indexOf('} else void require("./startup.cjs").runStartup(');
+  assert.ok(productionStartup >= 0, "the production startup owner must be registered");
   const refreshBarrier = electronMain.indexOf("await startupAuthenticationRefresh", productionStartup);
   const upgrade = electronMain.indexOf("runtimeHost.upgradeManagedRuntime()", productionStartup);
   const runtimeStart = electronMain.indexOf("runtimeSupervisor.startIfConfigured()", upgrade);

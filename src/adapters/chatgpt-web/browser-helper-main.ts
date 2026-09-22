@@ -5,6 +5,7 @@ import { parseTraceparent } from "../../diagnostics/instrumentation";
 import type { CodexProviderConfig } from "../../types";
 import { ChatGptBrowserWorker, closeChatGptBrowserWorkers, type BrowserTurn } from "./browser-worker";
 import { ChatGptWebAdapterError } from "./adapter-error";
+import { problemFor } from "../../diagnostics/problems";
 import type { ChatGptWebCapabilities } from "./model";
 import { createProcessLineWriter } from "./process-line-writer";
 import { createBrowserHelperPromptSelection } from "./browser-helper-prompt-selection";
@@ -314,6 +315,7 @@ async function run(message: RunMessage): Promise<void> {
       id: message.id,
       name: error instanceof Error ? error.name : "Error",
       message: error instanceof Error ? error.message : String(error),
+      problem: problemFor(error, "Browser helper operation failed", { origin: "browser-helper", stage: "browser.turn" }),
       ...(error instanceof ChatGptWebAdapterError ? {
         status: error.status,
         errorType: error.errorType,

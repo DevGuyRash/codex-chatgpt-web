@@ -1,11 +1,15 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
+import { AsyncLocalStorage } from "node:async_hooks";
 import { existsSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
 import { createInterface } from "node:readline";
+import { setTimeout as wait } from "node:timers/promises";
 import { runtimeDiagnostics } from "../../diagnostics/runtime";
 import { traceparent } from "../../diagnostics/instrumentation";
 import { notifyLauncherTurn, readLauncherBrowserHostDescriptor } from "../../launcher-browser-host";
 import { ChatGptWebAdapterError } from "./adapter-error";
+import { ProblemSchema, type Problem } from "../../diagnostics/contracts";
+import { safeProblem } from "../../diagnostics/privacy";
 import type { CompiledChatGptWebPrompt } from "./prompt";
 import type { BrowserTurn, ResolvedBrowserConfig } from "./browser-worker";
 import {
@@ -15,6 +19,7 @@ import {
 
 interface PendingTurn {
   turn: BrowserTurn;
+  runInContext: ReturnType<typeof AsyncLocalStorage.snapshot>;
   resolve: (value: string) => void;
   reject: (error: Error) => void;
   abortListener?: () => void;
@@ -44,6 +49,7 @@ type HelperMessage =
       errorType?: string;
       code?: string;
       retryable?: boolean;
+      problem?: Problem;
     };
 
 function parseHelperMessage(line: string): HelperMessage {
@@ -169,6 +175,7 @@ function parseHelperMessage(line: string): HelperMessage {
       type: "error",
       id: message.id,
       message: errorMessage,
+      ...(message.problem === undefined ? {} : { problem: safeProblem(ProblemSchema.parse(message.problem)) }),
       ...(errorName !== undefined ? { name: errorName as string } : {}),
       ...(structured ? {
         status: status as number,
@@ -211,6 +218,7 @@ export class LauncherBrowserHelperClient {
   }
 
   async run(turn: BrowserTurn): Promise<string> {
+    const runInContext = AsyncLocalStorage.snapshot();
     if (turn.abortSignal?.aborted) throw new DOMException("ChatGPT web turn aborted", "AbortError");
     await this.ensureChild();
     if (turn.abortSignal?.aborted) throw new DOMException("ChatGPT web turn aborted", "AbortError");
@@ -234,8 +242,32 @@ export class LauncherBrowserHelperClient {
           rejectResult(new Error(`Duplicate launcher browser turn: ${turn.traceId}`));
           return;
         }
-        const pending: PendingTurn = { turn, resolve: resolveResult, reject: rejectResult };
+        const pending: PendingTurn = { turn, runInContext, resolve: resolveResult, reject: rejectResult };
         this.pending.set(turn.traceId, pending);
+        if (process.env.CODEX_WEB_GPT_CAPTURE_CAMPAIGN_ID && turn.externalProgress) {
+          const helperPid = this.child?.pid;
+          if (!helperPid || !turn.externalProgress.setGenerationGate) {
+            this.pending.delete(turn.traceId);
+            rejectResult(new Error("Campaign tool turns require generation admission support"));
+            return;
+          }
+          const control = (phase: "park" | "resume", revision: number) => {
+            if (this.pending.get(turn.traceId) !== pending || this.child?.pid !== helperPid) throw new Error("Campaign browser generation owner has ended");
+            turn.abortSignal?.throwIfAborted();
+            return notifyLauncherTurn(this.config.browserHostDescriptorPath!, { phase, traceId: turn.traceId, helperPid, revision });
+          };
+          turn.externalProgress.setGenerationGate({
+            park: async revision => { await control("park", revision); },
+            resume: async (revision, signal) => {
+              while (true) {
+                signal?.throwIfAborted();
+                const result = await control("resume", revision);
+                if (!result.queued) return;
+                await wait(1000, undefined, { signal: signal ?? turn.abortSignal });
+              }
+            },
+          });
+        }
         if (turn.abortSignal) {
           const abortListener = () => {
             if (!pending.sent) {
@@ -420,6 +452,12 @@ export class LauncherBrowserHelperClient {
     }
     const pending = this.pending.get(message.id);
     if (!pending) return;
+    // The shared pipe inherits its creation context. Dispatch and asynchronous callbacks
+    // must instead retain the submitting turn, including prompt preparation and broker registration.
+    pending.runInContext(() => this.handleTurnMessage(pending, message));
+  }
+
+  private handleTurnMessage(pending: PendingTurn, message: Exclude<HelperMessage, { type: "ready" }>): void {
     if (message.type === "event") {
       if (message.event === "heartbeat") pending.turn.onHeartbeat?.();
       else if (message.event === "tool_batch_observed") {
@@ -563,7 +601,7 @@ export class LauncherBrowserHelperClient {
     }
     if (message.type === "result") {
       this.finish(message.id);
-      if (pending.localFailure) pending.reject(pending.localFailure);
+      if (pending.localFailure) pending.reject(this.unconfirmedLocalCancellation(pending.localFailure));
       else pending.resolve(message.text);
     } else if (message.type === "error") {
       const error = message.status !== undefined
@@ -576,9 +614,19 @@ export class LauncherBrowserHelperClient {
         : message.name === "AbortError"
           ? new DOMException(message.message, "AbortError")
           : new Error(message.message);
+      if (message.problem) Object.assign(error, { problem: message.problem });
       this.finish(message.id);
-      pending.reject(pending.localFailure ?? error);
+      pending.reject(pending.localFailure
+        ? message.name === "AbortError" ? pending.localFailure : this.unconfirmedLocalCancellation(pending.localFailure, error)
+        : error);
     }
+  }
+
+  private unconfirmedLocalCancellation(localFailure: Error, helperFailure?: Error): ChatGptWebAdapterError {
+    return new ChatGptWebAdapterError("The browser helper did not confirm cancellation after a local lifecycle failure; inspect its settlement before continuing", {
+      status: 502, errorType: "server_error", code: "browser_helper_cancellation_unconfirmed", retryable: false,
+      cause: helperFailure ? new AggregateError([localFailure, helperFailure], "Local cancellation and helper settlement both require inspection") : localFailure,
+    });
   }
 
   private abortWithLocalFailure(id: string, error: Error, pending: PendingTurn): void {
@@ -635,14 +683,16 @@ export class LauncherBrowserHelperClient {
   private finish(id: string): void {
     const pending = this.pending.get(id);
     if (!pending) return;
-    if (pending.abortListener && pending.turn.abortSignal) {
-      pending.turn.abortSignal.removeEventListener("abort", pending.abortListener);
-    }
-    pending.progressForwarding?.abort();
-    pending.progressForwarding = undefined;
-    pending.prepared?.release();
-    pending.prepared = undefined;
-    this.pending.delete(id);
+    pending.runInContext(() => {
+      if (pending.abortListener && pending.turn.abortSignal) {
+        pending.turn.abortSignal.removeEventListener("abort", pending.abortListener);
+      }
+      pending.progressForwarding?.abort();
+      pending.progressForwarding = undefined;
+      pending.prepared?.release();
+      pending.prepared = undefined;
+      this.pending.delete(id);
+    });
   }
 
   private finishWithError(id: string, error: Error): void {

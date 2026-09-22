@@ -49,6 +49,9 @@ export function safeLegacyAttributes(input: unknown): DiagnosticEvent["attribute
 
 export function safeProblem(input: Problem, exportMode = false): Problem {
   return ProblemSchema.parse({ ...input, message: safeText(input.message, exportMode),
+    ...(input.stack ? { stack: safeText(input.stack, exportMode) } : {}),
+    ...(input.evidenceMissing ? { evidenceMissing: safeText(input.evidenceMissing, exportMode) } : {}),
+    ...(input.origin ? { origin: safeText(input.origin, exportMode) } : {}),
     findings: input.findings.map(item => ({ ...(item.path ? { path: exportMode ? "[configuration setting]" : safeText(item.path) } : {}), message: safeText(item.message, exportMode) })),
     causes: input.causes.map(item => ({ code: item.code, message: safeText(item.message, exportMode) })),
   });

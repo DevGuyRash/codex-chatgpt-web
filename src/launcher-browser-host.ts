@@ -1,12 +1,24 @@
 import { existsSync, readFileSync, statSync } from "node:fs";
 import { resolve } from "node:path";
+import { setTimeout as wait } from "node:timers/promises";
 import { chromium, type Browser, type BrowserContext, type Page } from "playwright-core";
 import { expandUserPath } from "./config";
 import { processRunning } from "./process";
+import { runtimeDiagnostics } from "./diagnostics/runtime";
+import { traceparent } from "./diagnostics/instrumentation";
 
 export const LAUNCHER_BROWSER_HOST_KIND = "codex-web-gpt-launcher";
 export const LAUNCHER_BROWSER_IDLE_URL = "data:text/html;charset=utf-8,%3C!doctype%20html%3E%3Chtml%3E%3Chead%3E%3Cmeta%20charset%3D%22utf-8%22%3E%3Ctitle%3ECodex%20Web%20GPT%3C%2Ftitle%3E%3C%2Fhead%3E%3Cbody%3E%3C%2Fbody%3E%3C%2Fhtml%3E#codex-web-gpt-browser-host";
 export type LauncherBrowserHostProfile = "production" | "development";
+
+export class LauncherBrowserControlError extends Error {
+  readonly errorType = "server_error";
+  readonly retryable = false;
+  constructor(message: string, readonly status: number, readonly code: string, cause?: unknown) {
+    super(message, cause === undefined ? undefined : { cause });
+    this.name = "LauncherBrowserControlError";
+  }
+}
 
 export class LauncherBrowserTurnCancelledError extends Error {
   constructor(message: string) {
@@ -140,7 +152,8 @@ function assertDescriptorShape(value: unknown): LauncherBrowserHostDescriptor {
   };
 }
 
-export function readLauncherBrowserHostDescriptor(configuredPath: string): LauncherBrowserHostDescriptor {
+/** Validate persisted ownership metadata without authorizing a connection to a live host. */
+export function readLauncherBrowserHostDescriptorFile(configuredPath: string): LauncherBrowserHostDescriptor {
   const path = resolve(expandUserPath(configuredPath));
   if (!existsSync(path)) throw new Error(`Launcher browser host is unavailable: descriptor is missing at ${path}`);
   const stat = statSync(path);
@@ -157,7 +170,11 @@ export function readLauncherBrowserHostDescriptor(configuredPath: string): Launc
   catch (error) {
     throw new Error(`Launcher browser descriptor is invalid JSON: ${error instanceof Error ? error.message : String(error)}`);
   }
-  const descriptor = assertDescriptorShape(decoded);
+  return assertDescriptorShape(decoded);
+}
+
+export function readLauncherBrowserHostDescriptor(configuredPath: string): LauncherBrowserHostDescriptor {
+  const descriptor = readLauncherBrowserHostDescriptorFile(configuredPath);
   if (!processRunning(descriptor.pid)) {
     throw new Error(`Launcher browser host process is not running (pid ${descriptor.pid})`);
   }
@@ -335,6 +352,7 @@ export const LAUNCHER_SESSION_INSPECTION_TIMEOUT_MS = 30_000;
 export const LAUNCHER_CAPABILITY_INSPECTION_TIMEOUT_MS = 120_000;
 
 export type LauncherTurnActivity =
+  | { phase: "park" | "resume"; traceId: string; helperPid: number; revision: number }
   | {
       phase: "start";
       traceId: string;
@@ -342,6 +360,8 @@ export type LauncherTurnActivity =
       conversationKey?: string;
       connectorIdentity?: string;
       requireRetainedConversation?: boolean;
+      queueAware?: boolean;
+      proGeneration?: boolean;
     }
   | {
       phase: "heartbeat";
@@ -371,6 +391,7 @@ export interface LauncherManualTurnOwner {
 }
 
 export interface LauncherManualTurnStart extends LauncherManualTurnOwner {
+  proGeneration?: boolean;
   prompt: string;
   /** Used only when the exact retained ChatGPT conversation already owns the accumulated history. */
   resumePrompt?: string;
@@ -600,16 +621,20 @@ export async function notifyLauncherTurn(
   reused?: boolean;
   connectorBound?: boolean;
   cancelledByUser?: boolean;
+  queued?: boolean;
+  position?: number;
 }> {
   const descriptor = readLauncherBrowserHostDescriptor(descriptorPath);
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
+  const parent = traceparent(runtimeDiagnostics()?.context());
   try {
     const response = await fetch(`${descriptor.control.endpoint}/v1/turn/${activity.phase}`, {
       method: "POST",
       headers: {
         authorization: `Bearer ${descriptor.control.token}`,
         "content-type": "application/json",
+        ...(parent ? { traceparent: parent } : {}),
       },
       body: JSON.stringify(activity),
       signal: controller.signal,
@@ -627,10 +652,15 @@ export async function notifyLauncherTurn(
         );
       }
       const detail = typeof body.error === "string" ? body.error : "";
-      throw new Error(`HTTP ${response.status}${detail ? `: ${detail}` : ""}`);
+      throw new LauncherBrowserControlError(`Launcher browser control channel failed: HTTP ${response.status}${detail ? `: ${detail}` : ""}`, response.status, typeof body.code === "string" && /^[a-z][a-z0-9_]{0,79}$/.test(body.code) ? body.code : "browser_control_rejected");
     }
     const body = await response.json().catch(() => ({})) as Record<string, unknown>;
+    if (activity.phase === "resume") {
+      if (typeof body.queued !== "boolean" || (body.queued && response.status !== 202)) throw new Error("Launcher returned an invalid generation admission result");
+      return { queued: body.queued, position: typeof body.position === "number" ? body.position : 0 };
+    }
     if (activity.phase === "start") {
+      if (response.status === 202 && activity.queueAware === true && body.queued === true && Number.isSafeInteger(body.position) && Number(body.position) >= 0) return { queued: true, position: Number(body.position) };
       if (typeof body.surfaceId !== "string" || !/^[A-Za-z0-9_-]{32}$/.test(body.surfaceId)) {
         throw new Error("Launcher browser control channel returned an invalid turn surface id");
       }
@@ -655,10 +685,30 @@ export async function notifyLauncherTurn(
     return {};
   } catch (error) {
     if (error instanceof LauncherBrowserTurnCancelledError
-      || error instanceof LauncherRetainedConversationUnavailableError) throw error;
-    throw new Error(`Launcher browser control channel failed: ${error instanceof Error ? error.message : String(error)}`);
+      || error instanceof LauncherRetainedConversationUnavailableError || error instanceof LauncherBrowserControlError) throw error;
+    throw new LauncherBrowserControlError(`Launcher browser control channel failed: ${error instanceof Error ? error.message : String(error)}`, controller.signal.aborted ? 504 : 502, controller.signal.aborted ? "browser_control_timeout" : "browser_control_unavailable", error);
   } finally {
     clearTimeout(timer);
+  }
+}
+
+/** Poll only admission. A queued request has not submitted a prompt and cannot replay model work. */
+export async function acquireLauncherTurn(descriptorPath: string, activity: Extract<LauncherTurnActivity, { phase: "start" }>, signal?: AbortSignal, onQueued?: (position: number) => void) {
+  signal?.throwIfAborted();
+  try {
+    while (true) {
+      signal?.throwIfAborted();
+      const lease = await notifyLauncherTurn(descriptorPath, { ...activity, queueAware: true });
+      signal?.throwIfAborted();
+      if (!lease.queued) return lease;
+      onQueued?.(lease.position ?? 0);
+      await wait(1000, undefined, { signal });
+    }
+  } catch (error) {
+    // Start acknowledgement may have been lost. Release by the same owner before
+    // returning; this never sends or re-sends conversation content.
+    await notifyLauncherTurn(descriptorPath, { phase: "end", traceId: activity.traceId, helperPid: activity.helperPid, status: "aborted" }).catch(() => {});
+    throw error;
   }
 }
 

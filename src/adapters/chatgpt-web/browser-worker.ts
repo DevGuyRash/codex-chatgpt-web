@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { runtimeDiagnostics } from "../../diagnostics/runtime";
+import { isDiagnosticCancellation } from "../../diagnostics/outcome";
 import { captureBrowserCheckpoint } from "../../diagnostics/browser-capture";
 import { parseTraceparent, type Operation } from "../../diagnostics/instrumentation";
 import { chatGptConnectorMenu, CHATGPT_CONNECTOR_ROW_SELECTOR } from "./connector-menu";
@@ -59,7 +60,7 @@ import {
   CHATGPT_USER_TURN_SELECTOR,
   activateChatGptEffortMenu,
   detectChatGptAccountCapabilities,
-  parseChatGptEffortSliderState,
+  readChatGptEffortSliderState,
 } from "../../chatgpt-session";
 import { loginVerificationMarkerPath } from "../../browser-login";
 import {
@@ -69,6 +70,7 @@ import {
   LAUNCHER_TURN_HEARTBEAT_INTERVAL_MS,
   LAUNCHER_TURN_HEARTBEAT_TIMEOUT_MS,
   notifyLauncherTurn,
+  acquireLauncherTurn,
 } from "../../launcher-browser-host";
 import {
   resolveChatGptWebContextLimits,
@@ -195,17 +197,13 @@ function classifyConnectorSelectionError(error: unknown): unknown {
 
 const CHATGPT_MODEL_CONTROL_UNAVAILABLE_MESSAGE = "ChatGPT model controls are unavailable. Reload ChatGPT and retry the task.";
 
-function chatGptModelControlUnavailableError(diagnostic: string): Error {
-  return new Error(CHATGPT_MODEL_CONTROL_UNAVAILABLE_MESSAGE, { cause: new Error(diagnostic) });
-}
-
-function chatGptModelControlUnavailableAdapterError(diagnostic: string): ChatGptWebAdapterError {
+function chatGptModelControlUnavailableError(diagnostic: string): ChatGptWebAdapterError {
   return new ChatGptWebAdapterError(
     CHATGPT_MODEL_CONTROL_UNAVAILABLE_MESSAGE,
     {
       status: 502,
       errorType: "server_error",
-      code: "upstream_server_error",
+      code: "model_control_unavailable",
       retryable: false,
       cause: new Error(diagnostic),
     },
@@ -1706,7 +1704,8 @@ export function browserDiagnosticCheckpoint(value: string): string {
 class ChatGptBrowserDiagnostics {
   constructor(_traceId: string, _root: string, _appName: string) {}
   async capture(page: Page, checkpoint: string, error?: unknown): Promise<void> {
-    await captureBrowserCheckpoint(page, browserDiagnosticCheckpoint(checkpoint), error !== undefined);
+    const readiness = checkpoint === "browser-page-acquired" || checkpoint === "temporary-chat-navigation-complete" ? "preflight" : "conversation";
+    await captureBrowserCheckpoint(page, browserDiagnosticCheckpoint(checkpoint), error !== undefined, readiness);
   }
 }
 
@@ -1903,11 +1902,13 @@ export class ChatGptBrowserWorker {
     if (this.activeRuns.has(turn.traceId)) {
       return Promise.reject(new Error(`Duplicate ChatGPT web browser turn: ${turn.traceId}`));
     }
-    if (this.activeRuns.size >= MAX_CHATGPT_BROWSER_TABS) {
+    const pendingLimit = this.config.browserHost === "launcher" ? 128 : MAX_CHATGPT_BROWSER_TABS;
+    if (this.activeRuns.size >= pendingLimit) {
       return Promise.reject(new Error(
-        `ChatGPT Web supports at most ${MAX_CHATGPT_BROWSER_TABS} simultaneous browser turns; close or finish a browser tab before starting another`,
+        `ChatGPT Web has reached its ${pendingLimit} pending browser request limit`,
       ));
     }
+    if (process.env.CODEX_WEB_GPT_CAPTURE_CAMPAIGN_ID && this.config.browserHost !== "launcher") return Promise.reject(new Error("Campaign browser turns require shared launcher admission"));
     const useHelper = this.config.browserHost === "launcher" && process.env.CODEX_CHATGPT_WEB_BROWSER_HELPER_PROCESS !== "1";
     if (useHelper) {
       this.launcherHelper ??= new LauncherBrowserHelperClient(this.config);
@@ -1919,8 +1920,9 @@ export class ChatGptBrowserWorker {
         const value = await (useHelper ? this.launcherHelper!.run(turn) : this.runExclusive(turn));
         operation?.end(); return value;
       } catch (error) {
-        operation?.problem(error);
-        operation?.end(turn.abortSignal?.aborted || error instanceof Error && error.name === "AbortError" ? "cancelled" : "failed");
+        const cancelled = isDiagnosticCancellation(error);
+        if (!cancelled) operation?.problem(error);
+        operation?.end(cancelled ? "cancelled" : "failed");
         throw error;
       }
     };
@@ -2034,8 +2036,9 @@ export class ChatGptBrowserWorker {
         }
       }
       console.error(`[chatgpt-web] browser turn ${traceId} stage=${stage} failed durationMs=${Math.round(performance.now() - startedAt)}`);
-      diagnosticStage?.problem(surfacedError);
-      diagnosticStage?.end(surfacedError instanceof Error && surfacedError.name === "AbortError" ? "cancelled" : "failed", { timedOut: stageTimedOut });
+      const cancelled = !stageTimedOut && isDiagnosticCancellation(surfacedError);
+      if (!cancelled) diagnosticStage?.problem(surfacedError);
+      diagnosticStage?.end(cancelled ? "cancelled" : "failed", { timedOut: stageTimedOut });
       throw surfacedError;
     } finally {
       if (timer) clearTimeout(timer);
@@ -2127,6 +2130,7 @@ export class ChatGptBrowserWorker {
         );
       }
       await setChatGptThinkMode(composerForm, mode.thinkEnabled, captureDiagnostic);
+      runtimeDiagnostics()?.event("browser.model_selection", "Browser model controls confirmed", { model: mode.modelId, effort: mode.effort, control: "luna-think", thinkEnabled: mode.thinkEnabled }, "info");
       return mode;
     }
     const currentEffort = composerForm.locator(CHATGPT_EFFORT_CONTROL_SELECTOR).last();
@@ -2150,51 +2154,59 @@ export class ChatGptBrowserWorker {
     await throwIfChatGptRateLimitDialog(page);
     await captureDiagnostic?.("effort-control-ready");
     await throwIfChatGptRateLimitDialog(page);
-    const activation = await activateChatGptEffortMenu(page, currentEffort);
+    let activation = await activateChatGptEffortMenu(page, currentEffort);
     if (activation.method === "pointerdown") {
       await captureDiagnostic?.("effort-menu-pointerdown-fallback");
     }
     await captureDiagnostic?.("effort-menu-open-requested");
-    const effortSlider = activation.slider;
-    const sliderContainer = activation.sliderContainer;
-    const waitAbort = new AbortController();
-    try {
-      const ready = await Promise.race([
-        sliderContainer.waitFor({ state: "visible", timeout: 70_000, signal: waitAbort.signal })
-          .then(() => effortSlider.waitFor({ state: "attached", timeout: 70_000, signal: waitAbort.signal }))
-          .then(() => "slider" as const),
-        chatGptRateLimitDialog(page).waitFor({ state: "visible", timeout: 70_000, signal: waitAbort.signal }).then(() => "rate-limit" as const),
-        chatGptExpiredSessionAlert(page).waitFor({ state: "visible", timeout: 70_000, signal: waitAbort.signal }).then(() => "session-expired" as const),
-      ]);
-      if (ready === "rate-limit") await throwIfChatGptRateLimitDialog(page);
-      if (ready === "session-expired") await throwIfChatGptSessionFailureAlert(page);
-      await captureDiagnostic?.("effort-slider-visible");
-    } catch (error) {
-      if (error instanceof ChatGptWebAdapterError) throw error;
+    let effortSlider = activation.slider;
+    let readinessDeadline = Date.now() + 70_000;
+    let reacquired = false, capturedReady = false;
+    let observation: Awaited<ReturnType<typeof readChatGptEffortSliderState>>;
+    while (true) {
       await throwIfChatGptRateLimitDialog(page);
       await throwIfChatGptSessionFailureAlert(page);
-      throw chatGptModelControlUnavailableAdapterError(
-        `ChatGPT effort slider did not become ready for item index ${uiEffortIndex}`,
-      );
-    } finally {
-      waitAbort.abort();
+      observation = await readChatGptEffortSliderState(effortSlider);
+      if (observation.status === "ready") {
+        if (!capturedReady) {
+          capturedReady = true;
+          await captureDiagnostic?.("effort-slider-visible");
+          // Capture yields to the UI; do not use a value from before a possible remount.
+          continue;
+        }
+        break;
+      }
+      if (observation.status === "invalid") break;
+      if (!await activation.menu.isVisible()) {
+        // The picker can close before slider readiness as well as during capture.
+        // One reopening is safe here because no effort keypress has been sent.
+        if (reacquired) throw chatGptModelControlUnavailableError("ChatGPT effort picker disappeared again before selection");
+        reacquired = true;
+        try { activation = await activateChatGptEffortMenu(page, currentEffort); }
+        catch (error) {
+          if (error instanceof ChatGptWebAdapterError) throw error;
+          await throwIfChatGptRateLimitDialog(page);
+          await throwIfChatGptSessionFailureAlert(page);
+          throw chatGptModelControlUnavailableError("ChatGPT effort picker disappeared and could not be reacquired before selection");
+        }
+        effortSlider = activation.slider;
+        readinessDeadline = Math.min(readinessDeadline, Date.now() + 5_000);
+        runtimeDiagnostics()?.event("browser.effort_menu_reacquisition", "Effort picker rechecked before selection", { checkpoint: capturedReady ? "after-readiness" : "before-readiness" }, "info");
+        continue;
+      }
+      if (Date.now() >= readinessDeadline) throw chatGptModelControlUnavailableError(`ChatGPT effort slider did not become ready for item index ${uiEffortIndex}`);
+      await new Promise(resolveSleep => setTimeout(resolveSleep, 50));
     }
-    let sliderState = parseChatGptEffortSliderState(
-      await effortSlider.getAttribute("aria-valuemin"),
-      await effortSlider.getAttribute("aria-valuemax"),
-      await effortSlider.getAttribute("aria-valuenow"),
-    );
-    if (!sliderState) {
-      throw chatGptModelControlUnavailableAdapterError(
-        "ChatGPT effort slider exposed an invalid ARIA range",
-      );
+    if (observation.status !== "ready") {
+      throw chatGptModelControlUnavailableError("ChatGPT effort slider exposed an invalid ARIA range");
     }
+    let sliderState = observation.state;
     const targetValue = sliderState.min + uiEffortIndex;
     if (targetValue > sliderState.max) {
       const proUsageLimitHint = uiEffortIndex === 4 && sliderState.min === 0 && sliderState.max === 3
         ? " If you have made many Pro requests recently, ChatGPT may have temporarily hidden Pro because you reached its usage limit."
         : "";
-      throw chatGptModelControlUnavailableAdapterError(
+      throw chatGptModelControlUnavailableError(
         `ChatGPT effort slider does not expose item index ${uiEffortIndex}`
         + ` (min=${sliderState.min}; max=${sliderState.max})`
         + proUsageLimitHint,
@@ -2209,16 +2221,13 @@ export class ChatGptBrowserWorker {
       await sliderControl.press(key);
       const changeDeadline = Date.now() + 5_000;
       do {
-        sliderState = parseChatGptEffortSliderState(
-          await effortSlider.getAttribute("aria-valuemin"),
-          await effortSlider.getAttribute("aria-valuemax"),
-          await effortSlider.getAttribute("aria-valuenow"),
-        );
-        if (!sliderState) {
+        const observation = await readChatGptEffortSliderState(effortSlider);
+        if (observation.status !== "ready") {
           throw chatGptModelControlUnavailableError(
             "ChatGPT effort slider lost its semantic ARIA state",
           );
         }
+        sliderState = observation.state;
         if (sliderState.value !== previousValue) break;
         await new Promise(resolveSleep => setTimeout(resolveSleep, 50));
       } while (Date.now() < changeDeadline);
@@ -2230,6 +2239,7 @@ export class ChatGptBrowserWorker {
       }
     }
     await captureDiagnostic?.("effort-selected");
+    runtimeDiagnostics()?.event("browser.model_selection", "Browser model controls confirmed", { model: mode.modelId, effort: mode.effort, control: "effort-slider", sliderMin: sliderState.min, sliderMax: sliderState.max, sliderValue: sliderState.value, selectedIndex: sliderState.value - sliderState.min }, "info");
     await page.keyboard.press("Escape");
     return mode;
   }
@@ -3897,8 +3907,9 @@ export class ChatGptBrowserWorker {
     if (turn.abortSignal?.aborted) throw new DOMException("ChatGPT web turn aborted", "AbortError");
     if (this.config.browserHost !== "launcher") return this.runBrowserTurn(turn);
 
-    const lease = await notifyLauncherTurn(this.config.browserHostDescriptorPath!, {
+    const lease = await acquireLauncherTurn(this.config.browserHostDescriptorPath!, {
       phase: "start",
+      proGeneration: resolveChatGptWebModelMode(turn.modelId, turn.reasoning, turn.capabilities).displayLabel === "Pro",
       traceId: turn.traceId,
       helperPid: process.pid,
       ...(turn.conversationKey ? { conversationKey: turn.conversationKey } : {}),
@@ -3907,7 +3918,7 @@ export class ChatGptBrowserWorker {
         ? { connectorIdentity: this.config.appName }
         : {}),
       ...(turn.requireRetainedConversation ? { requireRetainedConversation: true } : {}),
-    }).catch(error => {
+    }, turn.abortSignal, position => runtimeDiagnostics()?.event("browser.admission_wait", "Waiting for an available browser", { position })).catch(error => {
       if (error instanceof LauncherBrowserTurnCancelledError) throw chatGptBrowserTabClosedError();
       if (error instanceof LauncherRetainedConversationUnavailableError) {
         throw chatGptRetainedConversationUnavailableError();

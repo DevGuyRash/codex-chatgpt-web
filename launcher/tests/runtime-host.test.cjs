@@ -765,6 +765,39 @@ test("launcher leaves an already connected route unchanged", async () => {
   assert.deepEqual(fixture.calls, ["route status"]);
 });
 
+test("route status preserves configuration findings without attempting connection or cleanup", async () => {
+  const fixture = bridgeFixture({ active: true });
+  const conflicts = [
+    { path: "experimental_realtime_webrtc_call_base_url", message: "Managed realtime URL is missing" },
+    { path: "hooks.Interrupt", message: "Interrupt hook differs from installation" },
+  ];
+  fixture.host.run = async (_name, args) => {
+    fixture.calls.push(args.join(" "));
+    return { stdout: JSON.stringify({ installed: true, active: true, errors: conflicts.map(item => item.message), conflicts }) };
+  };
+  await assert.rejects(fixture.host.connectBridgeRoute(), error => {
+    assert.equal(error.code, "codex_configuration_conflict");
+    assert.deepEqual(error.problem.findings, conflicts);
+    assert.ok(error.problem.actions.includes("review-configuration"));
+    return true;
+  });
+  assert.deepEqual(fixture.calls, ["route status"]);
+});
+
+test("route status distinguishes malformed output, missing integration, and inconsistent route", async () => {
+  for (const [stdout, code] of [
+    ["not JSON", "codex_route_invalid_output"],
+    [JSON.stringify({ installed: true, active: true, errors: "invalid" }), "codex_route_invalid_output"],
+    [JSON.stringify({ installed: true, active: true, conflicts: [{ message: 123 }] }), "codex_route_invalid_output"],
+    [JSON.stringify({ installed: false, active: false, errors: [] }), "codex_route_missing"],
+    [JSON.stringify({ installed: true, active: true, errors: ["Route differs"] }), "codex_route_inconsistent"],
+  ]) {
+    const fixture = bridgeFixture({ active: false });
+    fixture.host.run = async () => ({ stdout });
+    await assert.rejects(fixture.host.connectBridgeRoute(), error => error.code === code);
+  }
+});
+
 test("bridge connection rejects a route command that did not reach the requested state", async () => {
   const fixture = bridgeFixture({ active: false });
   fixture.host.run = async (_name, args) => {

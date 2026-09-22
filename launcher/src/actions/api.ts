@@ -1,7 +1,8 @@
 import type { LauncherApi, LauncherBridgeApi, OperationState } from "../types";
 import { withDiagnosticErrors } from "../diagnostics/api";
 import { ProblemSchema } from "../../../src/diagnostics/contracts";
-import { classifyAction, launcherActions } from "./controller";
+import { classifyAction, launcherActions, type ActionEvidence } from "./controller";
+import { unwrapActionResult } from "../../../src/diagnostics/action-error";
 
 // Every launcher API member has an explicit feedback policy. New controls cannot silently bypass it.
 export const launcherActionPolicy = {
@@ -19,30 +20,58 @@ export class PresentedActionError extends Error {
 }
 export function actionErrorMessage(error: unknown): string { return error instanceof PresentedActionError ? "" : error instanceof Error ? error.message : String(error); }
 const operationMethods: Record<string, string> = { "core-setup": "setupCore", "mcp-setup": "setupMcp", "bigger-context": "setBiggerContext", "zero-risk-pro": "setZeroRiskPro", "browser-interaction-mode": "setBrowserInteractionMode", "cancel-active-turns": "cancelTurns", "runtime-upgrade": "review-setup", doctor: "doctor", "mcp-verification": "verifyMcp", "browser-smoke": "smokeTest" };
+const ipcMethods: Record<string, string> = {
+  "setup-core": "setupCore", "setup-mcp": "setupMcp", "repair-preview": "previewIntegrationRepair", "repair-apply": "applyIntegrationRepair", "mcp-verify": "verifyMcp",
+  "codex-home-folder": "chooseCodexHome", "codex-restart-execute": "restartCodex", "target-open": "openIntegrationTarget", "target-check": "checkTargetCapabilities",
+  "set-language": "setLanguage", "open-social": "openSocial", "complete-onboarding": "completeOnboarding", "open-external": "openExternal",
+  "manual-prompt-copy": "copyManualPrompt", "manual-prompt-sent": "confirmManualSent", "browser-login": "openLogin", "browser-passkey-login": "openPasskeyLogin", "browser-passkey-login-continue": "continuePasskeyLogin", "browser-logout": "logoutChatGpt",
+  "cancel-turns": "cancelTurns", "uninstall-integration": "uninstallIntegration", autostart: "setAutostart", "set-preference": "setPreference", "export-logs": "exportLogs", "update-install": "installUpdate",
+};
 export function observeLauncherOperation(operation: OperationState) {
-  const key = operationMethods[operation.name] ?? operation.name;
+  const name = operation.name.replace(/^launcher:/, "");
+  const key = operationMethods[name] ?? ipcMethods[name] ?? operation.name;
   const parsed = ProblemSchema.safeParse(operation.problem);
   if (launcherActions.isActive(key)) {
     if (parsed.success) launcherActions.correlate(key, parsed.data);
+    if (operation.status === "completed" && operation.summary) launcherActions.describe(key, operation.summary);
     return; // The awaited API result owns completion; intermediate child stages do not.
   }
   if (operation.status === "failed") launcherActions.complete(key, { status: "failed", problem: parsed.success ? parsed.data : undefined, traceId: operation.problem?.traceId });
   if (operation.status === "cancelled") launcherActions.complete(key, { status: "cancelled", traceId: operation.problem?.traceId });
+  if (operation.status === "completed" && operation.summary && Object.hasOwn(operationMethods, operation.name)) launcherActions.complete(key, { status: "succeeded", detail: operation.summary });
 }
 const wrappers = new WeakMap<LauncherBridgeApi, LauncherApi>();
+function completionEvidence(method: PropertyKey, value: unknown): ActionEvidence | undefined {
+  if (!value || typeof value !== "object") return;
+  if (method === "smokeTest" && "ok" in value && value.ok === true && "response" in value && typeof value.response === "string") {
+    return { kind: "browser-test", responseCharacters: value.response.length };
+  }
+  if ((method === "doctor" || method === "verifyMcp") && "checks" in value && Array.isArray(value.checks)) {
+    const issues = value.checks.filter(check => check && typeof check === "object" && check.status !== "ok").length;
+    return { kind: "checks", total: value.checks.length, issues };
+  }
+}
 export function withActionFeedback(api: LauncherBridgeApi): LauncherApi {
   const existing = wrappers.get(api); if (existing) return existing;
   const methods = new Map<PropertyKey, unknown>();
   // Electron's contextBridge freezes exposed properties; a proxy must not override that frozen target.
   const wrapped = new Proxy({ ...api, diagnostics: api.diagnostics ? withDiagnosticErrors(api.diagnostics) : api.diagnostics } as LauncherApi, { get(target, property, receiver) {
     const original: unknown = Reflect.get(target, property, receiver);
-    if (typeof original !== "function" || launcherActionPolicy[property as keyof LauncherApi] !== "work") return original;
+    if (typeof original !== "function") return original;
+    if (launcherActionPolicy[property as keyof LauncherApi] !== "work") {
+      if (!methods.has(property)) methods.set(property, (...args: unknown[]) => {
+        const result = Reflect.apply(original, target, args);
+        return result && typeof result.then === "function" ? result.then(unwrapActionResult) : result;
+      });
+      return methods.get(property);
+    }
     if (!methods.has(property)) {
       const pending: { args: unknown[]; result: Promise<unknown> }[] = [];
       methods.set(property, (...args: unknown[]) => {
         const duplicate = pending.at(-1);
         if (duplicate && duplicate.args.length === args.length && duplicate.args.every((value, index) => Object.is(value, args[index]))) return duplicate.result;
-        const execute = () => launcherActions.run(String(property), () => Promise.resolve(Reflect.apply(original, target, args)), {
+        const execute = () => launcherActions.run(String(property), () => Promise.resolve(Reflect.apply(original, target, args)).then(unwrapActionResult), {
+      evidence: value => completionEvidence(property, value),
       classify: value => {
         if (property === "chooseCodexHome" || property === "exportLogs") return value === null ? "cancelled" : "succeeded";
         if (value === false) return "failed";

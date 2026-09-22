@@ -24,6 +24,25 @@ async function fixture(run: (options: SetupOptions) => void | Promise<void>) {
   }
 }
 
+test("catalog-only setup changes require a new Codex restart even when TOML is unchanged", () => fixture(options => {
+  const config = defaultConfig("browser-only");
+  config.subagentProtocol = "native";
+  config.browserHost = "launcher";
+  config.browserHostDescriptorPath = options.browserHostDescriptorPath;
+  config.experimentalBiggerContext = false;
+  saveConfig(config); installCodexIntegration(config);
+  const original = readFileSync(getCodexConfigPath(), "utf8");
+  const unchanged = previewSetupConfiguration(options);
+  expect(unchanged.status).toBe("ready");
+  expect(unchanged.codexRestartRequired).toBe(false);
+  const changed = previewSetupConfiguration({ ...options, experimentalBiggerContext: true });
+  expect(changed.status).toBe("ready");
+  expect(changed.textChanges).toEqual([]);
+  expect(changed.codexRestartRequired).toBe(true);
+  expect(changed.changes).toContainEqual({ path: "runtime.experimentalBiggerContext", current: false, proposed: true });
+  expect(readFileSync(getCodexConfigPath(), "utf8")).toBe(original);
+}));
+
 test("fresh setup previews are stable and read-only and stale approvals fail before browser or runtime effects", () => fixture(async options => {
   const original = '# user preferences\n[features]\ncontext_management = { experimental_mode = true }\n';
   writeFileSync(getCodexConfigPath(), original);

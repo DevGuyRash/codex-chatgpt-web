@@ -1,6 +1,16 @@
 import { expect, test } from "bun:test";
 import { chatGptHtmlToMarkdown } from "../src/adapters/chatgpt-web/markdown";
 
+test("native plan delimiters survive rendered Markdown without escaping their protocol spelling", () => {
+  expect(chatGptHtmlToMarkdown('<p>&lt;proposed_plan&gt;</p><h1>Plan</h1><p>Do the work.</p><p>&lt;/proposed_plan&gt;</p>'))
+    .toBe('<proposed_plan>\n\n# Plan\n\nDo the work.\n\n</proposed_plan>');
+  expect(chatGptHtmlToMarkdown('<p><code>&lt;proposed_plan&gt;</code> is an example.</p>'))
+    .toBe('`<proposed_plan>` is an example.');
+  expect(chatGptHtmlToMarkdown('<pre><code>&lt;proposed_plan&gt;\nExample\n&lt;/proposed_plan&gt;</code></pre>'))
+    .toBe('```\n<proposed_plan>\nExample\n</proposed_plan>\n```');
+  expect(chatGptHtmlToMarkdown('<p>Discuss &lt;proposed_plan&gt; in prose.</p>')).not.toMatch(/^<proposed_plan>/);
+});
+
 test("turns observed inline file path formats into Markdown links", () => {
   const cases = [
     {

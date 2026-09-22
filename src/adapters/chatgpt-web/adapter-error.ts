@@ -34,6 +34,18 @@ export function chatGptBrowserTabClosedError(): ChatGptWebAdapterError {
   );
 }
 
+export function chatGptTurnSupersededError(): ChatGptWebAdapterError {
+  return new ChatGptWebAdapterError(
+    "A newer instruction superseded this browser response in the same Codex turn.",
+    { status: 409, errorType: "invalid_request_error", code: "chatgpt_turn_superseded", retryable: false },
+  );
+}
+
+/** Created only after the native interrupt control request is authenticated and identified. */
+export class ChatGptNativeTurnInterruptedError extends DOMException {
+  constructor() { super("Codex turn interrupted", "AbortError"); }
+}
+
 export function chatGptStoppedThinkingError(): ChatGptWebAdapterError {
   return new ChatGptWebAdapterError(
     "ChatGPT remained in 'Stopped thinking' for 5 seconds, so the Codex turn was cancelled.",

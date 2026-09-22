@@ -379,6 +379,57 @@ test("tunnel control failures preserve stderr even when stdout is also present",
   }
 });
 
+test("tunnel control timeout retains Unix signal settlement without classifying provider capacity", { skip: process.platform === "win32" }, async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "cgw-tunnel-control-timeout-"));
+  const supervisor = new RuntimeSupervisor({ coreHome: root });
+  try {
+    const failure = await supervisor.runTunnelCommand({ tunnel: { binaryPath: process.execPath, profileDir: root } }, ["-e", "process.stdout.write('synthetic status pending'); setInterval(() => {}, 1000)"], 250, "Local tunnel health discovery").catch(error => error);
+    assert.equal(failure.problem?.code, "tunnel_control_timeout");
+    assert.equal(failure.problem?.origin, "tunnel-client");
+    assert.equal(failure.problem?.stage, "tunnel.control");
+    assert.equal(failure.problem?.signal, "SIGTERM");
+    assert.equal(failure.problem?.exitCode, undefined);
+    assert.equal(failure.problem?.httpStatus, undefined);
+    assert.equal(failure.controlOutcome?.timedOut, true);
+    assert.equal(failure.controlOutcome?.exitObserved, true);
+    assert.ok(failure.controlOutcome?.stdoutBytes > 0);
+    assert.equal(failure.controlOutcome?.stderrBytes, 0);
+    assert.ok(failure.controlOutcome?.elapsedMs >= 250);
+    assert.equal(failure.controlOutcome?.signal, "SIGTERM");
+    assert.equal(typeof failure.controlOutcome?.pid, "number");
+    assert.throws(() => process.kill(failure.controlOutcome.pid, 0), error => error.code === "ESRCH");
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
+
+test("tunnel control waits for inherited output pipes after the command process exits", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "cgw-tunnel-output-drain-"));
+  const supervisor = new RuntimeSupervisor({ coreHome: root });
+  const tail = "setTimeout(() => { process.stdout.write('late stdout'); process.stderr.write('late stderr'); }, 250)";
+  const command = `require('node:child_process').spawn(process.execPath, ['-e', ${JSON.stringify(tail)}], { stdio: ['ignore', 1, 2] }); process.exit(0)`;
+  try {
+    const result = await supervisor.runTunnelCommand({ tunnel: { binaryPath: process.execPath, profileDir: root } }, ["-e", command], 3000, "Inherited output drain");
+    assert.equal(result.exitCode, 0);
+    assert.equal(result.exitObserved, true);
+    assert.equal(result.signal, null);
+    assert.equal(result.stdout, "late stdout");
+    assert.equal(result.stderr, "late stderr");
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
+
+test("tunnel control launch failure retains the operating-system code without fabricated exit evidence", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "cgw-tunnel-control-spawn-"));
+  const supervisor = new RuntimeSupervisor({ coreHome: root });
+  try {
+    const failure = await supervisor.runTunnelCommand({ tunnel: { binaryPath: path.join(root, "missing-control"), profileDir: root } }, ["runtimes", "status", "synthetic", "--json"], 1000, "Local tunnel health discovery").catch(error => error);
+    assert.equal(failure.problem?.code, "tunnel_control_spawn_failed");
+    assert.equal(failure.problem?.origin, "tunnel-client");
+    assert.equal(failure.controlOutcome?.osCode, "ENOENT");
+    assert.equal(failure.controlOutcome?.exitObserved, false);
+    assert.equal(failure.problem?.exitCode, undefined);
+    assert.equal(failure.problem?.signal, undefined);
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
+
 test("tunnel health diagnostics preserve the machine-readable readiness state", async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-web-gpt-tunnel-health-detail-"));
   const supervisor = new RuntimeSupervisor({
@@ -820,7 +871,7 @@ test("tunnel recovery replaces a false-green managed runtime and proves the fres
   }
 });
 
-test("fresh tunnel recovery discovers its official loopback diagnostics before probing MCP", async () => {
+test("fresh tunnel recovery discovers its exact loopback diagnostics through local inventory without remote status or apply", async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-web-gpt-tunnel-health-discovery-"));
   const supervisor = new RuntimeSupervisor({
     app: { getVersion: () => "0.2.0", isPackaged: false },
@@ -841,9 +892,10 @@ test("fresh tunnel recovery discovers its official loopback diagnostics before p
     commands.push(args);
     return {
       code: 0,
-      output: JSON.stringify({
-        local: { health: { base_url: "http://127.0.0.1:43127" } },
-      }),
+      output: JSON.stringify({ entries: [
+        { alias: "other-runtime", runtime_state: "ready", live_runtime: { base_url: "http://127.0.0.1:49999", system: { pid: 111111 } } },
+        { alias: config.tunnel.alias, runtime_state: "ready", live_runtime: { base_url: "http://127.0.0.1:43127", system: { pid: 222222 } } },
+      ] }),
     };
   };
   supervisor.probeTunnelMcpTransport = async () => ({
@@ -855,7 +907,7 @@ test("fresh tunnel recovery discovers its official loopback diagnostics before p
   try {
     await supervisor.waitForTunnelMcpTransport(config, 25);
     assert.equal(supervisor.tunnelHealthBaseUrl, "http://127.0.0.1:43127");
-    assert.deepEqual(commands, [["runtimes", "status", "codex-chatgpt-web", "--json"]]);
+    assert.deepEqual(commands, [["runtimes", "cleanup", "--json"]]);
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }
@@ -872,7 +924,7 @@ test("tunnel diagnostics discovery rejects a non-loopback endpoint", async () =>
   });
   supervisor.runTunnelCommand = async () => ({
     code: 0,
-    output: JSON.stringify({ health_url: "https://example.com/healthz" }),
+    output: JSON.stringify({ entries: [{ alias: "codex-chatgpt-web", runtime_state: "ready", live_runtime: { base_url: "https://example.com/healthz" } }] }),
   });
   try {
     await assert.rejects(
@@ -884,6 +936,33 @@ test("tunnel diagnostics discovery rejects a non-loopback endpoint", async () =>
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }
+});
+
+test("tunnel diagnostics discovery cannot reuse a stale or another alias's loopback endpoint", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "cgw-tunnel-health-owner-"));
+  const supervisor = new RuntimeSupervisor({ coreHome: root });
+  supervisor.tunnelHealthBaseUrl = "http://127.0.0.1:43127";
+  supervisor.runTunnelCommand = async () => ({ code: 0, output: JSON.stringify({ entries: [{ alias: "another-alias", runtime_state: "ready", live_runtime: { base_url: "http://127.0.0.1:49999" } }] }) });
+  try {
+    await assert.rejects(supervisor.discoverTunnelHealthBaseUrl({ tunnel: { alias: "codex-chatgpt-web" } }), error => error.problem?.code === "tunnel_health_discovery_failed");
+    assert.equal(supervisor.tunnelHealthBaseUrl, null);
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
+
+test("local tunnel inventory excludes malformed source and refuses a foreign tunnel under the configured alias", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "cgw-tunnel-inventory-contract-"));
+  const supervisor = new RuntimeSupervisor({ coreHome: root });
+  const config = { tunnel: { alias: "owned", tunnelId: "configured" } };
+  let output = "SYNTHETIC_PRIVATE_INVALID_JSON";
+  supervisor.runTunnelCommand = async () => ({ code: 0, output });
+  try {
+    const malformed = await supervisor.readTunnelHealth(config);
+    assert.equal(malformed.statusKnown, false);
+    assert.equal(malformed.detail.includes("SYNTHETIC_PRIVATE"), false);
+    output = JSON.stringify({ entries: [{ alias: "owned", tunnel_id: "SYNTHETIC_PRIVATE_WRONG_ID", runtime_state: "ready", live_runtime: { base_url: "http://127.0.0.1:43127" } }] });
+    await assert.rejects(supervisor.discoverTunnelHealthBaseUrl(config), error => error.problem?.code === "tunnel_health_discovery_failed" && !JSON.stringify(error.problem).includes("SYNTHETIC_PRIVATE"));
+    assert.equal(supervisor.tunnelHealthBaseUrl, null);
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
 });
 
 test("launcher stops an unhealthy managed runtime before reconnecting the alias", async () => {

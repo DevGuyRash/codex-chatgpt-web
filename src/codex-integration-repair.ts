@@ -6,6 +6,7 @@ import {
   getCodexConfigPath, getCodexJournalPath,
   getCodexJournalRecoveryPath, getCodexModelsCachePath, serializeJournal,
   codexModelCacheInvalidations,
+  configurationWritesChanged,
   snapshotFile, writeFilesWithCompensation, type CodexIntegrationJournal,
   type FileSnapshot,
 } from "./codex-integration-shared";
@@ -106,6 +107,10 @@ function materialize(protocol: SubagentProtocol, options: RepairOptions = {}): M
     writes.push({ path: getConfigPath(target?.runtimeHome), data: preserveUtf8Bom(`${JSON.stringify(runtime, null, 2)}\n`, runtimeText) });
   }
   writes.push({ path: getCodexJournalPath(target), data: journalData });
+  preview.codexRestartRequired = configurationWritesChanged(writes.filter(write => write.path === getCodexConfigPath(target) || write.path === catalog?.write.path), snapshots);
+  // Applying changed repair inputs requires a stopped runtime; the launcher
+  // owns bringing that runtime back after the repair workflow settles.
+  preview.launcherRestartRequired = preview.codexRestartRequired || configurationWritesChanged(writes.filter(write => write.path === getConfigPath(target?.runtimeHome)), snapshots);
   preview.status = "ready";
   preview.resolutions = options.resolutions ?? [];
   preview.approvalId = configurationApprovalId({ operation: "repair", protocol, target, resolutions: preview.resolutions }, snapshots, writes, codexModelCacheInvalidations(target));
@@ -119,13 +124,15 @@ export function previewCodexIntegrationRepair(protocol: SubagentProtocol, option
 }
 
 /** Callers settle runtime ownership before applying; no runtime is started or stopped here. */
-export function applyCodexIntegrationRepair(protocol: SubagentProtocol, approvalId: string, options: RepairOptions = {}): { changed: boolean; codexRestartRequired: true; launcherRestartRequired: true } {
+export function applyCodexIntegrationRepair(protocol: SubagentProtocol, approvalId: string, options: RepairOptions = {}): { changed: boolean; codexRestartRequired: boolean; launcherRestartRequired: boolean } {
   if (!/^[a-f0-9]{64}$/.test(approvalId)) throw new Error("Exact repair preview approval is required");
   const plan = materialize(protocol, options);
   if (plan.preview.status !== "ready" || plan.preview.approvalId !== approvalId || !plan.journal) {
     throw new Error("Repair inputs changed or need attention; review a fresh preview before approval");
   }
   const journal = plan.journal;
+  const result = { changed: plan.preview.codexRestartRequired || plan.preview.launcherRestartRequired, codexRestartRequired: plan.preview.codexRestartRequired, launcherRestartRequired: plan.preview.launcherRestartRequired };
+  if (!result.changed) return result;
   writeFilesWithCompensation(plan.writes, codexModelCacheInvalidations(options.target), {
     expected: plan.snapshots,
     verify: () => {
@@ -133,5 +140,5 @@ export function applyCodexIntegrationRepair(protocol: SubagentProtocol, approval
         || loadConfig(options.target?.runtimeHome).subagentProtocol !== protocol) throw new Error("Codex integration repair verification failed");
     },
   });
-  return { changed: true, codexRestartRequired: true, launcherRestartRequired: true };
+  return result;
 }

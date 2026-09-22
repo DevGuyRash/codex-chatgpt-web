@@ -160,15 +160,20 @@ test("passkey capture cannot be invoked outside the live Launcher control channe
   const root = mkdtempSync(join(tmpdir(), "codex-chatgpt-web-cli-passkey-auth-"));
   try {
     const result = await runCli([
+      "--home", join(root, "runtime"),
       "login",
       "--launcher-control",
       "--chrome",
       process.execPath,
       "--storage-state",
       join(root, "storage-state.json"),
-    ], { ...process.env });
+    ], { ...process.env, CODEX_CHATGPT_WEB_HOME: join(root, "ambient-runtime"), CODEX_HOME: join(root, "codex"), CODEX_CHATGPT_WEB_BROWSER_HOST_DESCRIPTOR: undefined, CODEX_WEB_GPT_LAUNCHER_CONTROL_TOKEN: undefined, CODEX_CHATGPT_WEB_STRUCTURED_ERRORS: "2" });
     expect(result.exitCode).toBe(1);
     expect(result.stderr).toContain("Launcher-controlled passkey login requires a live launcher authorization");
+    const envelope = result.stderr.split("\n").find(line => line.startsWith("CGW_ERROR_V2 "))!;
+    expect(JSON.parse(envelope.slice(13)).code).toBe("launcher_authorization_required");
+    expect(existsSync(join(root, "runtime", "diagnostics", "observability", "diagnostics.sqlite"))).toBe(true);
+    expect(existsSync(join(root, "ambient-runtime", "diagnostics"))).toBe(false);
     expect(existsSync(join(root, "storage-state.json"))).toBe(false);
   } finally {
     rmSync(root, { recursive: true, force: true });

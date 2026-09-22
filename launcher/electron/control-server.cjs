@@ -1,6 +1,9 @@
 const { createServer } = require("node:http");
 const { randomBytes, timingSafeEqual } = require("node:crypto");
 const { releaseRetainedConversation } = require("./retained-turn-release.cjs");
+const { BrowserAdmission } = require("./browser-admission.cjs");
+const { processRunning } = require("./process-tree.cjs");
+const { parseTraceparent } = require("./logging.cjs");
 
 const MAX_BODY_BYTES = 16 * 1024;
 const MAX_MANUAL_START_BODY_BYTES = 3 * 1024 * 1024;
@@ -43,6 +46,7 @@ class BrowserControlServer {
     this.getBrowserHost = getBrowserHost;
     this.getPreferences = getPreferences;
     this.shutdownIdle = shutdownIdle;
+    this.admissions = new WeakMap();
     this.shutdownPending = false;
     this.token = randomBytes(32).toString("base64url");
     this.port = 0;
@@ -95,6 +99,11 @@ class BrowserControlServer {
       writeJson(response, 401, { error: "unauthorized" });
       return;
     }
+    const diagnosticParent = typeof request.headers.traceparent === "string" ? parseTraceparent(request.headers.traceparent) : undefined;
+    if (request.headers.traceparent !== undefined && !diagnosticParent) {
+      writeJson(response, 400, { error: "invalid_diagnostic_context" });
+      return;
+    }
     if (request.method === "POST" && request.url === "/v1/launcher/shutdown-idle" && this.shutdownIdle) {
       if (this.shutdownPending) {
         writeJson(response, 409, { error: "shutdown_in_progress" });
@@ -126,6 +135,8 @@ class BrowserControlServer {
       return;
     }
     const isTurn = request.url === "/v1/turn/start"
+      || request.url === "/v1/turn/park"
+      || request.url === "/v1/turn/resume"
       || request.url === "/v1/turn/heartbeat"
       || request.url === "/v1/turn/end";
     const isTurnRelease = request.url === "/v1/turn/release";
@@ -173,6 +184,14 @@ class BrowserControlServer {
       }
       if (!body || typeof body !== "object" || !/^[A-Za-z0-9_-]{6,128}$/.test(body.traceId || "")) {
         throw new Error("traceId is invalid");
+      }
+      if ((request.url === "/v1/turn/start" || manualAction === "start") && process.env.CODEX_WEB_GPT_CAPTURE_CAMPAIGN_ID && body.proGeneration !== false) {
+        writeJson(response, 403, { error: "This non-Pro campaign requires an explicitly non-Pro generation, including child work", code: "campaign_pro_forbidden" });
+        return;
+      }
+      if (request.url === "/v1/turn/start" && process.env.CODEX_WEB_GPT_CAPTURE_CAMPAIGN_ID && body.queueAware !== true) {
+        writeJson(response, 403, { error: "Campaign helpers must use shared browser admission", code: "campaign_admission_required" });
+        return;
       }
       if (!Number.isInteger(body.helperPid) || body.helperPid < 1) {
         throw new Error("browser helper pid is invalid");
@@ -222,6 +241,12 @@ class BrowserControlServer {
           }
           if (body.compaction !== undefined && body.compaction !== true) {
             throw new Error("manual compaction flag is invalid");
+          }
+          const running = [...(host.turnTabs?.values() ?? [])].filter(tab => tab.status === "running");
+          const capacity = process.env.CODEX_WEB_GPT_CAPTURE_CAMPAIGN_ID ? 2 : 5;
+          if (!running.some(tab => tab.traceId === body.traceId && tab.helperPid === body.helperPid) && running.length + (this.admissions.get(host)?.starting ?? 0) >= capacity) {
+            writeJson(response, 409, { error: "Manual turn is waiting for browser capacity; no prompt was submitted", code: "browser_admission_busy" });
+            return;
           }
           const lease = host.beginManualTurn(
             body.traceId,
@@ -312,7 +337,7 @@ class BrowserControlServer {
         if (host.browserInteractionMode() === "manual") {
           throw new Error("Automatic browser interaction is disabled");
         }
-        const lease = await host.beginTurn(
+        const start = () => host.beginTurn(
           body.traceId,
           preferences.showBrowserDuringTurns === true,
           body.helperPid,
@@ -320,8 +345,37 @@ class BrowserControlServer {
           body.connectorIdentity,
           body.requireRetainedConversation === true,
         );
+        let admission = this.admissions.get(host);
+        if (!admission) {
+          const runningTabs = () => [...(host.turnTabs?.values() ?? [])].filter(tab => tab.status === "running");
+          admission = new BrowserAdmission({
+            capacity: process.env.CODEX_WEB_GPT_CAPTURE_CAMPAIGN_ID ? 2 : 5,
+            pageCapacity: process.env.CODEX_WEB_GPT_CAPTURE_CAMPAIGN_ID ? 8 : 5,
+            activeCount: () => runningTabs().length,
+            ownsActivePage: (traceId, helperPid) => runningTabs().some(tab => tab.traceId === traceId && tab.helperPid === helperPid),
+            ownerAlive: processRunning,
+            report: (name, data, context) => context && this.logger.diagnostics
+              ? this.logger.diagnostics.event(name, name.replace(/[._]/g, " "), data, "info", context)
+              : this.logger.info(name, data),
+          });
+          this.admissions.set(host, admission);
+        }
+        const lease = body.queueAware === true ? admission.request({ traceId: body.traceId, helperPid: body.helperPid, identity: JSON.stringify([body.conversationKey, body.connectorIdentity, body.requireRetainedConversation]), diagnosticContext: diagnosticParent ? { ...diagnosticParent, taskId: body.traceId } : undefined, start, abandon: () => host.endTurn(body.traceId, body.helperPid, "aborted", false) }) : await start();
+        if (lease.queued) { writeJson(response, 202, { ok: true, ...lease }); return; }
         this.logger.info("browser.turn_started", { traceId: body.traceId });
         writeJson(response, 200, { ok: true, ...lease });
+        return;
+      } else if (request.url === "/v1/turn/park" || request.url === "/v1/turn/resume") {
+        host.heartbeatTurn(body.traceId, body.helperPid, false);
+        const admission = this.admissions.get(host);
+        if (!admission) throw new Error("Browser generation admission is unavailable");
+        if (request.url === "/v1/turn/park") {
+          admission.park(body.traceId, body.helperPid, body.revision);
+          writeJson(response, 200, { ok: true });
+        } else {
+          const lease = admission.resume(body.traceId, body.helperPid, body.revision);
+          writeJson(response, lease.queued ? 202 : 200, { ok: true, ...lease });
+        }
         return;
       } else if (request.url === "/v1/turn/heartbeat") {
         host.heartbeatTurn(body.traceId, body.helperPid, body.refreshViewport === true);
@@ -330,6 +384,11 @@ class BrowserControlServer {
         return;
       } else {
         if (!['completed', 'failed', 'aborted'].includes(body.status)) throw new Error("turn status is invalid");
+        const admission = this.admissions.get(host);
+        if (body.status === "aborted" && admission?.cancel(body.traceId, body.helperPid)) {
+          writeJson(response, 200, { ok: true, cancelledByUser: true });
+          return;
+        }
         const release = await host.endTurn(
           body.traceId,
           body.helperPid,
@@ -339,6 +398,7 @@ class BrowserControlServer {
           body.retain === true,
           body.connectorBound === true,
         );
+        admission?.release(body.traceId, body.helperPid);
         this.logger.info("browser.turn_ended", { traceId: body.traceId, status: body.status });
         writeJson(response, 200, { ok: true, ...release });
         return;
@@ -351,13 +411,15 @@ class BrowserControlServer {
       const manualInspectionDisabled = error?.code === "manual_browser_inspection_disabled";
       const manualOwnerLost = error?.code === "manual_turn_owner_lost";
       const manualTimedOut = error?.code === "manual_turn_timed_out";
+      const admissionCode = ["browser_queue_full", "browser_page_capacity_exhausted", "browser_admission_owner_mismatch"].includes(error?.code) ? error.code : undefined;
       writeJson(
         response,
-        cancelled || retainedUnavailable || manualInspectionDisabled || manualOwnerLost
+        cancelled || retainedUnavailable || manualInspectionDisabled || manualOwnerLost || admissionCode
           ? 409
           : manualTimedOut ? 408 : 400,
         {
         error: message,
+        ...(admissionCode ? { code: admissionCode } : {}),
         ...(cancelled ? { code: "turn_cancelled" } : {}),
         ...(retainedUnavailable ? { code: "retained_conversation_unavailable" } : {}),
         ...(manualInspectionDisabled ? { code: "manual_browser_inspection_disabled" } : {}),

@@ -88,6 +88,12 @@ export class Diagnostics {
       severityNumber: { debug: SeverityNumber.DEBUG, info: SeverityNumber.INFO, warning: SeverityNumber.WARN, error: SeverityNumber.ERROR }[severity],
       attributes: safeAttributes({ ...attributes, ...(current?.taskId ? { "diagnostics.task_id": current.taskId } : {}) }), context });
   }
+  problem(error: unknown, message?: string, extra: Partial<Problem> = {}, suppliedContext?: DiagnosticContext): Problem {
+    const context = suppliedContext ?? this.context();
+    const problem = problemFor(error, message, { ...(context ? { traceId: context.traceId, spanId: context.spanId } : {}), ...extra });
+    try { this.sink.emit(sanitizeEvent({ version: 1, id: randomUUID(), time: Date.now(), kind: "problem", name: problem.code, severity: "error", body: problem.message, ...this.base, ...context, attributes: { "service.version": this.serviceVersion }, problem })); } catch { /* Diagnostics never owns application outcomes. */ }
+    return problem;
+  }
   begin(name: string, attributes: Record<string, unknown> = {}, parent: DiagnosticContext | null | undefined = this.context(), task?: { id?: string; name?: string }): Operation {
     const parentContext = parent ? trace.setSpanContext(ROOT_CONTEXT, { ...parent, traceFlags: TraceFlags.SAMPLED }) : ROOT_CONTEXT;
     const span: Span = this.tracer.startSpan(name.slice(0, 160), { attributes: otelAttributes({ ...attributes, ...(task?.id ?? parent?.taskId ? { "diagnostics.task_id": task?.id ?? parent?.taskId } : {}) }) }, parentContext);
@@ -112,9 +118,7 @@ export class Diagnostics {
       },
       problem: (error, message, extra = {}) => {
         observedFailure = true;
-        const problem = problemFor(error, message, { traceId: context.traceId, spanId: context.spanId, stage: name.slice(0, 160), ...extra });
-        try { this.sink.emit(sanitizeEvent({ version: 1, id: randomUUID(), time: Date.now(), kind: "problem", name: problem.code, severity: "error", body: problem.message, ...this.base, ...context, attributes: { "service.version": this.serviceVersion }, problem })); } catch { /* Diagnostics never owns application outcomes. */ }
-        return problem;
+        return this.problem(error, message, { stage: name.slice(0, 160), ...extra }, context);
       },
     };
     this.active.add(operation); return operation;

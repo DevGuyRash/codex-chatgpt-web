@@ -1,5 +1,6 @@
 export const diagnosticsCopy = {
   en: {
+    select: "Select", selected: "selected", clearSelection: "Clear selection", type: "Type", operation: "Operation", service: "Service", exitCodes: "Exit codes", signals: "Signals", expand: "Expand", collapse: "Collapse", dismiss: "Dismiss",
     lastObservedRunning: "Running (last observed)",
     runtimeHealth: "Runtime health", runtimeStates: { healthy: "Runtime health check passed", unavailable: "Runtime health check did not pass", unconfigured: "Runtime is not configured", unknown: "Runtime health has not been established" },
     privateSession: "Capture activation lasts up to 30 minutes. Expired files are removed when the diagnostics writer next runs.",
@@ -12,6 +13,7 @@ export const diagnosticsCopy = {
     succeeded: "Succeeded", running: "Running", cancelled: "Cancelled", interrupted: "Interrupted", recovered: "Recovered", failedOutcome: "Failed", notNeeded: "No changes needed recovery", notStarted: "Recovery not started", completed: "Recovery completed", recoveryIncomplete: "Recovery incomplete", debugLevel: "Debug", info: "Info", warning: "Warning", error: "Error",
   },
   "zh-CN": {
+    select: "选择", selected: "已选择", clearSelection: "清除选择", type: "类型", operation: "操作", service: "服务", exitCodes: "退出码", signals: "信号", expand: "展开", collapse: "折叠", dismiss: "关闭",
     lastObservedRunning: "运行中（最后观测状态）",
     runtimeHealth: "运行时健康状态", runtimeStates: { healthy: "运行时健康检查通过", unavailable: "运行时健康检查未通过", unconfigured: "尚未配置运行时", unknown: "尚未确认运行时健康状态" },
     privateSession: "捕获最多启用 30 分钟。过期文件将在诊断写入进程下次运行时删除。",
@@ -24,6 +26,7 @@ export const diagnosticsCopy = {
     succeeded: "成功", running: "运行中", cancelled: "已取消", interrupted: "已中断", recovered: "已恢复", failedOutcome: "失败", notNeeded: "无需恢复更改", notStarted: "尚未恢复", completed: "恢复完成", recoveryIncomplete: "恢复未完成", debugLevel: "调试", info: "信息", warning: "警告", error: "错误",
   },
   ja: {
+    select: "選択", selected: "選択済み", clearSelection: "選択を解除", type: "種類", operation: "操作", service: "サービス", exitCodes: "終了コード", signals: "シグナル", expand: "展開", collapse: "折りたたむ", dismiss: "閉じる",
     lastObservedRunning: "実行中（最後の観測）",
     runtimeHealth: "ランタイムの状態", runtimeStates: { healthy: "ランタイムの確認に成功", unavailable: "ランタイムの確認に失敗", unconfigured: "ランタイムは未設定です", unknown: "ランタイムの状態は未確認です" },
     privateSession: "記録の有効時間は最大 30 分です。期限切れファイルは診断書き込み処理の次回実行時に削除されます。",

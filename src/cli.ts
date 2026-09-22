@@ -30,6 +30,7 @@ import { assertServiceIdle, cancelActiveTurns, getServiceStatus, installService,
 import { existingFullSetupCredentials, preflightSetup, previewSetupConfiguration, setup, type SetupOptions } from "./setup";
 import { installRuntimeKeyBytes, managedRuntimeKeyPath, stopTunnel, tunnelStatus, waitForTunnelReady } from "./tunnel";
 import { getTunnelServiceStatus, restartTunnelService, startTunnelService, stopTunnelService, uninstallTunnelService } from "./tunnel-service";
+import { tunnelHealthLocator } from "./tunnel-health";
 import { VERSION } from "./version";
 import { applyCodexIntegrationRepair, previewCodexIntegrationRepair } from "./codex-integration-repair";
 import { assertRuntimeEndpointClosed } from "./service";
@@ -43,7 +44,7 @@ import { RuntimeRegistry } from "../launcher/electron/runtime-registry.cjs";
 import { deliverInterruptCleanup, InterruptCleanupClaims } from "./interrupt-cleanup";
 import { runDiagnosticsCommand } from "./diagnostics/cli";
 import { initializeRuntimeDiagnostics, runtimeParent, closeRuntimeDiagnostics } from "./diagnostics/runtime";
-import { problemFor } from "./diagnostics/problems";
+import { DiagnosticError, problemFor } from "./diagnostics/problems";
 
 const HELP = `codex-chatgpt-web ${VERSION}
 
@@ -69,7 +70,7 @@ Usage:
   codex-chatgpt-web serve
   codex-chatgpt-web mcp [--broker-socket PATH]
   codex-chatgpt-web service <status|install|start|restart|stop|cancel-turns>
-  codex-chatgpt-web tunnel <status|start|restart|stop|key-import>
+  codex-chatgpt-web tunnel <status|health-locator|start|restart|stop|key-import>
   codex-chatgpt-web open <tunnels|runtime-keys|connectors>
   codex-chatgpt-web uninstall --yes
 
@@ -177,13 +178,13 @@ function authorizeLauncherControl(operation: string): void {
   const supplied = process.env.CODEX_WEB_GPT_LAUNCHER_CONTROL_TOKEN?.trim();
   delete process.env.CODEX_WEB_GPT_LAUNCHER_CONTROL_TOKEN;
   if (!descriptorPath || !supplied) {
-    throw new Error(`Launcher-controlled ${operation} requires a live launcher authorization`);
+    throw new DiagnosticError({ code: "launcher_authorization_required", message: `Launcher-controlled ${operation} requires a live launcher authorization`, actions: ["open-diagnostics"] });
   }
   const descriptor = readLauncherBrowserHostDescriptor(descriptorPath);
   const expectedBytes = Buffer.from(descriptor.control.token);
   const suppliedBytes = Buffer.from(supplied);
   if (expectedBytes.length !== suppliedBytes.length || !timingSafeEqual(expectedBytes, suppliedBytes)) {
-    throw new Error(`Launcher-controlled ${operation} authorization is invalid`);
+    throw new DiagnosticError({ code: "launcher_authorization_invalid", message: `Launcher-controlled ${operation} authorization is invalid`, actions: ["open-diagnostics"] });
   }
 }
 
@@ -262,7 +263,7 @@ async function loginCommand(args: string[]): Promise<void> {
     assertNoArgs(args);
     const config = loadConfig();
     if (config.browserHost === "launcher") {
-      throw new Error("ChatGPT login is owned by the launcher; open Codex Web GPT and use its Sign in step");
+      throw new DiagnosticError({ code: "login_launcher_owned", message: "ChatGPT login is owned by the launcher; open Codex Web GPT and use its Sign in step", actions: ["open-diagnostics"] });
     }
     const result = await loginToChatGpt(config);
     stdout.write(`ChatGPT login stored at ${result.storageStatePath}\n`);
@@ -273,12 +274,12 @@ async function loginCommand(args: string[]): Promise<void> {
   const storageStatePath = takeOption(args, "--storage-state");
   assertNoArgs(args);
   authorizeLauncherControl("passkey login");
-  if (process.platform !== "darwin") throw new Error("Passkey sign-in is currently supported only on macOS");
+  if (process.platform !== "darwin") throw new DiagnosticError({ code: "login_platform_unsupported", message: "Passkey sign-in is currently supported only on macOS", actions: ["open-diagnostics"] });
   if (!chromeExecutablePath || !isAbsolute(chromeExecutablePath)) {
-    throw new Error("Launcher passkey sign-in requires --chrome with an absolute path");
+    throw new DiagnosticError({ code: "login_invalid_request", message: "Launcher passkey sign-in requires --chrome with an absolute path", actions: ["open-diagnostics"] });
   }
   if (!storageStatePath || !isAbsolute(storageStatePath)) {
-    throw new Error("Launcher passkey sign-in requires --storage-state with an absolute path");
+    throw new DiagnosticError({ code: "login_invalid_request", message: "Launcher passkey sign-in requires --storage-state with an absolute path", actions: ["open-diagnostics"] });
   }
   const continuation = launcherLoginContinuation();
   try {
@@ -448,6 +449,11 @@ async function routeCommand(args: string[], target?: IntegrationTarget): Promise
     if (launcherControl) authorizeLauncherControl("configuration repair");
     const config = loadConfig();
     if (config.browserHost === "launcher" && !launcherControl) throw new Error("Launcher-owned configuration must be repaired through Codex Web GPT Settings");
+    const preview = previewCodexIntegrationRepair(protocol, { target, resolutions });
+    if (preview.status === "ready" && preview.approvalId === approvalId && !preview.codexRestartRequired && !preview.launcherRestartRequired) {
+      stdout.write(`${JSON.stringify(applyCodexIntegrationRepair(protocol, approvalId, { target, resolutions }), null, 2)}\n`);
+      return;
+    }
     if (getServiceStatus().loaded) throw new Error("Stop the managed runtime safely before applying configuration repair");
     await assertRuntimeEndpointClosed(config);
     stdout.write(`${JSON.stringify(applyCodexIntegrationRepair(protocol, approvalId, { target, resolutions }), null, 2)}\n`);
@@ -559,6 +565,11 @@ async function tunnelCommand(args: string[]): Promise<void> {
     return;
   }
   const config = loadConfig();
+  if (action === "health-locator") {
+    if (config.mode !== "full" || !config.tunnel) throw new DiagnosticError({ code: "tunnel_health_unconfigured", message: "A configured full-mode tunnel is required for health discovery", origin: "tunnel-profile", stage: "tunnel.health_discovery" });
+    stdout.write(`${JSON.stringify(tunnelHealthLocator(config.tunnel))}\n`);
+    return;
+  }
   if (action === "start") startTunnelService();
   else if (action === "restart") {
     await assertServiceIdle(config);

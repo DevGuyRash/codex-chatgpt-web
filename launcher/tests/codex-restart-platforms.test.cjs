@@ -31,6 +31,22 @@ test("Linux matches a desktop executable to its local window and rechecks close 
   assert.deepEqual(calls.at(-1), ["/opt/codex", []]);
 });
 
+test("Wayland discovers main processes independently of X11 and reports close capability honestly", async () => {
+  const source = "[Desktop Entry]\nName=Codex\nType=Application\nExec=/opt/codex %U\n";
+  const io = {
+    readdir: async dir => dir === "/proc" ? ["123", "124"] : dir === "/fixture/applications" ? ["codex.desktop"] : [],
+    readFile: async file => file.endsWith(".desktop") ? source : file.endsWith("cmdline") ? `/opt/codex\0${file.includes("124") ? "--type=renderer" : ""}` : `123 (codex) ${Array.from({ length: 20 }, (_, i) => i === 19 ? "456" : "0").join(" ")}`,
+    readlink: async () => "/opt/codex", realpath: async file => file,
+  };
+  const adapter = linuxAdapter({ io, command: async () => { throw new Error("X11 must not be used"); }, env: { XDG_SESSION_TYPE: "wayland", XDG_DATA_HOME: "/fixture" } });
+  const apps = await adapter.discover();
+  assert.equal(apps.length, 1);
+  assert.equal(apps[0].pid, 123);
+  assert.equal(apps[0].closeSupported, false);
+  assert.equal((await adapter.installed())[0].launchSupported, true);
+  await assert.rejects(adapter.close(apps[0]), /identity changed/);
+});
+
 for (const platform of ["darwin", "win32"]) test(`${platform} adapter uses discovered identity and normal-close platform command`, async () => {
   const calls = [];
   const app = { pid: 123, identity: "123:456:verified", label: "Codex", location: platform === "darwin" ? "/Applications/Codex.app" : "C:\\Codex\\Codex.exe", executable: platform === "darwin" ? "/Applications/Codex.app/Contents/MacOS/Codex" : "C:\\Codex\\Codex.exe", closeSupported: true };
@@ -42,4 +58,21 @@ for (const platform of ["darwin", "win32"]) test(`${platform} adapter uses disco
   else { assert.equal(close[2].CGW_RESTART_IDENTITY, app.identity); assert.match(close[1].at(-1), /CloseMainWindow/); }
   await adapter.launch(app);
   assert.deepEqual(calls.at(-1), platform === "darwin" ? ["/usr/bin/open", ["-a", app.location]] : [app.executable, []]);
+});
+
+test("Linux skips inaccessible foreign processes but fails closed for its own unreadable process", async () => {
+  const source = "[Desktop Entry]\nName=Codex\nType=Application\nExec=/opt/codex\n";
+  let foreign = true;
+  const io = {
+    readdir: async dir => dir === "/proc" ? ["123", "999"] : dir === "/fixture/applications" ? ["codex.desktop"] : [],
+    readFile: async file => file.endsWith(".desktop") ? source : file.endsWith("cmdline") ? "/opt/codex\0" : `123 (codex) ${Array(20).fill("0").join(" ")}`,
+    readlink: async file => { if (file.includes("999")) throw Object.assign(new Error("denied"), { code: "EACCES" }); return "/opt/codex"; },
+    realpath: async file => file,
+    stat: async () => ({ uid: foreign ? process.getuid() + 1 : process.getuid() }),
+  };
+  const adapter = linuxAdapter({ io, env: { XDG_SESSION_TYPE: "wayland", XDG_DATA_HOME: "/fixture" } });
+  assert.equal((await adapter.discover()).length, 1);
+  foreign = false;
+  await assert.rejects(adapter.discover(), /denied/);
+  await assert.rejects(adapter.sameInstance({ pid: 999 }), /denied/);
 });

@@ -1422,6 +1422,14 @@ code {
   line-height: 1.45;
 }
 
+.notice-row > span { flex: 1; min-width: 0; }
+.notice-row-action { flex: none; margin-inline-start: auto; }
+@media (max-width: 640px) {
+  .notice-row { flex-wrap: wrap; }
+  .notice-row > span { flex-basis: calc(100% - 40px); }
+  .notice-row-action { flex-basis: calc(100% - 32px); margin-inline-start: 32px; }
+}
+
 .notice-row.tone-success {
   border-left-color: var(--color-text-success);
   background: var(--color-background-status-success);
@@ -2794,3 +2802,9 @@ code {
     transition-duration: 0.01ms !important;
   }
 }
+
+.configuration-summary{padding:12px;border:1px solid currentColor;border-radius:8px}
+.configuration-summary[data-tone=success]{color:var(--color-text-success,#77c895)}
+.configuration-summary[data-tone=info]{color:var(--color-text-secondary)}
+.configuration-summary[data-tone=warning]{color:var(--color-text-warning,#dfad61)}
+.configuration-summary[data-tone=error]{color:var(--color-text-error,#f18b8b)}

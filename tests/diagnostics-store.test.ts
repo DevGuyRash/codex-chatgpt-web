@@ -11,6 +11,21 @@ function root() { const path = mkdtempSync(join(tmpdir(), "diagnostics-test-"));
 function event(overrides: Partial<DiagnosticEvent> = {}): DiagnosticEvent { return DiagnosticEventSchema.parse({ version: 1, id: crypto.randomUUID(), time: Date.now(), kind: "log", name: "setup.preflight", body: "Configuration review complete", severity: "info", component: "runtime", environment: "test", target: "base", attributes: {}, ...overrides }); }
 afterEach(() => { for (const path of roots.splice(0)) rmSync(path, { recursive: true, force: true }); });
 
+test("multi-value filters compose with AND, and explicit mixed selections form a union", () => {
+  const store = new DiagnosticStore(root());
+  const a = event({ severity: "warning", component: "runtime", traceId: "a".repeat(32) });
+  const b = event({ severity: "error", component: "runtime", attributes: { exitCode: 7, signal: "SIGTERM", "operation.type": "service" } });
+  const c = event({ severity: "error", component: "launcher" });
+  try {
+    store.append([a, b, c]);
+    expect(store.query({ severities: ["warning", "error"], components: ["runtime"] }).events.map(e => e.id)).toEqual([b.id, a.id]);
+    expect(store.query({ eventIds: [c.id], traceIds: [a.traceId!] }).events.map(e => e.id)).toEqual([c.id, a.id]);
+    expect(store.query({ eventIds: [], traceIds: [] }).events).toEqual([]);
+    expect(store.query({ exitCodes: [0, 7], signals: ["SIGTERM"], operationTypes: ["service"] }).events.map(e => e.id)).toEqual([b.id]);
+    expect(store.query({ component: "runtime" }).events).toHaveLength(2);
+  } finally { store.close(); }
+});
+
 test("legacy import batches records without one transaction per line", async () => {
   const path = root(); const file = join(path, "legacy.jsonl");
   writeFileSync(file, Array.from({ length: 1024 }, (_, index) => JSON.stringify({ at: new Date().toISOString(), event: `legacy.event.${index}`, level: "info" })).join("\n"));
@@ -72,15 +87,45 @@ test("schema-one records survive projection migration and reopen without duplica
   store.append([record]); store.close();
   // Reconstruct the preceding schema: projections contain no independent user data.
   const previous = new Database(join(path, "diagnostics.sqlite"));
-  previous.exec("DROP TRIGGER evidence_ai; DROP TRIGGER evidence_ad; DROP TABLE traces; DROP TABLE problems; DROP TABLE metrics; PRAGMA user_version=1"); previous.close();
+  previous.exec("DROP TRIGGER evidence_ai; DROP TRIGGER evidence_ad; DROP TABLE traces; DROP TABLE problems; DROP TABLE metrics; DROP TABLE capture_content; DROP TABLE capture_documents; DROP TABLE capture_traces; DROP TABLE capture_collection_windows; DROP TABLE capture_campaigns; PRAGMA user_version=1"); previous.close();
   for (let attempt = 0; attempt < 2; attempt++) {
     store = new DiagnosticStore(path);
     expect(store.query().events.map(item => item.id)).toEqual([record.id]);
-    expect(store.status().schemaVersion).toBe(2);
+    expect(store.status().schemaVersion).toBe(6);
     const db = new Database(join(path, "diagnostics.sqlite"), { readonly: true });
     expect(db.query("SELECT event_count FROM traces").all()).toEqual([{ event_count: 1 }]);
     expect(db.query("SELECT value FROM metrics").all()).toEqual([{ value: 10 }]);
     db.close(); store.close();
+  }
+});
+
+test("schema-four capture migration preserves payloads and covers capacity checks", () => {
+  const path = root(), campaignId = crypto.randomUUID(), traceId = "c".repeat(32);
+  let store = new DiagnosticStore(path);
+  store.contentCapture({ action: "start", campaignId, acknowledged: true, until: Date.now() + 60_000, maxBytes: 4096 });
+  store.contentCapture({ action: "bind", campaignId, traceId });
+  store.contentCapture({ action: "write", campaignId, traceId, category: "prompt", text: "retained synthetic capture" });
+  const before = store.contentManifest(campaignId);
+  store.close();
+  const previous = new Database(join(path, "diagnostics.sqlite"));
+  previous.exec("DROP TABLE capture_collection_windows; DROP INDEX capture_content_capacity; PRAGMA user_version=4");
+  previous.close();
+  for (let attempt = 0; attempt < 2; attempt++) {
+    store = new DiagnosticStore(path);
+    try {
+      expect(store.contentManifest(campaignId)).toEqual({ ...before, collectionWindow: null });
+      expect(store.contentAttachment(campaignId, before.attachments[0]!, true).text).toBe("retained synthetic capture");
+      const db = new Database(join(path, "diagnostics.sqlite"), { readonly: true });
+      try {
+        for (const [sql, args] of [
+          ["SELECT SUM(bytes) FROM capture_content", []],
+          ["SELECT COUNT(*),SUM(bytes) FROM capture_content WHERE campaign_id=?", [campaignId]],
+        ] as const) {
+          const plan = db.query(`EXPLAIN QUERY PLAN ${sql}`).all(...args) as { detail: string }[];
+          expect(plan.some(row => row.detail.includes("COVERING INDEX capture_content_capacity"))).toBe(true);
+        }
+      } finally { db.close(); }
+    } finally { store.close(); }
   }
 });
 
@@ -90,6 +135,33 @@ test("read-only diagnostics do not create a database or start a runtime", () => 
   expect(store.status().available).toBe(false);
   expect(store.query().events).toEqual([]);
   expect(existsSync(path)).toBe(false); store.close();
+});
+
+test("independent loss reports cannot overwrite an increment between database statements", () => {
+  const path = root(), first = new DiagnosticStore(path), second = new DiagnosticStore(path);
+  // Reproduce the contested statement boundary deterministically: the second
+  // connection reports loss immediately after the first connection's first SQL.
+  const db = (first as unknown as { database: Database }).database;
+  const query = db.query.bind(db);
+  let intervened = false;
+  db.query = ((...args: Parameters<Database["query"]>) => {
+    const statement = query(...args);
+    return new Proxy(statement, { get(target, key) {
+      const value = Reflect.get(target, key);
+      if ((key === "get" || key === "run") && typeof value === "function") return (...bindings: unknown[]) => {
+        const result = value.apply(target, bindings);
+        if (!intervened) { intervened = true; second.dropped(7); }
+        return result;
+      };
+      return typeof value === "function" ? value.bind(target) : value;
+    } });
+  }) as Database["query"];
+  try {
+    first.dropped(1);
+    expect(intervened).toBe(true);
+    expect(first.status().dropped).toBe(8);
+    expect(second.status().dropped).toBe(8);
+  } finally { db.query = query; second.close(); first.close(); }
 });
 test("queries disclose truncated evidence rather than implying complete records", () => {
   const store = new DiagnosticStore(root());

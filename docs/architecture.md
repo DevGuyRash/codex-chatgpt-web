@@ -154,6 +154,8 @@ launcher runtime from a stale or external process. Legacy macOS launchd services
 removed during an explicit launcher migration; launchd remains only for the advanced terminal-only
 mode.
 
+Tunnel supervision uses `runtimes cleanup --json` as a non-applying local inventory. Endpoint discovery selects the configured alias and checks any reported tunnel identity. When a ready runtime has no admin URL in inventory, `tunnel health-locator` resolves the generated profile's `health.url_file`, checks the profile's tunnel identity and returns only an uncredentialed loopback HTTP base URL. It does not resolve runtime key references or contact the control plane. The locator is not a health result: startup still requires the local MCP diagnostic probe, and steady-state monitoring uses the local health endpoints. This keeps optional remote `runtimes status` lookups out of launcher health discovery.
+
 Setup keeps Codex's built-in `openai` provider. It routes Responses through the local daemon with
 `openai_base_url`, while pinning `experimental_realtime_webrtc_call_base_url` to Codex's official
 ChatGPT endpoint so Voice session creation never falls through to the Responses-only bridge. Both

@@ -224,6 +224,7 @@ export type AdapterEvent =
       errorType?: string;
       code?: string;
       retryable?: boolean;
+      problem?: import("./diagnostics/contracts").Problem;
     };
 
 /**

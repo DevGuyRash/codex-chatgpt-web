@@ -1,3 +1,21 @@
+import type { AdapterEvent } from "../types";
+import { problemFor } from "../diagnostics/problems";
+import { isDiagnosticCancellation } from "../diagnostics/outcome";
+
+/** Preserve structured failures at the adapter boundary; prose cannot establish capacity. */
+export function adapterErrorEvent(error: unknown): Extract<AdapterEvent, { type: "error" }> {
+  const candidate = error && typeof error === "object" ? error as Record<string, unknown> : {};
+  const message = error instanceof Error ? error.message : typeof error === "string" ? error : "Bridge operation failed";
+  if (isDiagnosticCancellation(error)) return { type: "error", message, status: 499, errorType: "client_closed_request", code: "client_cancelled", retryable: false };
+  const problem = problemFor(error);
+  const typed = typeof candidate.status === "number" && Number.isInteger(candidate.status) && candidate.status >= 400 && candidate.status <= 599
+    && typeof candidate.errorType === "string" && /^[a-z][a-z0-9_]{0,95}$/.test(candidate.errorType)
+    && typeof candidate.code === "string" && /^[a-z][a-z0-9_]{0,95}$/.test(candidate.code);
+  return typed ? { type: "error", message, status: candidate.status as number, errorType: candidate.errorType as string,
+    code: candidate.code as string, retryable: candidate.retryable === true, problem }
+    : { type: "error", message, status: 502, errorType: "server_error", code: "bridge_error", retryable: false, problem };
+}
+
 export interface CodexErrorPayload {
   message: string;
   type: string;
@@ -147,8 +165,7 @@ export function classifyError(status: number, type: string, message: string): Co
   if (
     status === 503 ||
     text.includes("overloaded") ||
-    text.includes("server is busy") ||
-    text.includes("temporarily unavailable")
+    text.includes("server is busy")
   ) {
     // Codex recognizes "server_is_overloaded" and applies retry-after backoff
     // (responses.rs is_server_overloaded_error); generic "upstream_server_error" is not recognized.
@@ -205,9 +222,7 @@ export function inferHttpStatusFromAdapterMessage(message: string): number {
   if (isAuthenticationMessage(lower)) return 401;
   if (isSubscriptionGateMessage(lower) || isPermissionMessage(lower)) return 403;
   if (
-    lower.includes("unavailable") ||
     lower.includes("overloaded") ||
-    lower.includes("temporarily") ||
     lower.includes("server is busy")
   ) return 503;
   if (

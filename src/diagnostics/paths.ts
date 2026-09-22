@@ -18,11 +18,14 @@ export function canonicalDestination(path: string): string {
   return join(realpathSync(ancestor), relative(ancestor, full));
 }
 
-export async function writeExport(destination: string, data: string | Uint8Array): Promise<void> {
+export async function writeExport(destination: string, data: string | Uint8Array | AsyncIterable<Uint8Array>): Promise<void> {
   const temporary = `${destination}.tmp-${randomUUID()}`;
   const file = await open(temporary, "wx", 0o600);
   try {
-    await file.writeFile(data); await file.sync(); await file.close();
+    if (typeof data === "object" && Symbol.asyncIterator in data) {
+      for await (const chunk of data) await file.writeFile(chunk);
+    } else await file.writeFile(data);
+    await file.sync(); await file.close();
     for (let attempt = 0; ; attempt++) {
       try { await rename(temporary, destination); break; }
       catch (error) {

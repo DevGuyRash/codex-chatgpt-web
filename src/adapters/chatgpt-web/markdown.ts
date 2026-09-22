@@ -13,6 +13,15 @@ const turndown = new TurndownService({
 
 turndown.use(gfm);
 turndown.remove(["button", "script", "style"]);
+// These standalone text delimiters are consumed by Codex's native plan parser.
+// Preserve only plain paragraph text: code, quoted examples and inline prose retain
+// their normal Markdown representation, and we never synthesize a closing tag.
+turndown.addRule("nativePlanDelimiter", {
+  filter: node => node.nodeName === "P" && node.childNodes.length === 1
+    && node.firstChild?.nodeType === 3
+    && /^<\/?proposed_plan>$/.test((node.textContent ?? "").trim()),
+  replacement: (_content, node) => `\n\n${node.textContent!.trim()}\n\n`,
+});
 turndown.addRule("removeImages", {
   filter: node => ["IMG", "PICTURE", "SOURCE"].includes(node.nodeName),
   replacement: () => "",

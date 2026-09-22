@@ -71,3 +71,14 @@ test("DEV launcher ignores generic production path overrides", () => {
   assert.equal(development.codexHome, path.join(homeDir, "isolated-dev", "codex-home"));
   assert.equal(development.userData, path.join(homeDir, "isolated-dev", "launcher"));
 });
+
+test("campaign launcher requires explicit nonproduction homes and keeps production runtime behavior", () => {
+  const base = { homeDir: path.resolve('/fixture/user'), appData: path.resolve('/fixture/appdata'), argv: ['electron', '.', '--codex-home', '/fixture/campaign/codex'], env: { CODEX_WEB_GPT_CAPTURE_CAMPAIGN_ID: 'campaign', CODEX_CHATGPT_WEB_HOME: '/fixture/campaign/runtime', CODEX_WEB_GPT_LAUNCHER_DATA_DIR: '/fixture/campaign/launcher' } };
+  const profile = resolveLauncherProfile(base);
+  assert.equal(profile.kind, 'production');
+  assert.equal(profile.isolatedCampaign, true);
+  assert.throws(() => resolveLauncherProfile({ ...base, argv: ['electron', '.'] }), /explicit/);
+  assert.throws(() => resolveLauncherProfile({ ...base, argv: ['electron', '.', '--codex-home', '/fixture/user/.codex'] }), /overlap/);
+  assert.throws(() => resolveLauncherProfile({ ...base, env: { ...base.env, CODEX_CHATGPT_WEB_HOME: '/fixture/user/.codex-chatgpt-web/test' } }), /overlap/);
+  assert.throws(() => resolveLauncherProfile({ ...base, env: { ...base.env, CODEX_WEB_GPT_LAUNCHER_DATA_DIR: '/fixture/appdata/Codex Web GPT' } }), /overlap/);
+});

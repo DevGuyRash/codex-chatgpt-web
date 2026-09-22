@@ -3,6 +3,7 @@ import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import { isReadableCompactionSummaryText, OPAQUE_COMPACTION_NOTE } from "../../responses/compaction";
 import type { CodexContentPart, CodexParsedRequest, CodexTool } from "../../types";
 import { isAcceptedCompactionContinuation } from "./compaction-continuation";
+import { ChatGptWebAdapterError } from "./adapter-error";
 
 export type ChatGptSandboxPolicy =
   | { type: "dangerFullAccess" }
@@ -15,6 +16,23 @@ export interface ChatGptTurnEnvironment {
   writableRoots: string[];
   sandboxPolicy: ChatGptSandboxPolicy;
   tools: CodexTool[];
+}
+
+/** Native owns these invocations; this context supplies no filesystem authority. */
+export interface ChatGptNativeToolContext {
+  nativeToolsOnly: true;
+  tools: CodexTool[];
+}
+
+export type ChatGptTurnToolContext = ChatGptTurnEnvironment | ChatGptNativeToolContext;
+
+export function isNativeOnlyTool(tool: CodexTool): boolean {
+  if (tool.freeform) return false;
+  if (!tool.namespace) return tool.name === "request_user_input_async";
+  if (tool.namespace === "clock") return tool.name === "curr_time" || tool.name === "sleep";
+  return tool.namespace === "collaboration" && [
+    "followup_task", "interrupt_agent", "list_agents", "send_message", "spawn_agent", "wait_agent",
+  ].includes(tool.name);
 }
 
 export interface ChatGptTurnIdentity {
@@ -43,14 +61,15 @@ export interface ChatGptRootThreadMetadata {
 export interface ChatGptTurnUserRevision {
   content: unknown;
   turnId?: string;
+  messageId?: string;
 }
 
 export const CHATGPT_TURN_REVISION_CONFLICT_MESSAGE =
   "ChatGPT web current user message conflicts with native Codex turn_id metadata";
 
-export class MissingTrustedCodexEnvironmentError extends Error {
+export class MissingTrustedCodexEnvironmentError extends ChatGptWebAdapterError {
   constructor(field: string) {
-    super(`ChatGPT web turn is missing ${field} in trusted Codex environment context`);
+    super(`ChatGPT web turn is missing ${field} in trusted Codex environment context`, { status: 409, errorType: "invalid_request_error", code: "trusted_codex_environment_missing", retryable: false });
     this.name = "MissingTrustedCodexEnvironmentError";
   }
 }
@@ -84,6 +103,31 @@ function clientTurnMetadataFromBody(value: unknown): Record<string, unknown> | u
 
 function clientTurnMetadata(parsed: CodexParsedRequest): Record<string, unknown> | undefined {
   return clientTurnMetadataFromBody(parsed._rawBody);
+}
+
+/**
+ * Native system tasks can declare orchestration tools without a workspace. Metadata narrows
+ * this route; it never authenticates paths. Unknown tools and any filesystem claim still require
+ * the ordinary trusted environment resolver. Never persist this request-local tool context.
+ */
+export function extractChatGptNativeToolContext(parsed: CodexParsedRequest): ChatGptNativeToolContext | undefined {
+  const metadata = clientTurnMetadata(parsed);
+  if (!metadata || parsed._compactionRequest || metadata.request_kind !== "turn"
+    || metadata.thread_source !== "system" || metadata.agent_name !== "/root"
+    || metadata.parent_thread_id != null || metadata.subagent_kind != null
+    || metadata.sandbox_mode !== "read-only"
+    || typeof metadata.thread_id !== "string" || !metadata.thread_id.trim()
+    || typeof metadata.turn_id !== "string" || !metadata.turn_id.trim()
+    || (metadata.workspaces != null && (!record(metadata.workspaces) || Object.keys(metadata.workspaces).length))) return undefined;
+  const declared = parsed.context.tools ?? [];
+  if (!declared.every(isNativeOnlyTool)) return undefined;
+  const input = record(parsed._rawBody)?.input;
+  const text = [trustedEnvironmentText(parsed), ...(Array.isArray(input)
+    ? input.flatMap(value => { const item = record(value); return item ? [rawMessageText(item)] : []; }) : [])].join("\n");
+  if (/<\/?(?:cwd|filesystem|workspace_roots|writable_roots|environments|sandbox_mode)\b/i.test(text)) return undefined;
+  // Keep the same revision ownership check used by ordinary tool turns.
+  extractChatGptTurnUserRevisionIdentity(parsed);
+  return { nativeToolsOnly: true, tools: declared };
 }
 
 function itemTurnId(value: unknown): string | undefined {
@@ -171,6 +215,10 @@ export function priorChatGptAbortedTurnIds(parsed: CodexParsedRequest): string[]
  * under the same logical task revision.
  */
 export function extractChatGptTurnUserRevision(parsed: CodexParsedRequest): unknown {
+  return extractChatGptTurnUserRevisionIdentity(parsed).content;
+}
+
+export function extractChatGptTurnUserRevisionIdentity(parsed: CodexParsedRequest): ChatGptTurnUserRevision {
   const identity = extractChatGptTurnIdentity(parsed);
   const turnId = identity.turnId;
   if (!turnId) throw new Error("ChatGPT web requires native Codex turn_id metadata for browser-session replay");
@@ -184,7 +232,7 @@ export function extractChatGptTurnUserRevision(parsed: CodexParsedRequest): unkn
       || !isAcceptedCompactionContinuation(parsed, identity, revision))) {
     throw new Error(CHATGPT_TURN_REVISION_CONFLICT_MESSAGE);
   }
-  return revision.content;
+  return revision;
 }
 
 function latestChatGptTurnUserRevision(parsed: CodexParsedRequest, expectedTurnId?: string): ChatGptTurnUserRevision | undefined {
@@ -204,7 +252,7 @@ function latestChatGptTurnUserRevision(parsed: CodexParsedRequest, expectedTurnI
     if (contextualUserMessage(item)) continue;
     const serverOwnedId = typeof item.id === "string" && item.id.length > 0;
     if (messageTurnId === undefined && !serverOwnedId) continue;
-    return { content: item.content, ...(messageTurnId ? { turnId: messageTurnId } : {}) };
+    return { content: item.content, ...(messageTurnId ? { turnId: messageTurnId } : {}), ...(serverOwnedId ? { messageId: item.id as string } : {}) };
   }
   return undefined;
 }

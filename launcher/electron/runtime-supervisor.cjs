@@ -5,6 +5,7 @@ const path = require("node:path");
 const { spawn } = require("node:child_process");
 const { writePrivateFileAtomic } = require("./atomic-file.cjs");
 const { redactText } = require("./logging.cjs");
+const { DiagnosticError, runtimeFailure } = require("./generated/diagnostics.cjs");
 const {
   DETACH_OWNED_CHILD,
   processRunning,
@@ -57,7 +58,8 @@ function loopbackHealthBaseURL(value) {
     const parsed = new URL(value);
     if (parsed.protocol !== "http:"
       || !["127.0.0.1", "[::1]", "::1"].includes(parsed.hostname)
-      || !parsed.port) return null;
+      || !parsed.port || parsed.username || parsed.password || parsed.search || parsed.hash
+      || parsed.pathname !== "/") return null;
     return `${parsed.protocol}//${parsed.host}`;
   } catch {
     return null;
@@ -315,6 +317,7 @@ class RuntimeSupervisor {
   constructor({
     app,
     logger,
+    diagnostics,
     sourceRoot,
     installedRuntimeRoot,
     runtimeRootProvider,
@@ -327,6 +330,7 @@ class RuntimeSupervisor {
   }) {
     this.app = app;
     this.logger = logger;
+    this.diagnostics = diagnostics ?? logger?.diagnostics;
     this.sourceRoot = sourceRoot;
     this.installedRuntimeRoot = installedRuntimeRoot;
     this.runtimeRootProvider = runtimeRootProvider;
@@ -634,8 +638,10 @@ class RuntimeSupervisor {
         detail: tunnelControlDiagnostic(result),
       };
     }
+    let parsingInventoryJson = true;
     try {
       const parsed = JSON.parse(result.output);
+      parsingInventoryJson = false;
       if (!Array.isArray(parsed.entries)) throw new Error("local inventory has no entries array");
       const entry = parsed.entries.find(candidate => candidate?.alias === tunnel.alias);
       if (!entry) {
@@ -651,8 +657,11 @@ class RuntimeSupervisor {
         };
       }
       const runtimeState = entry.runtime_state;
+      if (entry.tunnel_id !== undefined && entry.tunnel_id !== tunnel.tunnelId) {
+        throw new Error("local inventory alias identifies a different tunnel");
+      }
       if (!["stopped", "starting", "healthy", "ready"].includes(runtimeState)) {
-        throw new Error(`local inventory reported unsupported runtime_state=${String(runtimeState)}`);
+        throw new Error("local inventory reported an unsupported runtime state");
       }
       const liveRuntime = entry.live_runtime && typeof entry.live_runtime === "object"
         ? entry.live_runtime
@@ -687,6 +696,7 @@ class RuntimeSupervisor {
         healthy,
         absent: false,
         statusKnown: true,
+        ...(liveRuntime.base_url !== undefined && !healthBaseUrl ? { healthUrlInvalid: true } : {}),
         detail: redactText(detail).slice(0, 2_000),
       };
     } catch (error) {
@@ -698,8 +708,8 @@ class RuntimeSupervisor {
         healthy: undefined,
         absent: false,
         statusKnown: false,
-        detail: `local inventory returned invalid JSON: ${errorMessage(error)};`
-          + ` ${redactText(result.output || "[empty]").slice(0, 500)}`,
+        detail: parsingInventoryJson ? "local inventory returned invalid JSON; raw output is excluded"
+          : `local inventory could not be interpreted: ${errorMessage(error)}`,
       };
     }
   }
@@ -790,35 +800,25 @@ class RuntimeSupervisor {
   }
 
   async discoverTunnelHealthBaseUrl(config) {
-    const tunnel = config.tunnel;
-    if (!tunnel) throw new Error("launcher-owned tunnel has no runtime configuration");
-    const result = await this.runTunnelCommand(
-      config,
-      ["runtimes", "status", tunnel.alias, "--json"],
-      5_000,
-      "Local tunnel health discovery",
-    );
-    if (result.code !== 0) {
-      throw new Error(`Local tunnel health discovery failed: ${tunnelControlDiagnostic(result)}`);
+    if (!config.tunnel) throw new Error("launcher-owned tunnel has no runtime configuration");
+    // Status can wait on the control plane. Inventory is local-only but some native versions
+    // report ready without an admin URL. Their generated profile names the health URL file.
+    this.tunnelHealthBaseUrl = null;
+    const health = await this.readTunnelHealth(config);
+    if (health.healthUrlInvalid) throw new DiagnosticError({ code: "tunnel_health_endpoint_invalid", message: "Local tunnel inventory returned no verified loopback endpoint", origin: "tunnel-client", stage: "tunnel.health_discovery", retryable: false });
+    if (!health.statusKnown || health.absent || !health.processRunning) {
+      throw new DiagnosticError({ code: "tunnel_health_discovery_failed", message: "Local tunnel inventory did not identify an active configured runtime", origin: "tunnel-client", stage: "tunnel.health_discovery", findings: [{ message: health.detail }], retryable: false });
     }
+    if (this.tunnelHealthBaseUrl) return this.tunnelHealthBaseUrl;
+    const invocation = this.runtimeCommand(["--home", this.coreHome, "tunnel", "health-locator"]);
+    const result = await this.runControlCommand({ ...invocation, env: { ...process.env, CODEX_CHATGPT_WEB_STRUCTURED_ERRORS: "2" } }, 5_000, "Local tunnel profile health discovery", { action: "health-locator", origin: "tunnel-profile", runtimeDiagnostics: true });
+    if (result.code !== 0) throw runtimeFailure(result.stderr, "The runtime could not resolve the tunnel's local health locator", { ...(Number.isInteger(result.exitCode) ? { exitCode: result.exitCode } : {}), signal: result.signal, stage: "tunnel.health_discovery" });
     let parsed;
-    try {
-      parsed = JSON.parse(result.output);
-    } catch (error) {
-      throw new Error(`Local tunnel health discovery returned invalid JSON: ${errorMessage(error)}`);
-    }
-    const candidates = [
-      parsed?.local?.effective_health?.base_url,
-      parsed?.local?.health?.base_url,
-      parsed?.health_url,
-      parsed?.ui_url,
-    ];
-    const baseUrl = candidates.map(loopbackHealthBaseURL).find(Boolean);
-    if (!baseUrl) {
-      throw new Error("Local tunnel health discovery returned no verified loopback endpoint");
-    }
+    try { parsed = JSON.parse(result.output); } catch { /* Raw output is not an error contract. */ }
+    const baseUrl = loopbackHealthBaseURL(parsed?.baseUrl);
+    if (!baseUrl || parsed.baseUrl !== baseUrl) throw new DiagnosticError({ code: "tunnel_health_endpoint_invalid", message: "The runtime returned no valid loopback health locator", origin: "tunnel-profile", stage: "tunnel.health_discovery", retryable: false });
     this.tunnelHealthBaseUrl = baseUrl;
-    return baseUrl;
+    return this.tunnelHealthBaseUrl;
   }
 
   async waitForTunnelMcpTransport(config, timeoutMs = 10_000) {
@@ -829,15 +829,12 @@ class RuntimeSupervisor {
       health = await this.probeTunnelMcpTransport();
       if (health.observed && health.ok) return health;
       if (health.fatal) {
-        throw new Error(`Fresh tunnel MCP transport is unhealthy: ${health.detail}`);
+        throw new DiagnosticError({ code: "tunnel_mcp_unhealthy", message: `Fresh tunnel MCP transport is unhealthy: ${health.detail}`, origin: "tunnel-client", stage: "tunnel.mcp_health", retryable: false });
       }
       if (Date.now() >= deadline) break;
       await sleep(TUNNEL_HEALTH_POLL_INTERVAL_MS);
     } while (Date.now() < deadline);
-    throw new Error(
-      `Fresh tunnel MCP transport could not be verified within ${timeoutMs}ms:`
-      + ` ${health?.detail || "no diagnostics returned"}`,
-    );
+    throw new DiagnosticError({ code: "tunnel_mcp_unobserved", message: `Fresh tunnel MCP transport could not be verified within ${timeoutMs}ms: ${health?.detail || "no diagnostics returned"}`, origin: "tunnel-client", stage: "tunnel.mcp_health", retryable: false });
   }
 
   async readLocalTunnelHealth() {
@@ -1588,109 +1585,143 @@ class RuntimeSupervisor {
   async runTunnelCommand(config, args, timeoutMs, label) {
     const tunnel = config.tunnel;
     if (!tunnel) throw new Error("launcher-owned tunnel has no runtime configuration");
-    return await new Promise((resolve, reject) => {
-      const child = spawn(tunnel.binaryPath, args, {
-        cwd: tunnel.profileDir,
-        detached: DETACH_OWNED_CHILD,
-        stdio: ["ignore", "pipe", "pipe"],
-        windowsHide: true,
+    return this.runControlCommand({ executable: tunnel.binaryPath, args, cwd: tunnel.profileDir }, timeoutMs, label, {
+      action: args[0] === "runtimes" && ["status", "stop", "cleanup", "connect"].includes(args[1]) ? args[1] : "other",
+      origin: "tunnel-client",
+    });
+  }
+
+  async runControlCommand(invocation, timeoutMs, label, { action, origin, runtimeDiagnostics = false }) {
+    const operation = this.diagnostics?.begin("tunnel.control", {
+      action, executable: path.basename(invocation.executable), timeoutMs,
+    });
+    const started = performance.now();
+    const outcome = { timeoutMs, elapsedMs: 0, timedOut: false, exitObserved: false, outputDrained: false, stdoutBytes: 0, stderrBytes: 0, stdoutTruncated: false, stderrTruncated: false };
+    const observe = (name, detail = {}) => this.diagnostics?.event(name, name.replaceAll(".", " "), detail, name.startsWith("diagnostics.") ? "warning" : "info", operation?.context);
+    const failure = (code, message, causes = []) => {
+      outcome.elapsedMs = performance.now() - started;
+      const error = new DiagnosticError({ code, message, origin, stage: "tunnel.control", retryable: false,
+        ...(operation ? { traceId: operation.context.traceId, spanId: operation.context.spanId } : {}),
+        ...(Number.isInteger(outcome.exitCode) ? { exitCode: outcome.exitCode } : {}),
+        ...(outcome.exitObserved ? { signal: outcome.signal } : {}),
+        findings: [{ message: Object.entries(outcome).map(([key, value]) => `${key}=${value}`).join("; ") }], causes,
+        ...(!outcome.exitObserved ? { evidenceMissing: "The control process has no observed native exit code or signal" } : {}),
       });
+      error.controlOutcome = { ...outcome };
+      return error;
+    };
+    const execute = () => new Promise((resolve, reject) => {
+      let child;
+      let attachDiagnostics = Boolean(runtimeDiagnostics && this.logger?.environment && this.logger?.attachChild);
+      const env = invocation.env ? { ...invocation.env } : undefined;
+      if (env && runtimeDiagnostics) {
+        // An inherited descriptor number is not an inherited pipe. Use the launcher's real
+        // collection channel when available; otherwise let the CLI collect in its own home.
+        delete env.CODEX_CHATGPT_WEB_DIAGNOSTICS_FD;
+        if (attachDiagnostics) {
+          try { Object.assign(env, this.logger.environment()); }
+          catch { attachDiagnostics = false; delete env.CODEX_CHATGPT_WEB_DIAGNOSTICS_FD; observe("diagnostics.child_channel_unavailable"); }
+        }
+        if (operation) env.CODEX_CHATGPT_WEB_TRACEPARENT = `00-${operation.context.traceId}-${operation.context.spanId}-01`;
+      }
+      try {
+        child = spawn(invocation.executable, invocation.args, { cwd: invocation.cwd, ...(env ? { env } : {}), detached: DETACH_OWNED_CHILD, stdio: attachDiagnostics ? ["ignore", "pipe", "pipe", "pipe"] : ["ignore", "pipe", "pipe"], windowsHide: true });
+      } catch (error) {
+        if (typeof error.code === "string") outcome.osCode = error.code.slice(0, 96);
+        reject(failure("tunnel_control_spawn_failed", `${label} could not start its local control process`)); return;
+      }
+      if (child.pid) outcome.pid = child.pid;
+      if (attachDiagnostics) {
+        try { this.logger.attachChild(child); }
+        catch { child.stdio[3]?.resume(); observe("diagnostics.child_channel_failed"); }
+      }
       const stdout = [];
       const stderr = [];
-      let stdoutBytes = 0;
-      let stderrBytes = 0;
       const capture = (chunks, chunk, stream) => {
-        const used = stream === "stdout" ? stdoutBytes : stderrBytes;
+        const key = `${stream}Bytes`, used = outcome[key];
+        outcome[key] += chunk.length;
+        if (outcome[`${stream}FirstMs`] === undefined) outcome[`${stream}FirstMs`] = performance.now() - started;
+        outcome[`${stream}LastMs`] = performance.now() - started;
         const remaining = MAX_CONTROL_OUTPUT_BYTES - used;
+        if (chunk.length > remaining) outcome[`${stream}Truncated`] = true;
         if (remaining <= 0) return;
-        const captured = chunk.length > remaining ? chunk.subarray(0, remaining) : chunk;
-        chunks.push(captured);
-        if (stream === "stdout") stdoutBytes += captured.length;
-        else stderrBytes += captured.length;
+        chunks.push(chunk.length > remaining ? chunk.subarray(0, remaining) : chunk);
       };
       let settled = false;
-      let timeoutError = null;
+      let failureCode;
+      let failureMessage;
       let terminationTimeout = null;
       let forceTimeout = null;
+      const cleanupCauses = [];
       const clearTimers = () => {
         clearTimeout(timeout);
         if (terminationTimeout) clearTimeout(terminationTimeout);
         if (forceTimeout) clearTimeout(forceTimeout);
       };
-      const timeout = setTimeout(() => {
-        if (settled) return;
-        timeoutError = new Error(`${label} timed out after ${timeoutMs}ms`);
+      const terminate = signal => {
         try {
-          terminateOwnedProcessTree(child);
+          terminateOwnedProcessTree(child, signal);
+          observe("tunnel.control_termination_requested", { pid: child.pid, signal });
         } catch (error) {
-          settled = true;
-          clearTimers();
-          reject(new Error(
-            `${timeoutError.message}; control process tree termination failed: ${errorMessage(error)}`,
-          ));
-          return;
+          cleanupCauses.push({ code: "tunnel_control_termination_failed", message: `Owned control process ${signal} termination failed${typeof error.code === "string" ? ` (${error.code})` : ""}` });
         }
+      };
+      const stop = () => {
+        terminate("SIGTERM");
         terminationTimeout = setTimeout(() => {
           if (settled) return;
-          try {
-            terminateOwnedProcessTree(child, "SIGKILL");
-          } catch (error) {
-            settled = true;
-            clearTimers();
-            reject(new Error(
-              `${timeoutError.message}; forced control process tree termination failed: ${errorMessage(error)}`,
-            ));
-            return;
-          }
+          terminate("SIGKILL");
           forceTimeout = setTimeout(() => {
             if (settled) return;
-            settled = true;
-            clearTimers();
-            reject(new Error(`${timeoutError.message}; the control process did not exit after forced termination`));
+            settled = true; clearTimers();
+            cleanupCauses.push({ code: "tunnel_control_cleanup_incomplete", message: "The owned control process and output pipes did not settle after forced termination" });
+            reject(failure(failureCode, failureMessage, cleanupCauses));
           }, 2_000);
         }, 5_000);
+      };
+      const timeout = setTimeout(() => {
+        if (settled || failureCode) return;
+        outcome.timedOut = true;
+        failureCode = "tunnel_control_timeout"; failureMessage = `${label} timed out after ${timeoutMs}ms`;
+        observe("tunnel.control_deadline", { ...outcome, elapsedMs: performance.now() - started }); stop();
       }, timeoutMs);
+      child.once("spawn", () => observe("tunnel.control_started", { pid: child.pid, elapsedMs: performance.now() - started }));
       child.stdout.on("data", (chunk) => capture(stdout, chunk, "stdout"));
       child.stderr.on("data", (chunk) => capture(stderr, chunk, "stderr"));
       const onOutputError = (stream) => (error) => {
-        if (settled) return;
-        settled = true;
-        clearTimers();
-        try {
-          terminateOwnedProcessTree(child);
-        } catch {}
-        reject(new Error(`${label} ${stream} pipe failed: ${errorMessage(error)}`));
+        if (settled || failureCode) return;
+        if (typeof error.code === "string") outcome.osCode = error.code.slice(0, 96);
+        failureCode = "tunnel_control_output_failed"; failureMessage = `${label} ${stream} pipe failed`;
+        stop();
       };
       child.stdout.once("error", onOutputError("stdout"));
       child.stderr.once("error", onOutputError("stderr"));
       child.once("error", (error) => {
         if (settled) return;
-        settled = true;
-        clearTimers();
-        reject(timeoutError
-          ? new Error(`${timeoutError.message}; termination failed: ${error.message}`)
-          : error);
+        if (typeof error.code === "string") outcome.osCode = error.code.slice(0, 96);
+        if (failureCode) return;
+        settled = true; clearTimers();
+        reject(failure("tunnel_control_spawn_failed", `${label} could not start its local control process`));
       });
-      child.once("exit", (code) => {
+      child.once("exit", (code, signal) => {
+        outcome.exitObserved = true; outcome.exitCode = code; outcome.signal = signal;
+        observe("tunnel.control_exited", { pid: child.pid, ...(code === null ? {} : { exitCode: code }), signal: signal ?? "none", elapsedMs: performance.now() - started });
+      });
+      child.once("close", (code, signal) => {
         if (settled) return;
-        settled = true;
-        clearTimers();
-        if (timeoutError) {
-          try {
-            terminateOwnedProcessTree(child, "SIGKILL");
-            reject(timeoutError);
-          } catch (error) {
-            reject(new Error(
-              `${timeoutError.message}; final control process-group cleanup failed: ${errorMessage(error)}`,
-            ));
-          }
-          return;
+        settled = true; clearTimers(); outcome.outputDrained = failureCode !== "tunnel_control_output_failed";
+        if (failureCode) {
+          terminate("SIGKILL"); reject(failure(failureCode, failureMessage, cleanupCauses)); return;
         }
+        outcome.elapsedMs = performance.now() - started;
         const exitCode = code ?? 1;
         const stdoutText = Buffer.concat(stdout).toString("utf8").trim();
         const stderrText = Buffer.concat(stderr).toString("utf8").trim();
         resolve({
           code: exitCode,
+          exitCode: code,
+          exitObserved: outcome.exitObserved,
+          signal,
           stdout: stdoutText,
           stderr: stderrText,
           output: exitCode === 0
@@ -1699,6 +1730,14 @@ class RuntimeSupervisor {
         });
       });
     });
+    try {
+      const result = await (operation ? operation.run(execute) : execute());
+      if (result.code !== 0) operation?.problem(failure("tunnel_control_failed", `${label} exited unsuccessfully`));
+      operation?.end(result.code === 0 ? "succeeded" : "failed", outcome);
+      return result;
+    } catch (error) {
+      operation?.problem(error); operation?.end("failed", outcome); throw error;
+    }
   }
 
   async stopStaleOwnedRuntime(config) {

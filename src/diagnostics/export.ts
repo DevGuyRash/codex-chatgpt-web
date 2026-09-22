@@ -1,9 +1,10 @@
 import { lstatSync, existsSync, realpathSync } from "node:fs";
 import { resolve, dirname } from "node:path";
-import { zipSync, strToU8 } from "fflate";
-import { ExportOptionsSchema, type DiagnosticEvent, type DiagnosticStatus, type ExportOptions } from "./contracts";
-import { privateDirectory } from "./store";
-import { assembleReport } from "./report";
+import { createHash } from "node:crypto";
+import { Zip, ZipDeflate, strToU8 } from "fflate";
+import { ExportOptionsSchema, reportedCaptureDrops, type DiagnosticEvent, type DiagnosticStatus, type ExportOptions } from "./contracts";
+import { privateDirectory, DiagnosticStore } from "./store";
+import { assembleReport, readableReport } from "./report";
 import { canonicalDestination, containsPath, writeExport } from "./paths";
 
 const escapeHtml = (text: string) => text.replace(/[&<>"']/g, character => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[character]!);
@@ -45,23 +46,91 @@ export function renderReport(events: DiagnosticEvent[], notices: string[], conte
     </style></head><body><h1>Codex Web GPT diagnostic report</h1><p>${events.length} retained records · ${operations.length} operation records · ${failures.length} problems</p><p>Sanitized local evidence. Private captures and task titles are excluded. Missing records are not proof of success.</p>${notices.map(notice => `<p role="note">${escapeHtml(notice)}</p>`).join("")}${summary}<h2>Problems</h2>${failures.length ? failures.map(row).join("") : "<p>No problems in this selection.</p>"}<h2>Recorded activity</h2>${events.map(row).join("")}</body></html>`;
 }
 
-export async function exportDiagnostics(directory: string, input: ExportOptions, destination: string): Promise<{ records: number; incomplete: boolean }> {
+/** Compress one bounded entry at a time and let the destination apply backpressure. */
+async function* zipEntries(entries: Iterable<[string, Uint8Array]>) {
+  let chunks: Uint8Array[] = [], failure: Error | null = null;
+  const zip = new Zip((error, chunk) => { if (error) failure = error; else chunks.push(chunk); });
+  try {
+    for (const [name, bytes] of entries) {
+      const file = new ZipDeflate(name);
+      zip.add(file); file.push(bytes, true);
+      if (failure) throw failure;
+      for (const chunk of chunks) yield chunk;
+      chunks = [];
+    }
+    zip.end();
+    if (failure) throw failure;
+    for (const chunk of chunks) yield chunk;
+  } finally { zip.terminate(); }
+}
+
+export async function exportDiagnostics(directory: string, input: ExportOptions, destination: string): Promise<{ records: number; incomplete: boolean; files: number }> {
   const options = ExportOptionsSchema.parse(input);
   const output = resolve(destination); const root = existsSync(directory) ? realpathSync(directory) : resolve(directory);
   if (containsPath(root, canonicalDestination(output))) throw new Error("Exports must not overwrite the diagnostics store or private captures");
   if (existsSync(output) && (lstatSync(output).isSymbolicLink() || lstatSync(output).nlink > 1)) throw new Error("Export destination must not alias another file");
-  const { events, ...metadata } = await assembleReport(directory, options.selection ?? { kind: "results", query: options.query });
+  const report = await assembleReport(directory, options.selection ?? { kind: "results", query: options.query }, undefined, options.content?.campaignId);
+  const { events } = report;
+  let scopedContent: { campaignId: string; scope: string; attachments: number; bytes: number; omitted: number } | undefined;
+  let contentManifest: ReturnType<DiagnosticStore["contentManifest"]> | undefined;
+  if (options.content) {
+    if (options.format !== "bundle") throw new Error("Content-inclusive evidence requires a support bundle");
+    const store = new DiagnosticStore(directory, { readonly: true });
+    try {
+      const manifest = contentManifest = store.contentManifest(options.content.campaignId);
+      scopedContent = { campaignId: manifest.campaignId, scope: "Entire explicitly selected campaign at export start, independently of the diagnostic record selection", attachments: manifest.attachments.length, bytes: manifest.attachments.reduce((total, item) => total + item.bytes, 0), omitted: manifest.omitted };
+      report.notices.push(`Content attachments cover the entire selected campaign at export start (${manifest.attachments.length} attachments); diagnostic records use the report selection.`);
+      const captureDrops = reportedCaptureDrops(manifest.collectionWindow);
+      if (captureDrops === null) { report.incomplete = true; report.notices.push("The selected campaign has no valid recorded collection-loss boundary; historical collection loss cannot be assigned to this scope."); }
+      else if (captureDrops > 0) { report.incomplete = true; report.notices.push(`${captureDrops} collection drops were reported during the selected campaign; their attribution within that interval is unknown.`); }
+      if (!manifest.finished) { report.incomplete = true; report.notices.push("The selected campaign is still open; this export is a snapshot, not final campaign evidence."); }
+      if (manifest.omitted) { report.incomplete = true; report.notices.push(`${manifest.omitted} campaign content captures were omitted; see the content manifest.`); }
+      if (manifest.collectionFailures) { report.incomplete = true; report.notices.push(`${manifest.collectionFailures} campaign collection failures were recorded; omission counts may overlap or be incomplete.`); }
+      const unfinished = manifest.documents.filter(document => document.status !== "stored").length;
+      if (unfinished) { report.incomplete = true; report.notices.push(`${unfinished} campaign documents were not completely retained; see the content manifest.`); }
+    } finally { store.close(); }
+  }
+  const { events: _events, ...baseMetadata } = report;
+  const metadata = { ...baseMetadata, scopedContentIncluded: Boolean(scopedContent), scopedContent };
   const { incomplete } = metadata;
   const html = renderReport(events, metadata.notices, metadata);
   const otlp = toOtlp(events);
-  const outputData = options.format === "html" ? html : options.format === "json" ? JSON.stringify({ ...metadata, events }, null, 2)
-    : options.format === "otlp" ? JSON.stringify(otlp, null, 2) : zipSync({
+  function* entries(): Generator<[string, Uint8Array]> {
+    yield* Object.entries({
       "report.html": strToU8(html), "manifest.json": strToU8(JSON.stringify(metadata, null, 2)),
       "events.jsonl": strToU8(events.map(event => JSON.stringify(event)).join("\n")),
       "otlp-logs.json": strToU8(JSON.stringify(otlp.logs)), "otlp-traces.json": strToU8(JSON.stringify(otlp.traces)),
+      "summary.txt": strToU8(readableReport(report)),
     });
+    if (contentManifest && options.content) {
+      const store = new DiagnosticStore(directory, { readonly: true });
+      try {
+        const exportedAttachments = [];
+        const documents = new Map(contentManifest.documents.map(document => [document.id, { ...document, hash: createHash("sha256"), observedBytes: 0, observedChunks: 0 }]));
+        // Document chunks are exported in their declared order; attachment hashes still pin the snapshot.
+        const ordered = [...contentManifest.attachments].sort((a, b) => (a.document?.id ?? a.id).localeCompare(b.document?.id ?? b.id) || (a.document?.index ?? 0) - (b.document?.index ?? 0));
+        for (const attachment of ordered) {
+          const row = store.contentAttachment(contentManifest.campaignId, attachment, options.content.acknowledged);
+          const screenshot = attachment.category === "screenshot";
+          const file = `content/${row.id}.${screenshot ? "png" : "txt"}`;
+          const bytes = screenshot ? Buffer.from(row.text, "base64") : strToU8(row.text);
+          if (attachment.document) {
+            const document = documents.get(attachment.document.id);
+            if (!document || document.status !== "stored" || document.traceId !== attachment.traceId || document.category !== attachment.category || attachment.document.index !== document.observedChunks) throw new Error("Captured document chunk sequence failed its integrity check");
+            document.hash.update(bytes); document.observedBytes += bytes.byteLength; document.observedChunks++;
+          }
+          exportedAttachments.push({ ...attachment, storageEncoding: screenshot ? "base64" : "utf8", file, fileBytes: bytes.byteLength, fileSha256: createHash("sha256").update(bytes).digest("hex") });
+          yield [file, bytes];
+        }
+        for (const document of documents.values()) if (document.status === "stored" && (document.observedChunks !== document.chunks || document.observedBytes !== document.bytes || document.hash.digest("hex") !== document.sha256)) throw new Error("Captured document failed its complete-content integrity check");
+        yield ["content/manifest.json", strToU8(JSON.stringify({ ...contentManifest, attachments: exportedAttachments }, null, 2))];
+      } finally { store.close(); }
+    }
+  }
+  const outputData = options.format === "html" ? html : options.format === "json" ? JSON.stringify({ ...metadata, events }, null, 2)
+    : options.format === "otlp" ? JSON.stringify(otlp, null, 2) : zipEntries(entries());
   // The caller owns an explicitly chosen destination; do not change permissions on an existing parent.
   if (!existsSync(dirname(output))) privateDirectory(dirname(output));
   await writeExport(output, outputData);
-  return { records: events.length, incomplete };
+  return { records: events.length, incomplete, files: options.format === "bundle" ? 6 + (contentManifest ? 1 + contentManifest.attachments.length : 0) : 1 };
 }

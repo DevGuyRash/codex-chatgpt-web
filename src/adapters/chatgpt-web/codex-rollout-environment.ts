@@ -423,7 +423,8 @@ function exactManagedWorkspaceWriteProfile(
   const uniqueDirectWrites = [...new Map(directWrites.map(path => (
     [pathIdentity(path), path] as const
   ))).values()];
-  if (uniqueDirectWrites.length !== directWrites.length) return undefined;
+  // Native may repeat an explicit grant (for example a writable Git directory).
+  // Each entry has already passed validation; repeated roots add no authority.
   const expectedIdentities = new Set(uniqueExpectedWritableRoots.map(pathIdentity));
   if (uniqueDirectWrites.some(path => !expectedIdentities.has(pathIdentity(path)))) return undefined;
   if (projectRootsWrite === 0 && uniqueDirectWrites.length !== uniqueExpectedWritableRoots.length) return undefined;

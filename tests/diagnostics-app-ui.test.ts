@@ -39,7 +39,7 @@ test.skipIf(!process.env.CHATGPT_TEST_CHROME_EXECUTABLE)("whole launcher opens a
       await page.goto(`http://127.0.0.1:${server.port}/?language=${language}`);
       const openLabel = language === "en" ? "Open Diagnostics" : language === "zh-CN" ? "打开诊断" : "診断を開く";
       const detailsLabel = language === "en" ? "Details" : language === "zh-CN" ? "详情" : "詳細";
-      await page.getByRole("button", { name: `${detailsLabel} (1)`, exact: true }).click();
+      await page.getByRole("button", { name: detailsLabel, exact: true }).click();
       try { await page.getByRole("button", { name: openLabel, exact: true }).click(); }
       catch (error) { throw new Error(`${String(error)}\nRenderer errors: ${JSON.stringify(errors)}\nSynthetic visible state: ${(await page.locator("body").innerText()).slice(0, 4000)}`); }
       await page.getByRole("heading", { name: copy.timeline, exact: true }).waitFor();

@@ -3,7 +3,7 @@ import { canonicalStages } from "../../../src/diagnostics/evidence";
 import { diagnosticRequestCode, type DiagnosticRequestCode } from "../../../src/diagnostics/request-error";
 
 export type DiagnosticTab = "overview" | "operations" | "advanced" | "capture";
-export type DiagnosticFilters = { search: string; regex: boolean; severity: string; component: string; target: string; task: string; trace: string; from: string; to: string };
+export type DiagnosticFilters = { search: string; regex: boolean; severity: string; component: string; target: string; task: string; trace: string; from: string; to: string; facets?: Pick<DiagnosticQuery, "outcomes" | "severities" | "components" | "targets" | "kinds" | "operationTypes" | "exitCodes" | "signals"> };
 export const emptyFilters: DiagnosticFilters = { search: "", regex: false, severity: "", component: "", target: "", task: "", trace: "", from: "", to: "" };
 export const emptyResult: QueryResult = { version: 1, events: [], incomplete: false, notices: [] };
 export type FilterError = "regex" | "trace" | "date";
@@ -14,7 +14,7 @@ export function validateDiagnosticFilters(filters: DiagnosticFilters): FilterErr
 }
 export function diagnosticFilterQuery(tab: DiagnosticTab, filters: DiagnosticFilters): DiagnosticQuery {
   if (validateDiagnosticFilters(filters)) throw new Error("Invalid diagnostic filters");
-  return { view: tab === "overview" ? "groups" : tab === "operations" ? "operations" : "events", limit: 100,
+  return { ...filters.facets, view: tab === "overview" ? "groups" : tab === "operations" ? "operations" : "events", limit: 100,
     ...(filters.search ? filters.regex ? { regex: filters.search } : { text: filters.search } : {}),
     ...(filters.severity ? { severity: filters.severity as DiagnosticEvent["severity"] } : {}),
     ...(filters.component ? { component: filters.component } : {}), ...(filters.target ? { target: filters.target } : {}),

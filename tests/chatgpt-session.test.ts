@@ -1,5 +1,7 @@
 import { expect, test } from "bun:test";
 import { ChatGptBrowserWorker } from "../src/adapters/chatgpt-web/browser-worker";
+import { problemFor, runtimeFailure } from "../src/diagnostics/problems";
+import { adapterErrorEvent } from "../src/lib/errors";
 import {
   CHATGPT_COMPOSER_SELECTOR,
   CHATGPT_EFFORT_CONTROL_SELECTOR,
@@ -190,7 +192,7 @@ test("a transient effort control does not turn a Luna-only account into Sol", as
   expect(visibilityReads).toBe(2);
 });
 
-function reasoningPicker(options: { max?: string; delay?: number; missing?: boolean; visibleSemantic?: boolean } = {}) {
+function reasoningPicker(options: { max?: string; delay?: number; missing?: boolean; visibleSemantic?: boolean; step?: number } = {}) {
   let value = 0;
   const keys: string[] = [];
   const hidden = {
@@ -200,12 +202,13 @@ function reasoningPicker(options: { max?: string; delay?: number; missing?: bool
       signal.addEventListener("abort", () => reject(new DOMException("aborted", "AbortError")), { once: true });
     }),
   };
-  const sliderControl = { press: async (key: string) => { keys.push(key); value += key === "ArrowRight" ? 1 : -1; } };
+  const sliderControl = { press: async (key: string) => { keys.push(key); value += (key === "ArrowRight" ? 1 : -1) * (options.step ?? 1); } };
   const slider = {
     isVisible: async () => options.visibleSemantic === true, // Also supports older visible semantic sliders.
     filter: () => { throw new Error("Semantic input must not be visibility-filtered"); },
     waitFor: async ({ state }: { state: string }) => { expect(state).toBe("attached"); },
     getAttribute: async (name: string) => ({ "aria-valuemin": "0", "aria-valuemax": options.max ?? "4", "aria-valuenow": String(value), "aria-hidden": "true" })[name] ?? null,
+    evaluateAll: async () => ({ count: 1, values: ["0", options.max ?? "4", String(value)] }),
     locator: () => sliderControl,
   };
   const container = {
@@ -264,4 +267,25 @@ test("Pro selection changes the hidden slider through its visible owner, never t
   await select.call({ activeComposer: async () => fixture.composer }, fixture.page, "gpt-5.6-sol", "max", { localToolsEnabled: false, solAvailable: true, proAvailable: true });
   expect(fixture.keys).toEqual(["ArrowRight", "ArrowRight", "ArrowRight", "ArrowRight"]);
   expect(fixture.value()).toBe(4);
+});
+
+test("effort selection failures retain their exact cause and identity through diagnostic serialization", async () => {
+  for (const options of [{ step: 2 }, { max: "bad" }]) {
+    const fixture = reasoningPicker(options);
+    const select = (ChatGptBrowserWorker.prototype as unknown as {
+      selectModelAndEffort(...args: unknown[]): Promise<unknown>;
+    }).selectModelAndEffort;
+    let failure: unknown;
+    try {
+      await select.call({ activeComposer: async () => fixture.composer }, fixture.page, "gpt-5.6-sol", "medium", { localToolsEnabled: false, solAvailable: true, proAvailable: true });
+    } catch (error) { failure = error; }
+    expect(failure).toBeInstanceOf(Error);
+    expect(adapterErrorEvent(failure)).toMatchObject({ code: "model_control_unavailable", status: 502, retryable: false });
+    const problem = problemFor(failure);
+    expect(problem.causes[0]?.message).toBe(options.step
+      ? "ChatGPT effort slider did not move exactly one step with ArrowRight (before=0; after=2)"
+      : "ChatGPT effort slider exposed an invalid ARIA range");
+    const restored = runtimeFailure(`CGW_ERROR_V2 ${JSON.stringify(problem)}`, "Lost failure");
+    expect(restored.problem).toMatchObject({ code: "model_control_unavailable", causes: problem.causes, httpStatus: 502, retryable: false });
+  }
 });

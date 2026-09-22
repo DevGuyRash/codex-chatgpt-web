@@ -3,6 +3,7 @@ import { createContext, useContext, useEffect, useRef, useState } from "react";
 import { motion } from "motion/react";
 import type { Copy } from "./i18n";
 import { ConfigurationRepair } from "./ConfigurationRepair";
+import { ActionFeedback } from "./actions/feedback";
 import { DiagnosticsNavigationContext } from "./diagnostics/navigation";
 import type { DiagnosticProblem, DoctorReport, Language, LauncherApi, LauncherState, RecoveryAction } from "./types";
 
@@ -56,8 +57,9 @@ export function RecoveryDialog({ action, api, language, devProfile, onClose, onR
   const [error, setError] = useState<string | null>(null);
   const [rechecking, setRechecking] = useState(false);
   const [applied, setApplied] = useState(false);
+  const [openedAt] = useState(Date.now);
   const outcome = language === "zh-CN" ? ["更改已应用", "需要重启", "连接已验证", "检查未完成。请查看技术详情，然后重新运行诊断。", "技术详情"] : language === "ja" ? ["変更を適用しました", "再起動が必要です", "接続を確認しました", "確認を完了できませんでした。技術的な詳細を確認し、診断を再実行してください。", "技術的な詳細"] : ["Changes applied", "Restart required", "Connection verified", "The check could not finish. Review the technical details, then run diagnostics again.", "Technical details"];
-  useEffect(() => { const element = dialog.current!; element.showModal(); return () => element.close(); }, []);
+  useEffect(() => { const previous = document.activeElement; const element = dialog.current!; element.showModal(); return () => { element.close(); if (previous instanceof HTMLElement && previous.isConnected) previous.focus(); }; }, []);
   useEffect(() => {
     if (action !== "run-doctor") return;
     let current = true;
@@ -76,6 +78,7 @@ export function RecoveryDialog({ action, api, language, devProfile, onClose, onR
     {rechecking ? <p role="status">{copy.working}</p> : null}
     {action !== "run-doctor" && report ? <DiagnosticChecks report={report} language={language} disabled={busy || rechecking} /> : null}
     {error ? <><p role="alert">{outcome[3]}</p><details><summary>{outcome[4]}</summary><pre className="diagnostic-detail">{error}</pre></details></> : null}
+    <ActionFeedback language={language} actionKeys={action === "run-doctor" ? ["doctor"] : ["previewIntegrationRepair", "applyIntegrationRepair", "doctor"]} since={openedAt} />
     <button type="button" className="button-secondary" disabled={busy || rechecking} onClick={onClose}>{copy.close}</button>
   </dialog>;
 }

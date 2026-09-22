@@ -1,6 +1,7 @@
 import { useId, useState } from "react";
 import { integrationSummary, settingLabel } from "./diagnostics/setting-labels";
 import type { CodexRepairPreview, Language } from "./types";
+import { configurationChangeKind } from "../../src/configuration-summary";
 
 const copy = {
   en: {
@@ -42,7 +43,7 @@ export function ConfigurationCards({ preview, language, selectOccurrence }: {
   const labels = copy[language];
   const [showUnchanged, setShowUnchanged] = useState(false);
   const review = language === "zh-CN" ? { before: "更改前", after: "更改后", added: "新增", removed: "移除", changed: "已更改", unchanged: "不变", unresolved: "需要处理", show: "显示未更改的设置", hide: "隐藏未更改的设置", integrations: ["其他集成", "由其他工具管理的设置。"], helper: "更新清理程序", address: "连接地址", compatibility: "子代理兼容性", cleanup: "取消任务时清理", summary: "查看此连接的更改；展开技术详情可查看准确的定义。" } : language === "ja" ? { before: "変更前", after: "変更後", added: "追加", removed: "削除", changed: "変更", unchanged: "変更なし", unresolved: "対応が必要", show: "変更のない設定を表示", hide: "変更のない設定を隠す", integrations: ["その他の連携", "他のツールが管理する設定です。"], helper: "後処理ヘルパーを更新", address: "接続先アドレス", compatibility: "サブエージェントの互換性", cleanup: "タスクをキャンセルしたときの後処理", summary: "この接続の変更を確認します。正確な定義は技術的な詳細で確認できます。" } : { before: "Before", after: "After", added: "Added", removed: "Removed", changed: "Changed", unchanged: "Unchanged", unresolved: "Needs attention", show: "Show unchanged settings", hide: "Hide unchanged settings", integrations: ["Other integrations", "Settings managed by other tools."], helper: "Update the cleanup helper", address: "Connection address", compatibility: "Subagent compatibility", cleanup: "Cleanup when you cancel a task", summary: "Review what changes for this connection. Expand technical details to inspect the exact definitions." };
-  const kind = (setting: NonNullable<CodexRepairPreview["groups"]>[number]["settings"][number]) => setting.changeKind ?? (setting.state === "ambiguous" ? "unresolved" : setting.state === "commented_out" ? "added" : setting.current === setting.proposed ? "unchanged" : setting.current == null ? "added" : setting.proposed == null ? "removed" : "changed");
+  const kind = configurationChangeKind;
   const unchangedCount = preview.groups?.flatMap(group => group.settings).filter(setting => kind(setting) === "unchanged" && !setting.findings.length && !setting.resolutionRequired).length ?? 0;
   const sectionHelp = language === "zh-CN" ? "选择保留的路由区段。只会移动路由设置；其他区段的标记和已移动文本将被注释保留。无关内容不会改变。" : language === "ja" ? "残す経路セクションを選択します。経路設定だけを移動し、他のマーカーと移動元のテキストはコメントとして保持します。無関係の内容は変更しません。" : "Choose the route section to retain. Only route settings move; other markers and moved source stay commented out. Unrelated contents remain unchanged.";
   const id = useId();

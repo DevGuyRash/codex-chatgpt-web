@@ -1,5 +1,7 @@
 import { createHash, randomBytes } from "node:crypto";
 import { chmodSync, mkdirSync, openSync, closeSync, renameSync, rmSync, writeFileSync, readFileSync, existsSync } from "node:fs";
+import * as asyncFs from "node:fs/promises";
+import { setTimeout as wait } from "node:timers/promises";
 import { homedir } from "node:os";
 import { basename, delimiter, dirname, isAbsolute, join, resolve, sep, win32 } from "node:path";
 import { tmpdir } from "node:os";
@@ -183,17 +185,20 @@ export function resolveBrokerEndpoint(value: string): string {
 const atomicWaitCell = new Int32Array(new SharedArrayBuffer(4));
 const WINDOWS_RENAME_RETRY_DELAYS_MS = [25, 50, 100, 150, 250, 350, 500] as const;
 
+function windowsRenameRetryDelay(error: unknown, attempt: number): number | undefined {
+  const code = (error as NodeJS.ErrnoException).code;
+  return process.platform === "win32" && (code === "EBUSY" || code === "EPERM" || code === "EACCES")
+    ? WINDOWS_RENAME_RETRY_DELAYS_MS[attempt] : undefined;
+}
+
 function renameAtomicFile(source: string, destination: string): void {
   for (let attempt = 0; ; attempt += 1) {
     try {
       renameSync(source, destination);
       return;
     } catch (error) {
-      const code = (error as NodeJS.ErrnoException).code;
-      const transientWindowsError = process.platform === "win32"
-        && (code === "EBUSY" || code === "EPERM" || code === "EACCES");
-      const delay = WINDOWS_RENAME_RETRY_DELAYS_MS[attempt];
-      if (!transientWindowsError || delay === undefined) throw error;
+      const delay = windowsRenameRetryDelay(error, attempt);
+      if (delay === undefined) throw error;
       Atomics.wait(atomicWaitCell, 0, 0, delay);
     }
   }
@@ -215,6 +220,32 @@ export function atomicWriteFile(path: string, data: string | Uint8Array): void {
     throw error;
   }
   try { chmodSync(path, 0o600); } catch { /* Windows ACLs are managed by the installer. */ }
+}
+
+/** Same private atomic replacement as configuration writes, without blocking a serving event loop. */
+export async function atomicWriteFileAsync(path: string, data: string | Uint8Array): Promise<void> {
+  const target = resolve(path), directory = dirname(target);
+  await asyncFs.mkdir(directory, { recursive: true, mode: 0o700 });
+  try { await asyncFs.chmod(directory, 0o700); } catch { /* Windows ACLs are managed by the installer. */ }
+  const temp = `${target}.tmp-${process.pid}-${crypto.randomUUID()}`;
+  const file = await asyncFs.open(temp, "wx", 0o600);
+  try {
+    await file.writeFile(data);
+    await file.close();
+    for (let attempt = 0; ; attempt++) {
+      try { await asyncFs.rename(temp, target); break; }
+      catch (error) {
+        const delay = windowsRenameRetryDelay(error, attempt);
+        if (delay === undefined) throw error;
+        await wait(delay);
+      }
+    }
+  } catch (error) {
+    try { await file.close(); } catch { /* The handle may already have closed before rename failed. */ }
+    try { await asyncFs.rm(temp, { force: true }); } catch { /* Preserve the original failure. */ }
+    throw error;
+  }
+  try { await asyncFs.chmod(target, 0o600); } catch { /* Windows ACLs are managed by the installer. */ }
 }
 
 export function stripUtf8Bom(text: string): string {

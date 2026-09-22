@@ -1,42 +1,145 @@
 import type { Page } from "playwright-core";
 import { runtimeCaptureClient, runtimeDiagnostics } from "./runtime";
+import { campaignCaptureId, captureCampaignContent, omitCampaignCapture } from "./campaign-capture";
 
-/** Fail closed on login, settings, embedded frames, and modal/credential surfaces. No DOM is retained. */
+type CaptureBlockedControl = "dialog" | "text-input" | "password-input" | "other-input" | "textarea" | "iframe";
+
+/** Fail closed on login, settings, visible embedded frames, and modal/credential surfaces. No DOM is retained. */
 export async function isPrivateCaptureSurface(page: Page): Promise<boolean> {
+  return (await inspectCaptureSurface(page)).allowed;
+}
+
+/** Only fixed reason codes cross the boundary; never retain field values or frame URLs. */
+export async function inspectCaptureSurface(page: Page): Promise<{ allowed: boolean; reason: string; blockedKinds?: CaptureBlockedControl[] }> {
   try {
     const url = new URL(page.url());
-    if (url.origin !== "https://chatgpt.com" || !/^\/(?:c\/[a-zA-Z0-9-]+)?\/?$/.test(url.pathname) || page.frames().length !== 1) return false;
+    if (url.origin !== "https://chatgpt.com" || !/^\/(?:c\/[a-zA-Z0-9-]+)?\/?$/.test(url.pathname)) return { allowed: false, reason: "unrecognized-url" };
+    // Hidden third-party frames appear during normal conversation use. Inspect only their
+    // embedding element's visibility, never frame content, URLs or authentication state.
+    for (const frame of page.frames().filter(frame => frame !== page.mainFrame())) {
+      const element = await frame.frameElement();
+      try { if (await element.isVisible()) return { allowed: false, reason: "visible-embedded-frame", blockedKinds: ["iframe"] }; }
+      finally { await element.dispose(); }
+    }
     return await page.evaluate(() => {
       const visible = (element: Element) => {
         const rect = element.getBoundingClientRect(); const style = getComputedStyle(element);
         return rect.width > 0 && rect.height > 0 && style.visibility !== "hidden" && style.display !== "none";
       };
       // Generic text controls can also be username/credential fields. Extra visible inputs fail closed.
-      const blocked = document.querySelectorAll('input,[role="dialog"],dialog[open],iframe,textarea:not(#prompt-textarea)');
-      if ([...blocked].some(visible)) return false;
-      return [...document.querySelectorAll('#prompt-textarea[contenteditable="true"],textarea#prompt-textarea')].some(visible);
+      // Upload inputs cannot accept credential text; their values are excluded from retained DOM.
+      const blocked = document.querySelectorAll('input:not([type="file"]),[role="dialog"],dialog[open],iframe,textarea:not(#prompt-textarea)');
+      const blockedKinds = [...new Set([...blocked].filter(visible).map((element): CaptureBlockedControl => {
+        if (element.matches('[role="dialog"],dialog[open]')) return "dialog";
+        if (element.tagName === "IFRAME") return "iframe";
+        if (element.tagName === "TEXTAREA") return "textarea";
+        const type = (element as HTMLInputElement).type;
+        if (type === "password") return "password-input";
+        return ["text", "email", "tel", "url", "search", "number"].includes(type) ? "text-input" : "other-input";
+      }))];
+      if (blockedKinds.length) return { allowed: false, reason: "visible-sensitive-control", blockedKinds };
+      const allowed = [...document.querySelectorAll('#prompt-textarea[contenteditable="true"],textarea#prompt-textarea')].some(visible);
+      return { allowed, reason: allowed ? "conversation" : "composer-unavailable" };
     });
-  } catch { return false; }
+  } catch { return { allowed: false, reason: "inspection-failed" }; }
 }
 
-export async function captureBrowserCheckpoint(page: Page, checkpoint: string, failed: boolean): Promise<void> {
+/** Capture the current viewport intersection without scrolling or waiting for layout stability. */
+export async function captureVisibleConversationImage(page: Page): Promise<Buffer> {
+  const clip = await page.locator("main").evaluate(main => {
+    const regions = [main, ...main.querySelectorAll('[data-message-author-role="user"],[data-message-author-role="assistant"],[data-message-author-role="tool"],#prompt-textarea')].flatMap(element => {
+      const style = getComputedStyle(element);
+      if (style.display === "none" || style.visibility === "hidden") return [];
+      const rect = element.getBoundingClientRect();
+      const left = Math.max(0, rect.left), top = Math.max(0, rect.top);
+      const right = Math.min(innerWidth, rect.right), bottom = Math.min(innerHeight, rect.bottom);
+      return right > left && bottom > top ? [{ left, top, right, bottom }] : [];
+    });
+    // Retained conversations can overflow a main box that has scrolled offscreen.
+    // Its visible message/composer descendants still belong to this conversation.
+    if (!regions.length) return { x: 0, y: 0, width: 0, height: 0 };
+    const x = Math.min(...regions.map(rect => rect.left)), y = Math.min(...regions.map(rect => rect.top));
+    return { x, y, width: Math.max(...regions.map(rect => rect.right)) - x, height: Math.max(...regions.map(rect => rect.bottom)) - y };
+  }, { timeout: 3000 });
+  if (!Object.values(clip).every(Number.isFinite) || clip.width <= 0 || clip.height <= 0) throw new Error("Conversation is outside the visible viewport");
+  // Disabling animations fast-forwards finite animations and dispatches their finish handlers.
+  // Evidence collection must observe the app, not trigger its pending UI transitions.
+  return await page.screenshot({ clip, animations: "allow", caret: "hide", timeout: 3000, type: "png" });
+}
+
+/** Retain exposed conversation content, never raw app HTML, attributes, or hidden state. */
+export async function visibleConversationState(page: Page): Promise<string> {
+  return page.locator("main").evaluate(main => {
+    const blocked = new Set(["SCRIPT", "STYLE", "TEMPLATE", "NOSCRIPT", "IFRAME", "INPUT", "TEXTAREA", "SVG"]);
+    const read = (element: Element): unknown => {
+      const style = getComputedStyle(element);
+      if (blocked.has(element.tagName) || element.hasAttribute("hidden") || element.getAttribute("aria-hidden") === "true" || style.display === "none" || style.visibility === "hidden") return null;
+      const children = [...element.childNodes].flatMap(node => {
+        if (node.nodeType === Node.TEXT_NODE) return node.textContent?.trim() ? [node.textContent] : [];
+        if (node instanceof Element) { const content = read(node); return content === null ? [] : [content]; }
+        return [];
+      });
+      return children.length ? { tag: element.tagName.toLowerCase(), children } : null;
+    };
+    return JSON.stringify([...main.querySelectorAll('[data-message-author-role]')].flatMap(message => {
+      for (let ancestor = message.parentElement; ancestor; ancestor = ancestor.parentElement) {
+        const style = getComputedStyle(ancestor);
+        if (ancestor.hasAttribute("hidden") || ancestor.getAttribute("aria-hidden") === "true" || style.display === "none" || style.visibility === "hidden") return [];
+      }
+      const content = read(message), role = message.getAttribute("data-message-author-role");
+      return content && ["user", "assistant", "tool"].includes(role ?? "") ? [{ role, content }] : [];
+    }));
+  }, { timeout: 3000 });
+}
+
+export async function captureBrowserCheckpoint(page: Page, checkpoint: string, failed: boolean, readiness: "conversation" | "preflight" = "conversation"): Promise<void> {
   const diagnostics = runtimeDiagnostics(); const context = diagnostics?.context();
   diagnostics?.event("browser.checkpoint", "Browser stage checkpoint", { checkpoint, failed }, failed ? "warning" : "debug");
   if (!diagnostics || !context) return;
   const client = runtimeCaptureClient();
-  if (!client || !client.privateCaptureEnabled()) return;
+  const campaign = campaignCaptureId();
+  if (!client || !campaign && !client.privateCaptureEnabled()) return;
+  let collectionStage = "claim";
   try {
-    if (!await client.claimCapture(context.traceId)) return;
-    if (!await isPrivateCaptureSurface(page)) {
-      diagnostics.event("capture.excluded", "Private capture omitted on an authentication, modal, or unrecognized surface", { checkpoint }, "warning"); return;
+    if (!campaign && !await client.claimCapture(context.traceId)) return;
+    collectionStage = "surface-inspection";
+    const surface = await inspectCaptureSurface(page);
+    if (!surface.allowed) {
+      if (readiness === "preflight" && !failed) {
+        diagnostics.event("capture.not_applicable", "Conversation capture is not applicable before authenticated conversation readiness", { checkpoint, reason: surface.reason }, "info"); return;
+      }
+      if (campaign) await omitCampaignCapture("surface-excluded", context);
+      diagnostics.event("capture.excluded", "Private capture omitted on an authentication, modal, or unrecognized surface", { checkpoint, reason: surface.reason, ...(surface.blockedKinds ? { blockedKinds: surface.blockedKinds } : {}) }, "warning"); return;
     }
-    const png = await page.screenshot({ animations: "disabled", caret: "hide", timeout: 3000, type: "png" });
-    if (!await isPrivateCaptureSurface(page)) {
-      diagnostics.event("capture.excluded", "Private capture discarded because the browser surface changed", { checkpoint }, "warning"); return;
+    const url = page.url();
+    const validateCapturedSurface = async (stage: string): Promise<boolean> => {
+      collectionStage = stage;
+      const beforeUrl = page.url();
+      const current = await inspectCaptureSurface(page);
+      const navigationChanged = beforeUrl !== url || page.url() !== url;
+      if (!navigationChanged && current.allowed) return true;
+      if (campaign) await omitCampaignCapture("surface-excluded", context);
+      diagnostics.event("capture.excluded", "Private capture discarded because the browser surface changed", {
+        checkpoint, collectionStage, navigationChanged, reason: navigationChanged ? "navigation" : current.reason, ...(current.blockedKinds ? { blockedKinds: current.blockedKinds } : {}),
+      }, "warning");
+      return false;
+    };
+    collectionStage = "screenshot";
+    const png = campaign ? await captureVisibleConversationImage(page) : await page.screenshot({ animations: "allow", caret: "hide", timeout: 3000, type: "png" });
+    if (!await validateCapturedSurface("screenshot-validation")) return;
+    if (campaign) {
+      collectionStage = "screenshot-storage";
+      await captureCampaignContent("screenshot", png.toString("base64"), context);
+      collectionStage = "conversation-state";
+      const dom = await visibleConversationState(page);
+      if (await validateCapturedSurface("conversation-validation")) await captureCampaignContent("browser-state", dom, context);
+      return;
     }
     const result = await client.writeCapture(context.traceId, png);
     diagnostics.event("capture.result", result.status === "stored" ? "Private image stored separately; excluded from ordinary exports" : "Private image was not retained", { checkpoint, result: result.status, ...(result.status === "omitted" ? { reason: result.reason } : { expires: result.expires }) }, result.status === "stored" ? "info" : "warning");
-  } catch {
-    diagnostics.event("capture.failed", "Private capture was not retained; collection or browser access failed", { checkpoint }, "warning");
+  } catch (error) {
+    if (campaign) await omitCampaignCapture("capture-failed", context);
+    diagnostics.problem(error, "Browser capture was not retained", { stage: "browser.capture" }, context);
+    diagnostics.event("capture.failed", "Private capture was not retained; collection or browser access failed", { checkpoint, collectionStage, timedOut: error instanceof Error && error.name === "TimeoutError" }, "warning");
   }
 }

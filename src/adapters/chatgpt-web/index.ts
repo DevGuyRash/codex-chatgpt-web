@@ -1,6 +1,7 @@
 import { createHash, randomBytes } from "node:crypto";
 import { resolve } from "node:path";
-import { isChatGptWebZeroRiskBackendModel } from "../../chatgpt-web-models";
+import { problemFor } from "../../diagnostics/problems";
+import { isChatGptWebZeroRiskBackendModel, CHATGPT_WEB_ZERO_RISK_PRO_BACKEND_MODEL } from "../../chatgpt-web-models";
 import { defaultBrokerEndpoint, expandUserPath, resolveBrokerEndpoint } from "../../config";
 import {
   cancelLauncherManualTurn,
@@ -22,13 +23,13 @@ import type { ProviderAdapter } from "../base";
 import { parseDataUrl } from "../image";
 import { ChatGptWebAdapterError } from "./adapter-error";
 import { ChatGptBrowserWorker } from "./browser-worker";
-import { extractChatGptTurnEnvironment, extractChatGptTurnIdentity, priorChatGptAbortedTurnIds } from "./environment";
+import { extractChatGptNativeToolContext, MissingTrustedCodexEnvironmentError, type ChatGptTurnToolContext, extractChatGptTurnIdentity, priorChatGptAbortedTurnIds } from "./environment";
 import { CHATGPT_WEB_LUNA_MODEL_ID, resolveChatGptWebModelMode, type ChatGptWebCapabilities } from "./model";
 import { chatGptReadOnlyContextWarning, compileChatGptWebPrompt } from "./prompt";
 import { createChatGptStructuredOutputValidator } from "./output-validation";
 import { chatGptWebTurnRetryPolicy } from "./retry-policy";
 import { TurnBroker, type BrokerToolRequest, type BrokerToolResult, type TurnBrokerOwner } from "./turn-broker";
-import { ChatGptTextFeed, ChatGptTraceFeed, chatGptCompactionSourceExecutionKey, chatGptThreadOwnershipKey, chatGptTurnExecutionKey, chatGptTurnRetryKey, chatGptTurnRoundKey, chatGptTurnSessions, type ChatGptBrowserOutcome, type ChatGptTraceEvent, type ChatGptTurnRuntime, type ChatGptTurnSession } from "./turn-execution";
+import { ChatGptTextFeed, ChatGptTraceFeed, chatGptCompactionSourceExecutionKey, chatGptThreadOwnershipKey, chatGptTurnExecutionKey, chatGptTurnInputLineage, chatGptTurnRetryKey, chatGptTurnRoundKey, chatGptTurnSessions, type ChatGptBrowserOutcome, type ChatGptTraceEvent, type ChatGptTurnRuntime, type ChatGptTurnSession } from "./turn-execution";
 import { estimateChatGptWebUsage, resolveBiggerContextMultipartParts } from "./usage";
 import { ChatGptThreadEnvironmentStore } from "./thread-environment";
 import {
@@ -390,7 +391,7 @@ export function createChatGptWebAdapter(
 
   const startRuntime = (
     parsed: CodexParsedRequest,
-    environment: ReturnType<typeof extractChatGptTurnEnvironment> | undefined,
+    environment: ChatGptTurnToolContext | undefined,
     traceId: string,
     turnCapabilities: ChatGptWebCapabilities,
     hooks: { onCompactionProgress?: () => void } = {},
@@ -563,6 +564,7 @@ export function createChatGptWebAdapter(
           }
           await zeroRiskManualControl.start(retainedLauncherDescriptor, {
             ...owner,
+            proGeneration: parsed.modelId === CHATGPT_WEB_ZERO_RISK_PRO_BACKEND_MODEL,
             prompt: compiled.text,
             ...(resumeCompiled ? { resumePrompt: resumeCompiled.text } : {}),
             ...(conversationKey ? { conversationKey } : {}),
@@ -837,10 +839,17 @@ export function createChatGptWebAdapter(
           });
           return;
         }
-        let environment: ReturnType<typeof extractChatGptTurnEnvironment> | undefined;
+        let environment: ChatGptTurnToolContext | undefined;
         if (mode.localTools) {
           try {
-            environment = environmentStore.resolve(parsed);
+            try {
+              environment = environmentStore.resolve(parsed);
+            } catch (error) {
+              const nativeTools = error instanceof MissingTrustedCodexEnvironmentError
+                ? extractChatGptNativeToolContext(parsed) : undefined;
+              if (!nativeTools) throw error;
+              environment = nativeTools;
+            }
           } catch (error) {
             const identity = extractChatGptTurnIdentity(parsed);
             console.warn(
@@ -1125,6 +1134,7 @@ export function createChatGptWebAdapter(
           incoming.abortSignal,
           nativeTurnId,
           nativeIdentity.threadId,
+          parsed._compactionRequest ? undefined : chatGptTurnInputLineage(parsed),
         );
         const roundKey = chatGptTurnRoundKey(parsed);
         const emitRoundEvents = (events: readonly AdapterEvent[]): void => {
@@ -1221,6 +1231,7 @@ export function createChatGptWebAdapter(
                 if (results.length !== outstanding.length) {
                   throw new Error(`Codex returned ${results.length} of ${outstanding.length} results for a parallel ChatGPT tool batch`);
                 }
+                if (session.runtime.externalProgress.hasGenerationGate()) await session.runtime.externalProgress.prepareToolResults(incoming.abortSignal);
                 for (const message of results) {
                   await broker.completeTool(turnToken, message.toolCallId, brokerResult(message));
                   session.runtime.externalProgress.recordToolResult();
@@ -1404,6 +1415,7 @@ export function createChatGptWebAdapter(
               errorType: handledError.errorType,
               code: handledError.code,
               retryable: handledError.retryable,
+              problem: problemFor(handledError),
             });
             session.completeRound(roundKey);
             return;

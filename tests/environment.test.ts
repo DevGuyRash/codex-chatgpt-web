@@ -783,6 +783,33 @@ describe("trusted Codex task environment continuity", () => {
     });
   });
 
+  test("native rollout repeats an explicit Git write grant without adding authority on follow-up", () => {
+    const { codexHome, request, rolloutPath } = resumedRootFixture();
+    const gitRoot = join(root, ".git");
+    const body = request._rawBody as { client_metadata: Record<string, string> };
+    body.client_metadata["x-codex-turn-metadata"] = JSON.stringify({ request_kind: "turn", thread_id: rolloutThreadId, turn_id: rolloutTurnId, agent_name: "/root", sandbox_mode: "workspace-write", workspaces: { [root]: {} } });
+    const write = (path: string) => ({ path: { type: "path", path }, access: "write" });
+    const entries: unknown[] = [
+      { path: { type: "special", value: { kind: "root" } }, access: "read" },
+      write(root), write(gitRoot),
+      { path: { type: "special", value: { kind: "slash_tmp" } }, access: "write" },
+      { path: { type: "special", value: { kind: "tmpdir" } }, access: "write" },
+      write(gitRoot),
+      { path: { type: "path", path: gitRoot }, access: "read", missing_path_behavior: "skip" },
+    ];
+    const persist = () => writeFileSync(rolloutPath, [
+      JSON.stringify({ type: "session_meta", payload: { id: rolloutThreadId, source: "cli" } }),
+      JSON.stringify(childTurnContext(rolloutTurnId, { sandbox_policy: { type: "workspace-write", writable_roots: [gitRoot], network_access: false, exclude_tmpdir_env_var: false, exclude_slash_tmp: false }, permission_profile: { type: "managed", file_system: { type: "restricted", entries }, network: "restricted" } })),
+    ].join("\n") + "\n");
+    persist();
+    expect(new ChatGptThreadEnvironmentStore(undefined, Date.now, codexHome).resolve(request)).toMatchObject({ cwd: root, writableRoots: [root, gitRoot], sandboxPolicy: { type: "workspaceWrite", writableRoots: [root, gitRoot], networkAccess: false } });
+    for (const extra of [write(dirname(root)), { ...write(gitRoot), missing_path_behavior: "unknown" }, { path: { type: "glob_pattern", pattern: "**" }, access: "write" }]) {
+      entries.push(extra); persist();
+      expect(() => new ChatGptThreadEnvironmentStore(undefined, Date.now, codexHome).resolve(request)).toThrow("permission profile is inconsistent");
+      entries.pop();
+    }
+  });
+
   for (const format of ["v1", "v2"]) test(`${format} context-only continuation requires a matching current rollout, not just a checkpoint`, () => {
     const { codexHome, request, rolloutPath } = resumedRootFixture();
     const body = request._rawBody as { input: Array<Record<string, unknown>> };

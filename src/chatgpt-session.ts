@@ -146,6 +146,22 @@ export function parseChatGptEffortSliderState(
   return { min, max, value };
 }
 
+/** Read one coherent semantic state without waiting on a picker that may have unmounted. */
+export async function readChatGptEffortSliderState(slider: Locator): Promise<
+  { status: "missing" | "invalid" } | { status: "ready"; state: ChatGptEffortSliderState }
+> {
+  const observation = await slider.evaluateAll(elements => ({
+    count: elements.length,
+    values: elements.length === 1
+      ? [elements[0].getAttribute("aria-valuemin"), elements[0].getAttribute("aria-valuemax"), elements[0].getAttribute("aria-valuenow")]
+      : [],
+  }));
+  if (observation.count === 0) return { status: "missing" };
+  if (observation.count !== 1) return { status: "invalid" };
+  const state = parseChatGptEffortSliderState(observation.values[0], observation.values[1], observation.values[2]);
+  return state ? { status: "ready", state } : { status: "invalid" };
+}
+
 async function anyVisible(locator: Locator): Promise<boolean> {
   const count = await locator.count();
   for (let index = 0; index < count; index += 1) {
@@ -220,17 +236,14 @@ export async function detectChatGptAccountCapabilities(
     // of the account's reasoning range, so an absent slider must fail, not cache false.
     await sliderContainer.waitFor({ state: "visible", timeout });
     await slider.waitFor({ state: "attached", timeout });
-    const state = parseChatGptEffortSliderState(
-      await slider.getAttribute("aria-valuemin"),
-      await slider.getAttribute("aria-valuemax"),
-      await slider.getAttribute("aria-valuenow"),
-    );
-    if (!state) {
+    const observation = await readChatGptEffortSliderState(slider);
+    if (observation.status !== "ready") {
       throw new Error(
         "ChatGPT model controls are unavailable. Reload ChatGPT and run Repair again.",
         { cause: new Error("ChatGPT effort slider exposed an invalid ARIA range") },
       );
     }
+    const state = observation.state;
     return { solAvailable: true, proAvailable: state.max - state.min + 1 >= 5 };
   } finally {
     await page.keyboard.press("Escape").catch(() => {});

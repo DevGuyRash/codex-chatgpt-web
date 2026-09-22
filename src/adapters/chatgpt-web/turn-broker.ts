@@ -1,5 +1,7 @@
 import { createHash, randomBytes } from "node:crypto";
 import { runtimeDiagnostics } from "../../diagnostics/runtime";
+import { namespacedToolName } from "../../types";
+import { campaignCaptureId, captureCampaignContent, omitCampaignCapture } from "../../diagnostics/campaign-capture";
 import type { DiagnosticContext, Operation } from "../../diagnostics/instrumentation";
 import { chmodSync, existsSync, lstatSync, mkdirSync, unlinkSync } from "node:fs";
 import { createConnection, createServer, type Server, type Socket } from "node:net";
@@ -9,11 +11,10 @@ import {
   CompactionTransactionStore,
   type CompactionTransactionHandle,
 } from "./compaction-transaction";
-import type { ChatGptTurnEnvironment } from "./environment";
+import { isNativeOnlyTool, type ChatGptTurnEnvironment, type ChatGptTurnToolContext } from "./environment";
+import { ChatGptNativeTurnInterruptedError, ChatGptWebAdapterError } from "./adapter-error";
 
-interface PendingTurn extends ChatGptTurnEnvironment {
-  expiresAt?: number;
-}
+type PendingTurn = ChatGptTurnToolContext & { expiresAt?: number };
 
 export interface BrokerToolRequest {
   callId: string;
@@ -122,7 +123,7 @@ interface BrokerRequest {
   freeform?: boolean;
   arguments?: Record<string, unknown>;
   input?: string;
-  environment?: ChatGptTurnEnvironment;
+  environment?: ChatGptTurnToolContext;
   ttlMs?: number;
   traceId?: string;
   callId?: string;
@@ -173,7 +174,8 @@ function retiredTurnLabel(traceId: string): string {
   return traceId && traceId !== "unknown" ? `Codex turn ${traceId}` : "a Codex turn";
 }
 
-function environmentIdentity(environment: ChatGptTurnEnvironment): string {
+function environmentIdentity(environment: ChatGptTurnToolContext): string {
+  if ("nativeToolsOnly" in environment) return JSON.stringify({ nativeToolsOnly: true });
   return JSON.stringify({
     cwd: environment.cwd,
     roots: environment.roots,
@@ -182,8 +184,16 @@ function environmentIdentity(environment: ChatGptTurnEnvironment): string {
   });
 }
 
-function ownerEnvironment(value: unknown): ChatGptTurnEnvironment {
+function ownerEnvironment(value: unknown): ChatGptTurnToolContext {
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("turn owner environment is invalid");
+  if ("nativeToolsOnly" in value) {
+    const context = value as Record<string, unknown>;
+    if (context.nativeToolsOnly !== true || Object.keys(context).some(key => !["nativeToolsOnly", "tools"].includes(key))
+      || !Array.isArray(context.tools) || context.tools.some(tool => !tool || typeof tool.name !== "string"
+        || typeof tool.description !== "string" || !tool.parameters || typeof tool.parameters !== "object"
+        || Array.isArray(tool.parameters) || !isNativeOnlyTool(tool))) throw new Error("native-only turn tool context is invalid");
+    return structuredClone(context) as unknown as ChatGptTurnToolContext;
+  }
   const environment = value as Partial<ChatGptTurnEnvironment>;
   const paths = (candidate: unknown): candidate is string[] => Array.isArray(candidate)
     && candidate.length > 0
@@ -211,14 +221,14 @@ function assertSurfaceNonce(value: unknown): asserts value is string {
 }
 
 export interface TurnBrokerOwner {
-  register(environment: ChatGptTurnEnvironment, ttlMs?: number, traceId?: string): Promise<string>;
+  register(environment: ChatGptTurnToolContext, ttlMs?: number, traceId?: string): Promise<string>;
   registerSafe(
-    environment: ChatGptTurnEnvironment,
+    environment: ChatGptTurnToolContext,
     surfaceNonce: string,
     ttlMs?: number,
     traceId?: string,
   ): Promise<string>;
-  updateEnvironment(token: string, environment: ChatGptTurnEnvironment): void | Promise<void>;
+  updateEnvironment(token: string, environment: ChatGptTurnToolContext): void | Promise<void>;
   confirmSafeTurnSent(
     token: string,
     surfaceNonce: string,
@@ -278,12 +288,13 @@ export class TurnBroker implements TurnBrokerOwner {
   }
 
   async register(
-    environment: ChatGptTurnEnvironment,
+    environment: ChatGptTurnToolContext,
     ttlMs?: number,
     traceId = "unknown",
     externalOwner = false,
     handlePrefix = "turn",
   ): Promise<string> {
+    if ("nativeToolsOnly" in environment) environment = ownerEnvironment(environment);
     await this.start();
     this.prune();
     if (externalOwner && !this.acceptingExternalOwners) {
@@ -320,7 +331,7 @@ export class TurnBroker implements TurnBrokerOwner {
   }
 
   async registerSafe(
-    environment: ChatGptTurnEnvironment,
+    environment: ChatGptTurnToolContext,
     surfaceNonce: string,
     ttlMs?: number,
     traceId = "unknown",
@@ -362,7 +373,8 @@ export class TurnBroker implements TurnBrokerOwner {
     this.compactionTransactions.abortTrace(traceId);
   }
 
-  updateEnvironment(token: string, environment: ChatGptTurnEnvironment): void {
+  updateEnvironment(token: string, environment: ChatGptTurnToolContext): void {
+    if ("nativeToolsOnly" in environment) environment = ownerEnvironment(environment);
     this.prune();
     const channel = this.channels.get(token);
     if (!channel) throw new Error("turn token is invalid or expired");
@@ -423,7 +435,7 @@ export class TurnBroker implements TurnBrokerOwner {
     });
   }
 
-  completeTool(token: string, callId: string, result: BrokerToolResult): void {
+  completeTool(token: string, callId: string, result: BrokerToolResult): void | Promise<void> {
     this.prune();
     const channel = this.channels.get(token);
     if (!channel) throw new Error("turn token is invalid or expired");
@@ -433,11 +445,23 @@ export class TurnBroker implements TurnBrokerOwner {
     if (!channel.deliveredCallIds.delete(callId)) {
       throw new Error(`tool call was completed before it was delivered: ${callId}`);
     }
-    channel.invocations.delete(callId);
-    if (result.isError) invocation.diagnostic?.problem(new Error("MCP tool failed"), "MCP tool returned a failure; arguments and output are excluded");
-    invocation.diagnostic?.end(result.isError ? "failed" : "succeeded");
-    console.info(`[chatgpt-web] broker trace=${channel.traceId} completed call=${callId.slice(0, 17)} pending=${channel.invocations.size}`);
-    invocation.resolve(result);
+    const finish = () => {
+      channel.invocations.delete(callId);
+      if (result.isError) invocation.diagnostic?.problem(new Error("MCP tool failed"), "MCP tool returned a failure; arguments and output are excluded from ordinary diagnostics");
+      invocation.diagnostic?.end(result.isError ? "failed" : "succeeded");
+      console.info(`[chatgpt-web] broker trace=${channel.traceId} completed call=${callId.slice(0, 17)} pending=${channel.invocations.size}`);
+      invocation.resolve(result);
+    };
+    const context = invocation.diagnostic?.context ?? channel.diagnosticContext;
+    if (!campaignCaptureId() || !context) { finish(); return; }
+    return (async () => {
+      try {
+        await captureCampaignContent("tool-arguments", JSON.stringify(invocation.request), context);
+        await captureCampaignContent("tool-result", JSON.stringify({ callId, tool: invocation.request.wireName, result }), context);
+      } catch { await omitCampaignCapture("capture-failed", context); }
+      // A capture failure cannot undo a completed native tool or authorize its replay.
+      finally { finish(); }
+    })();
   }
 
   beginCompletionFence(token: string): number | undefined {
@@ -964,8 +988,7 @@ export class TurnBroker implements TurnBrokerOwner {
       if (!request.toolResult || !Array.isArray(request.toolResult.content)) {
         throw new Error("turn owner tool result is invalid");
       }
-      this.completeTool(request.token, request.callId, request.toolResult);
-      return { completed: true };
+      return Promise.resolve(this.completeTool(request.token, request.callId, request.toolResult)).then(() => ({ completed: true }));
     }
     if (request.method === "owner_completion_fence_begin") {
       if (!request.token) throw new Error("turn owner token is required");
@@ -1122,6 +1145,10 @@ export class TurnBroker implements TurnBrokerOwner {
 
     const wireName = request.wireName?.trim();
     if (!wireName) throw new Error("wire tool name is required");
+    if ("nativeToolsOnly" in binding.channel.environment
+      && (request.freeform === true || !binding.channel.environment.tools.some(tool => namespacedToolName(tool.namespace, tool.name) === wireName))) {
+      throw new Error("Tool is not declared by this native-only turn");
+    }
     const callId = opaqueId("call");
     const toolRequest: BrokerToolRequest = {
       callId,
@@ -1184,7 +1211,12 @@ export class TurnBroker implements TurnBrokerOwner {
       waiter.reject(error);
     }
     channel.waiters.clear();
-    for (const invocation of channel.invocations.values()) { invocation.diagnostic?.end(error.name === "AbortError" ? "cancelled" : "interrupted"); invocation.reject(error); }
+    const termination = error instanceof ChatGptNativeTurnInterruptedError ? "native_interrupt"
+      : error instanceof ChatGptWebAdapterError && error.code === "chatgpt_turn_superseded" ? "superseded" : undefined;
+    for (const invocation of channel.invocations.values()) {
+      invocation.diagnostic?.end(error.name === "AbortError" ? "cancelled" : "interrupted", termination ? { termination } : {});
+      invocation.reject(error);
+    }
     channel.invocations.clear();
     channel.queuedCallIds = [];
     channel.deliveredCallIds.clear();
@@ -1324,7 +1356,7 @@ export class RemoteTurnBroker implements TurnBrokerOwner {
     }
   }
 
-  async register(environment: ChatGptTurnEnvironment, ttlMs?: number, traceId = "unknown"): Promise<string> {
+  async register(environment: ChatGptTurnToolContext, ttlMs?: number, traceId = "unknown"): Promise<string> {
     const response = await callTurnBroker<{ token?: unknown }>(this.socketPath, {
       method: "owner_register",
       environment,
@@ -1338,7 +1370,7 @@ export class RemoteTurnBroker implements TurnBrokerOwner {
   }
 
   async registerSafe(
-    environment: ChatGptTurnEnvironment,
+    environment: ChatGptTurnToolContext,
     surfaceNonce: string,
     ttlMs?: number,
     traceId = "unknown",
@@ -1357,7 +1389,7 @@ export class RemoteTurnBroker implements TurnBrokerOwner {
     return response.token;
   }
 
-  async updateEnvironment(token: string, environment: ChatGptTurnEnvironment): Promise<void> {
+  async updateEnvironment(token: string, environment: ChatGptTurnToolContext): Promise<void> {
     await callTurnBroker(this.socketPath, { method: "owner_update", token, environment });
   }
 

@@ -1,13 +1,13 @@
 import type { Database } from "bun:sqlite";
 
-export const SCHEMA_VERSION = 2;
+export const SCHEMA_VERSION = 6;
 
 /** Events remain authoritative. Projections and their retention are updated in the same transaction. */
 export function addEvidenceProjections(database: Database): void {
   database.transaction(() => {
     // Another worker may have upgraded while this connection waited for the write lock.
     const version = (database.query("PRAGMA user_version").get() as { user_version: number }).user_version;
-    if (version >= SCHEMA_VERSION) return;
+    if (version >= 2) return;
     database.exec(`
       CREATE TABLE traces (trace_id TEXT PRIMARY KEY, event_count INTEGER NOT NULL CHECK(event_count >= 0));
       CREATE TABLE problems (event_id TEXT PRIMARY KEY REFERENCES events(id) ON DELETE CASCADE, code TEXT NOT NULL, recovery TEXT NOT NULL);
@@ -33,6 +33,52 @@ export function addEvidenceProjections(database: Database): void {
         DELETE FROM traces WHERE trace_id=old.trace_id AND event_count=0;
       END;
       PRAGMA user_version=2;
+    `);
+  }).immediate();
+  database.transaction(() => {
+    if ((database.query("PRAGMA user_version").get() as { user_version: number }).user_version >= 3) return;
+    database.exec(`
+      CREATE TABLE capture_campaigns (id TEXT PRIMARY KEY, deadline REAL NOT NULL, max_bytes INTEGER NOT NULL, finished INTEGER NOT NULL DEFAULT 0, omitted INTEGER NOT NULL DEFAULT 0);
+      CREATE TABLE capture_traces (campaign_id TEXT NOT NULL REFERENCES capture_campaigns(id) ON DELETE CASCADE, trace_id TEXT NOT NULL, PRIMARY KEY(campaign_id,trace_id));
+      CREATE TABLE capture_content (id TEXT PRIMARY KEY, campaign_id TEXT NOT NULL REFERENCES capture_campaigns(id) ON DELETE CASCADE, trace_id TEXT NOT NULL, category TEXT NOT NULL, time REAL NOT NULL, bytes INTEGER NOT NULL, sha256 TEXT NOT NULL, text TEXT NOT NULL);
+      CREATE INDEX capture_content_campaign ON capture_content(campaign_id,time);
+      PRAGMA user_version=3;
+    `);
+  }).immediate();
+  database.transaction(() => {
+    if ((database.query("PRAGMA user_version").get() as { user_version: number }).user_version >= 4) return;
+    database.exec(`
+      CREATE TABLE capture_documents (id TEXT PRIMARY KEY, campaign_id TEXT NOT NULL REFERENCES capture_campaigns(id) ON DELETE CASCADE, trace_id TEXT NOT NULL, category TEXT NOT NULL, status TEXT NOT NULL CHECK(status IN ('receiving','stored','omitted')), input_bytes INTEGER NOT NULL CHECK(input_bytes>=0), bytes INTEGER, chunks INTEGER NOT NULL DEFAULT 0 CHECK(chunks>=0), sha256 TEXT);
+      CREATE INDEX capture_documents_campaign ON capture_documents(campaign_id,status);
+      ALTER TABLE capture_content ADD COLUMN document_id TEXT REFERENCES capture_documents(id) ON DELETE CASCADE;
+      ALTER TABLE capture_content ADD COLUMN document_index INTEGER CHECK(document_index>=0);
+      CREATE UNIQUE INDEX capture_content_document_part ON capture_content(document_id,document_index) WHERE document_id IS NOT NULL;
+      PRAGMA user_version=4;
+    `);
+  }).immediate();
+  database.transaction(() => {
+    if ((database.query("PRAGMA user_version").get() as { user_version: number }).user_version >= 5) return;
+    // Admission totals run while holding the capture write transaction. Keep
+    // those reads on a compact index rather than pages containing captured text.
+    database.exec(`
+      CREATE INDEX capture_content_capacity ON capture_content(campaign_id,bytes);
+      PRAGMA user_version=5;
+    `);
+  }).immediate();
+  database.transaction(() => {
+    if ((database.query("PRAGMA user_version").get() as { user_version: number }).user_version >= 6) return;
+    // Legacy campaigns have no observed start boundary. Do not manufacture one
+    // from their current counter or infer that their missing records were kept.
+    database.exec(`
+      CREATE TABLE capture_collection_windows (
+        campaign_id TEXT PRIMARY KEY REFERENCES capture_campaigns(id) ON DELETE CASCADE,
+        start_sequence INTEGER NOT NULL CHECK(start_sequence>=0),
+        start_dropped INTEGER NOT NULL CHECK(start_dropped>=0),
+        end_sequence INTEGER CHECK(end_sequence>=start_sequence),
+        end_dropped INTEGER CHECK(end_dropped>=start_dropped),
+        CHECK((end_sequence IS NULL)=(end_dropped IS NULL))
+      );
+      PRAGMA user_version=6;
     `);
   }).immediate();
 }

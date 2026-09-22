@@ -10,6 +10,9 @@ import { restoreCodexInterruptHook, MANAGED_INTERRUPT_HOOK_START } from "../src/
 import { setTomlScalar } from "../src/toml-edit";
 import { inspectCodexConfigSource, sourceAssignments } from "../src/codex-config-source";
 import type { CodexIntegrationJournal } from "../src/codex-integration-shared";
+import { createRequire } from "node:module";
+import { Diagnostics } from "../src/diagnostics/instrumentation";
+import type { Problem } from "../src/diagnostics/contracts";
 
 async function fixture(run: (path: string, original: string) => void | Promise<void>) {
   const root = mkdtempSync(join(tmpdir(), "cgw-repair-"));
@@ -190,6 +193,35 @@ test("identified hook type, asynchronous flag and commented command use the shar
   expect(readFileSync(path, "utf8")).toContain('async = false');
 }));
 
+test("real missing WebRTC and Interrupt hook findings block startup without changing fixture files", () => fixture(async (path, original) => {
+  const journal = JSON.parse(readFileSync(getCodexJournalPath(), "utf8"));
+  const damaged = restoreCodexInterruptHook(original, journal.interruptHook)
+    .replace(/^experimental_realtime_webrtc_call_base_url.*\n/m, "")
+    .replace("multi_agent_v2 = true", "multi_agent_v2 = false").replace("multi_agent = false", "multi_agent = true");
+  writeFileSync(path, damaged);
+  const paths = [path, getConfigPath(), getCodexJournalPath(), getCodexJournalRecoveryPath()];
+  const before = paths.map(file => readFileSync(file));
+  const inspected = inspectCodexIntegration({ readOnly: true });
+  expect(inspected.conflicts.map(finding => finding.path).sort()).toEqual(["experimental_realtime_webrtc_call_base_url", "hooks.Interrupt"]);
+  const { RuntimeHost } = createRequire(import.meta.url)("../launcher/electron/runtime.cjs");
+  const { runStartup } = createRequire(import.meta.url)("../launcher/electron/startup.cjs");
+  const diagnostics = new Diagnostics({ emit() {} }, { component: "launcher", environment: "test", target: "fixture" });
+  const logger = { info() {}, warn() {}, error() {}, diagnostics };
+  const host = new RuntimeHost({ app: { getPath: () => process.env.CODEX_CHATGPT_WEB_HOME }, logger, sourceRoot: "/fixture", browserDescriptorPath: "/fixture/unused", supervisor: { stopForSetup: async () => { throw new Error("Unexpected runtime stop"); } } });
+  const calls: string[] = [];
+  host.run = async (_name: string, args: string[]) => { calls.push(args.join(" ")); return { stdout: JSON.stringify({ installed: inspected.installed, active: inspected.active, conflicts: inspected.conflicts, errors: inspected.errors }) }; };
+  let failure: Problem | undefined;
+  try {
+    await runStartup({ logger, start: async (observe: (status: string) => void) => { observe("ready"); await host.connectBridgeRoute(); return { status: "ready" }; },
+      recover: async () => { calls.push("restore"); return {}; }, failed: async (problem: Problem) => { failure = problem; } });
+    expect(failure?.code).toBe("codex_configuration_conflict");
+    expect(failure?.findings).toEqual(inspected.conflicts.map(({ path, message }) => ({ path, message })));
+    expect(failure?.actions).toContain("review-configuration");
+    expect(calls).toEqual(["route status"]);
+    expect(paths.map(file => readFileSync(file))).toEqual(before);
+  } finally { await diagnostics.close(); }
+}));
+
 test("missing managed hook and WebRTC setting produce an exact approvable restoration", () => fixture((path, original) => {
   const journal = JSON.parse(readFileSync(getCodexJournalPath(), "utf8"));
   const missing = restoreCodexInterruptHook(original, journal.interruptHook)
@@ -304,3 +336,14 @@ for (const setting of scalarCases) for (const form of ["missing", "commented", "
     expect(readFileSync(path, "utf8")).toStartWith('\uFEFF');
   }));
 }
+
+test("repeating an applied repair reports no configuration change or new restart requirement", () => fixture(() => {
+  const preview = previewCodexIntegrationRepair("native");
+  applyCodexIntegrationRepair("native", preview.approvalId);
+  const unchanged = previewCodexIntegrationRepair("native");
+  expect(unchanged.codexRestartRequired).toBe(false);
+  expect(unchanged.launcherRestartRequired).toBe(false);
+  const before = [getCodexConfigPath(), getCodexJournalPath(), getCodexJournalRecoveryPath(), getConfigPath()].map(path => readFileSync(path, 'utf8'));
+  expect(applyCodexIntegrationRepair("native", unchanged.approvalId)).toEqual({ changed: false, codexRestartRequired: false, launcherRestartRequired: false });
+  expect([getCodexConfigPath(), getCodexJournalPath(), getCodexJournalRecoveryPath(), getConfigPath()].map(path => readFileSync(path, 'utf8'))).toEqual(before);
+}));

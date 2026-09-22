@@ -22,6 +22,7 @@ import { withActionFeedback, actionErrorMessage, observeLauncherOperation } from
 import { launcherActions } from "./actions/controller";
 import { copyFor, type Copy } from "./i18n";
 import { Icon, type IconName } from "./icons";
+import { NoticeRow } from "./NoticeRow";
 import type {
   BrowserInteractionMode,
   BrowserState,
@@ -1255,9 +1256,8 @@ function SetupSurface({
       </div>
 
       {!devProfile && snapshot.state.codexRestartRequired ? (
-        <NoticeRow icon="alert" tone="warning">
+        <NoticeRow icon="alert" tone="warning" action={<RestartOptions language={snapshot.state.language ?? "en"} />}>
           {copy.restartCodex}
-          <RestartOptions language={snapshot.state.language ?? "en"} />
         </NoticeRow>
       ) : null}
 
@@ -1732,13 +1732,13 @@ function SettingsSurface({
       </div>
 
       {!devProfile && snapshot.state.codexRestartRequired ? (
-        <NoticeRow icon="alert" tone="warning">
+        <NoticeRow icon="alert" tone="warning" action={<RestartOptions language={language} />}>
           {copy.restartCodex}
-          <RestartOptions language={language} />
         </NoticeRow>
       ) : null}
 
       <SectionHeading label={copy.diagnostics} spaced />
+      {!devProfile && !snapshot.state.codexRestartRequired ? <RestartOptions language={language} /> : null}
       {!devProfile && api?.integrationTargets ? <IntegrationTargets api={api} language={language} disabled={busy} /> : null}
       {!devProfile && api ? <ConfigurationRepair api={api} language={language} disabled={busy} onBusyChange={setBusy} onRepaired={updateState} onError={setError} /> : null}
       <button className="diagnostic-row" disabled={busy} onClick={() => void runDoctor()} type="button">
@@ -2038,23 +2038,6 @@ function SectionHeading({ label, meta, spaced = false }: { label: string; meta?:
     <div className={`section-heading${spaced ? " is-spaced" : ""}`}>
       <span>{label}</span>
       {meta ? <small>{meta}</small> : null}
-    </div>
-  );
-}
-
-function NoticeRow({
-  children,
-  icon,
-  tone,
-}: {
-  children: ReactNode;
-  icon: IconName;
-  tone: "warning" | "success";
-}) {
-  return (
-    <div className={`notice-row tone-${tone}`}>
-      <Icon name={icon} />
-      <span>{children}</span>
     </div>
   );
 }

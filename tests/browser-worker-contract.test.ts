@@ -87,7 +87,7 @@ test("browser turns run concurrently up to the five-tab limit", async () => {
   const active = Array.from({ length: 5 }, (_unused, index) => worker.run(browserTurn(`trace_${index + 1}`)));
   await Promise.resolve();
   expect(releases.size).toBe(5);
-  await expect(worker.run(browserTurn("trace_6"))).rejects.toThrow("at most 5 simultaneous browser turns");
+  await expect(worker.run(browserTurn("trace_6"))).rejects.toThrow("5 pending browser request limit");
 
   releases.get("trace_1")?.();
   await active[0];
@@ -2093,12 +2093,15 @@ test("effort slider ARIA state fails closed on malformed and unsupported ranges"
 
 test("Luna-only browser turns verify selector absence instead of opening an effort menu", async () => {
   const checkpoints: string[] = [];
+  const events: DiagnosticEvent[] = [];
+  const telemetry = new Diagnostics({ emit: event => events.push(event) }, { component: "browser", target: "fixture", environment: "test" });
   const hiddenDialog = {
     filter() { return this; },
     last() { return this; },
     isVisible: async () => false,
   };
-  const visibleControls = { count: async () => 0 };
+  let selectorCount = 0;
+  const visibleControls = { count: async () => selectorCount };
   const composerForm = {
     locator: () => ({ filter: () => visibleControls }),
     getByRole: () => ({ filter: () => ({ count: async () => 0 }) }),
@@ -2114,7 +2117,10 @@ test("Luna-only browser turns verify selector absence instead of opening an effo
     ): Promise<{ displayLabel: string; uiEffortIndex: number | null }>;
   }).selectModelAndEffort;
 
-  const mode = await selectModelAndEffort.call({
+  setRuntimeDiagnostics(telemetry);
+  try {
+  const operation = telemetry.begin("fixture.selection");
+  const mode = await operation.run(() => selectModelAndEffort.call({
     activeComposer: async () => composer,
   }, {
     locator: () => hiddenDialog,
@@ -2122,10 +2128,16 @@ test("Luna-only browser turns verify selector absence instead of opening an effo
     localToolsEnabled: true,
     solAvailable: false,
     proAvailable: false,
-  }, async checkpoint => { checkpoints.push(checkpoint); });
+  }, async checkpoint => { checkpoints.push(checkpoint); }));
 
   expect(mode).toMatchObject({ displayLabel: "Luna", uiEffortIndex: null });
   expect(checkpoints).toEqual(["luna-default-confirmed"]);
+  expect(events.filter(event => event.name === "browser.model_selection")).toMatchObject([{ traceId: operation.context.traceId, attributes: { model: "gpt-5.6-luna", effort: "low", control: "luna-think", thinkEnabled: false } }]);
+  selectorCount = 1;
+  await expect(operation.run(() => selectModelAndEffort.call({ activeComposer: async () => composer }, { locator: () => hiddenDialog }, "gpt-5.6-luna", "low", { localToolsEnabled: true, solAvailable: false, proAvailable: false }, async () => {}))).rejects.toThrow("model controls are unavailable");
+  expect(events.filter(event => event.name === "browser.model_selection")).toHaveLength(1);
+  operation.end();
+  } finally { setRuntimeDiagnostics(undefined); await telemetry.close(); }
 });
 
 test("Think mode follows the exact pressed state and normal Luna clears it", async () => {
@@ -3696,3 +3708,18 @@ test("a stage that spans a system sleep is not charged for the slept time", asyn
   await stage;
   expect(outcome).toEqual(["ChatGPT browser stage timed out: probe"]);
 }, 10_000);
+
+test("rejected Send acknowledgement cannot activate the browser button", async () => {
+  const worker = ChatGptBrowserWorker.forProvider({ adapter: "chatgpt-web", baseUrl: "https://chatgpt.com", chatgptWeb: { appName: "Unsent selection contract" } }) as unknown as {
+    activeComposer(page: Page): Promise<unknown>;
+    sendAttachedPrompt(page: Page, baseline: unknown, capture: undefined, signal: AbortSignal, progress: undefined, lifecycle: { onSendActivated(): Promise<void>; onSubmitted(): void }): Promise<unknown>;
+  };
+  const hidden = { filter() { return this; }, last() { return this; }, getByText() { return this; }, isVisible: async () => false };
+  const page = { isClosed: () => false, locator: () => hidden } as unknown as Page;
+  let presses = 0, submitted = false;
+  worker.activeComposer = async () => ({ locator: () => ({ getByTestId: () => ({ waitFor: async () => {}, isEnabled: async () => true, press: async () => { presses++; } }) }) });
+  const veto = new DOMException("Synthetic draft remains unsent", "AbortError");
+  await expect(worker.sendAttachedPrompt(page, {}, undefined, new AbortController().signal, undefined, { onSendActivated: async () => { throw veto; }, onSubmitted: () => { submitted = true; } })).rejects.toBe(veto);
+  expect(presses).toBe(0);
+  expect(submitted).toBe(false);
+});

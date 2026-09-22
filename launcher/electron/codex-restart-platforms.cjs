@@ -46,23 +46,57 @@ function linuxAdapter({ io = fs, command = run, relaunch = launch, env = process
       return match && match[3] === hostname ? [{ window: match[1], pid: Number(match[2]) }] : [];
     });
   }
-  return {
-    async discover() {
-      if (!env.DISPLAY || env.XDG_SESSION_TYPE === "wayland") return [];
-      const directories = [...new Set([path.join(env.XDG_DATA_HOME || path.join(home, ".local/share"), "applications"), ...(env.XDG_DATA_DIRS || "/usr/local/share:/usr/share").split(":").filter(path.isAbsolute).map(dir => path.join(dir, "applications"))])];
-      const entries = [];
-      for (const directory of directories) {
-        let files;
-        try { files = await io.readdir(directory); } catch (error) { if (error.code === "ENOENT") continue; throw error; }
-        for (const file of files.filter(name => name.endsWith(".desktop"))) {
-          const entryPath = path.join(directory, file);
-          const source = await io.readFile(entryPath, "utf8");
-          const executable = desktopExecutable(source);
-          if (executable) entries.push({ entryPath, source, executable: await io.realpath(executable) });
-        }
+  async function installed() {
+    const directories = [...new Set([path.join(env.XDG_DATA_HOME || path.join(home, ".local/share"), "applications"), ...(env.XDG_DATA_DIRS || "/usr/local/share:/usr/share").split(":").filter(path.isAbsolute).map(dir => path.join(dir, "applications"))])];
+    const entries = new Map();
+    for (const directory of directories) {
+      let files;
+      try { files = await io.readdir(directory); } catch (error) { if (error.code === "ENOENT") continue; throw error; }
+      for (const file of files.filter(name => name.endsWith(".desktop"))) {
+        const entryPath = path.join(directory, file), source = await io.readFile(entryPath, "utf8");
+        const executable = desktopExecutable(source);
+        if (!executable) continue;
+        try {
+          const resolved = await io.realpath(executable);
+          if (!entries.has(resolved)) entries.set(resolved, { entryPath, source, executable: resolved, label: "Codex", location: resolved, launchSupported: true });
+        } catch (error) { if (error.code !== "ENOENT") throw error; }
       }
+    }
+    return [...entries.values()];
+  }
+  return {
+    installed,
+    async discover() {
+      const entries = await installed();
       const candidates = new Map();
-      for (const window of await windows()) {
+      // Process identity does not depend on a window manager. Subprocesses sharing
+      // Electron's executable are excluded by their explicit process-type argument.
+      for (const name of (await io.readdir("/proc")).filter(name => /^\d+$/.test(name))) {
+        const pid = Number(name);
+        let identity;
+        try { identity = await processIdentity(pid); }
+        catch (error) {
+          if ((error.code === "EACCES" || error.code === "EPERM") && typeof process.getuid === "function") {
+            let owner;
+            try { owner = await io.stat(`/proc/${pid}`); }
+            catch (statError) { if (statError.code === "ENOENT" || statError.code === "ESRCH") continue; throw statError; }
+            if (owner.uid !== process.getuid()) continue;
+          }
+          throw error;
+        }
+        if (!identity) continue;
+        const entry = entries.find(entry => entry.executable === identity.executable);
+        if (!entry) continue;
+        let args;
+        try { args = (await io.readFile(`/proc/${pid}/cmdline`, "utf8")).split("\0"); } catch (error) { if (error.code === "ENOENT" || error.code === "ESRCH") continue; throw error; }
+        if (args.some(arg => arg.startsWith("--type="))) continue;
+        candidates.set(identity.identity, { ...identity, ...entry, pid, windows: [], closeSupported: false });
+      }
+      let foundWindows = [];
+      if (env.DISPLAY && env.XDG_SESSION_TYPE !== "wayland") {
+        try { foundWindows = await windows(); } catch (error) { if (error.code !== "ENOENT") throw error; }
+      }
+      for (const window of foundWindows) {
         const process = await processIdentity(window.pid);
         if (!process) continue;
         const matching = entries.filter(entry => entry.executable === process.executable);
@@ -72,7 +106,7 @@ function linuxAdapter({ io = fs, command = run, relaunch = launch, env = process
         const entry = matching[0];
         const previous = candidates.get(process.identity);
         const closeSupported = /WM_PROTOCOLS[^\n]*\bWM_DELETE_WINDOW\b/.test(properties);
-        if (previous) { previous.windows.push(window.window); previous.closeSupported &&= closeSupported; }
+        if (previous) { previous.closeSupported = previous.windows.length ? previous.closeSupported && closeSupported : closeSupported; previous.windows.push(window.window); }
         else candidates.set(process.identity, { ...process, ...entry, pid: window.pid, windows: [window.window], label: "Codex", location: entry.executable, launchEntry: entry.entryPath, closeSupported });
       }
       return [...candidates.values()];

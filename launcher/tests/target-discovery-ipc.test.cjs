@@ -12,7 +12,7 @@ test("Settings IPC retains the current connection when inspection or enumeration
     const selected = { id: "current", codexHome: "/fixture", configPath: "/fixture/config.toml", kind: "base" };
     const external = { id: "external", status: "external", resolvedPath: "/managed/profile.toml" };
     runInNewContext(`${registration}\nregisterIpc({ logger: {}, stateStore: {} });`, {
-      Error,
+      Error, IS_DEV_PROFILE: false, IS_CODEX_PROFILE: false, IS_ISOLATED_CAMPAIGN: false, codexRestartController: {},
       registerDiagnosticsIpc: require("../electron/logging.cjs").registerDiagnosticsIpc, runtimeSupervisor: null,
       registerLoggedIpc: (ipcMain, _logger, name, callback) => ipcMain.handle(name, callback),
       ipcMain: { handle: (name, callback) => handlers.set(name, callback), on() {} },

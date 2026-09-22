@@ -33,6 +33,7 @@ export interface ChatGptTurnProgressReader {
   waitForChange(afterRevision: number, signal?: AbortSignal): Promise<ChatGptExternalTurnProgressSnapshot>;
   /** Confirm that the browser captured its answer projection before this batch was dispatched. */
   acknowledgeToolBatch(revision: number): Promise<void>;
+  setGenerationGate?(gate: { park(revision: number): Promise<void>; resume(revision: number, signal?: AbortSignal): Promise<void> }): void;
 }
 
 /**
@@ -89,6 +90,7 @@ export class ChatGptExternalTurnProgress extends ChatGptTurnProgressBroadcaster 
   private activeToolCalls = 0;
   private lastProgressAt?: number;
   private retirementError?: Error;
+  private generationGate?: { park(revision: number): Promise<void>; resume(revision: number, signal?: AbortSignal): Promise<void> };
   private readonly toolBatchObservationWaiters = new Set<ToolBatchObservationWaiter>();
 
   snapshot(): ChatGptExternalTurnProgressSnapshot {
@@ -114,6 +116,8 @@ export class ChatGptExternalTurnProgress extends ChatGptTurnProgressBroadcaster 
     this.assertToolBatchRevision(revision);
     this.assertNotRetired();
     if (revision <= this.observedToolBatchRevision) return;
+    if (this.generationGate) await this.generationGate.park(revision);
+    this.assertNotRetired();
     this.observedToolBatchRevision = revision;
     for (const waiter of [...this.toolBatchObservationWaiters]) {
       if (waiter.revision > revision) continue;
@@ -121,6 +125,22 @@ export class ChatGptExternalTurnProgress extends ChatGptTurnProgressBroadcaster 
       if (waiter.signal && waiter.onAbort) waiter.signal.removeEventListener("abort", waiter.onAbort);
       waiter.resolve();
     }
+  }
+
+  setGenerationGate(gate: NonNullable<ChatGptExternalTurnProgress["generationGate"]>): void {
+    if (this.generationGate) throw new Error("ChatGPT generation gate already has an owner");
+    this.generationGate = gate;
+  }
+
+  hasGenerationGate(): boolean { return this.generationGate !== undefined; }
+
+  async prepareToolResults(signal?: AbortSignal): Promise<void> {
+    this.assertNotRetired();
+    signal?.throwIfAborted();
+    if (this.activeToolCalls <= 0 || this.observedToolBatchRevision !== this.lastToolBatchRevision) throw new Error("ChatGPT tool results require an observed active batch");
+    await this.generationGate?.resume(this.lastToolBatchRevision, signal);
+    signal?.throwIfAborted();
+    this.assertNotRetired();
   }
 
   waitForToolBatchObservation(revision: number, signal?: AbortSignal): Promise<void> {

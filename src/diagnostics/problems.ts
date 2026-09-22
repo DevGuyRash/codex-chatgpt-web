@@ -1,5 +1,6 @@
 import { ProblemSchema, type Problem } from "./contracts";
 import { safeProblem, safeText } from "./privacy";
+import { DiagnosticRequestError } from "./request-error";
 
 const recovery: Record<string, Problem["actions"]> = {
   codex_configuration_conflict: ["review-configuration", "open-diagnostics", "run-doctor"],
@@ -19,6 +20,21 @@ export function problemFor(error: unknown, fallback = "The operation failed; ope
   const candidate = error && typeof error === "object" ? error as Record<string, unknown> : {};
   const existing = ProblemSchema.safeParse(candidate.problem);
   if (existing.success) return safeProblem(ProblemSchema.parse({ ...existing.data, ...context }));
+  if (error instanceof DiagnosticRequestError) return safeProblem(ProblemSchema.parse({ code: error.code, message: error.message, origin: "diagnostics",
+    findings: error.details ? [{ message: Object.entries(error.details).map(([key, value]) => `${key}=${value}`).join("; ") }] : [], ...context }));
+  if (typeof candidate.code === "string" && /^[a-z][a-z0-9_]{0,95}$/.test(candidate.code)
+    && typeof candidate.status === "number" && candidate.status >= 400 && candidate.status <= 599
+    && typeof candidate.errorType === "string" && typeof candidate.retryable === "boolean") {
+    const causes: Problem["causes"] = [];
+    const seen = new Set<unknown>([error]);
+    let cause = candidate.cause;
+    while (cause instanceof Error && !seen.has(cause) && causes.length < 8) {
+      seen.add(cause); causes.push({ code: cause.name.slice(0, 96), message: safeText(cause.message) }); cause = cause.cause;
+    }
+    return safeProblem(ProblemSchema.parse({ code: candidate.code, message: safeText(typeof candidate.message === "string" ? candidate.message : fallback),
+      origin: "adapter", httpStatus: candidate.status, retryable: candidate.retryable, causes,
+      ...(typeof candidate.stack === "string" ? { stack: safeText(candidate.stack) } : {}), ...context }));
+  }
   const code = typeof candidate.code === "string" && Object.hasOwn(recovery, candidate.code) ? candidate.code : "operation_failed";
   const findings = Array.isArray(candidate.findings) ? candidate.findings : Array.isArray(candidate.conflicts) ? candidate.conflicts : [];
   // Only application-owned structured failures may carry detailed text. Unknown child output is not a safe error contract.
@@ -27,7 +43,7 @@ export function problemFor(error: unknown, fallback = "The operation failed; ope
     : safeText(fallback);
   return safeProblem(ProblemSchema.parse({ code, message, actions: recovery[code] ?? ["open-diagnostics", "run-doctor", "export-logs"],
     findings: findings.slice(0, 512).flatMap(item => item && typeof item === "object" && typeof item.message === "string" ? [{ path: typeof item.path === "string" ? safeText(item.path) : undefined, message: safeText(item.message) }] : []),
-    ...context,
+    ...(code === "operation_failed" ? { evidenceMissing: "The source did not provide a structured failure contract. Raw source output is excluded; inspect the correlated stages and component versions." } : {}), ...context,
   }));
 }
 export function runtimeFailure(stderr: string, fallback: string, context: Partial<Problem> = {}): DiagnosticError {

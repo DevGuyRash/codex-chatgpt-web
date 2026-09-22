@@ -5,15 +5,18 @@ import { randomUUID } from "node:crypto";
 import type { Readable, Writable } from "node:stream";
 import { DiagnosticsClient, type WorkerInvocation } from "../../src/diagnostics/client";
 import { Diagnostics, traceparent, type DiagnosticContext } from "../../src/diagnostics/instrumentation";
-import { DiagnosticEventSchema, QuerySchema, QueryResultSchema, StatusSchema, CaptureCommandSchema, ExportOptionsSchema, type DiagnosticEvent, type Severity, type DiagnosticStatus } from "../../src/diagnostics/contracts";
+import { DiagnosticEventSchema, QuerySchema, QueryResultSchema, StatusSchema, CaptureCommandSchema, ExportOptionsSchema, type DiagnosticEvent, type Severity, type DiagnosticStatus, type Problem } from "../../src/diagnostics/contracts";
 import { safeAttributes, safeText, sanitizeEvent } from "../../src/diagnostics/privacy";
 import { DiagnosticRequestIdSchema } from "../../src/diagnostics/contracts";
 import { CopyOptionsSchema } from "../../src/diagnostics/contracts";
 import { TraceIdSchema } from "../../src/diagnostics/contracts";
 import { DiagnosticRequestError, requestFailure } from "../../src/diagnostics/request-error";
 import { isDiagnosticCancellation } from "../../src/diagnostics/outcome";
+import { DiagnosticError } from "../../src/diagnostics/problems";
+import { actionFailure, ActionFailureSchema } from "../../src/diagnostics/action-error";
 export { isDiagnosticCancellation, diagnosticCancellation } from "../../src/diagnostics/outcome";
 export { problemFor, runtimeFailure, withRecovery, DiagnosticError } from "../../src/diagnostics/problems";
+export { parseTraceparent } from "../../src/diagnostics/instrumentation";
 export const redactText = safeText;
 export const redactExportText = (text: string) => safeText(text, true);
 
@@ -90,11 +93,16 @@ export function createLogger(options: { filePath: string; invocation?: WorkerInv
 export type DiagnosticLogger = ReturnType<typeof createLogger>;
 
 /** Non-interactive native-package acceptance; the package runner supplies isolated data/output roots. */
-export async function verifyPackagedDiagnostics(logger: DiagnosticLogger, destination: string, renderer: { executeJavaScript(script: string): Promise<unknown>; getZoomFactor(): number; setZoomFactor(factor: number): void }): Promise<void> {
+export async function verifyPackagedDiagnostics(logger: DiagnosticLogger, destination: string, renderer: { executeJavaScript(script: string): Promise<unknown>; getZoomFactor(): number; setZoomFactor(factor: number): void }, showProblem: (problem: Problem) => void): Promise<void> {
   await logger.ready;
   if (!logger.client || !(await logger.client.status()).available) throw new Error("Packaged diagnostics storage is unavailable");
+  const action = ActionFailureSchema.parse(await renderer.executeJavaScript("window.codexWebLauncher.doctor()"));
+  if (action.problem.code !== "packaged_action_failure" || !action.problem.traceId || action.problem.findings[0]?.message !== "Structured action evidence survived") throw new Error("Packaged action problem did not survive IPC/contextBridge");
+  await logger.client.flush();
+  if (!(await logger.client.query({ traceId: action.problem.traceId })).events.some(event => event.problem?.code === action.problem.code)) throw new Error("Packaged action failure lost its persisted trace");
   const operation = logger.diagnostics.begin("packaged.diagnostics.acceptance");
-  operation.problem(undefined, "Synthetic diagnostics package acceptance failure"); operation.end("failed");
+  const problem = operation.problem({ problem: { version: 1, code: "packaged_acceptance_failure", message: "Synthetic diagnostics package acceptance failure", findings: [{ path: "fixture.setting", message: "Synthetic startup finding remains available in Details" }], causes: [], actions: ["open-diagnostics"], recovery: "not-needed" } }); operation.end("failed");
+  showProblem(problem);
   await logger.client.flush();
   const result = await logger.client.query({ traceId: operation.context.traceId, regex: "package acceptance failure" });
   if (!result.events.some(event => event.problem?.traceId === operation.context.traceId)) throw new Error("Packaged diagnostics lost correlated failure evidence");
@@ -117,6 +125,18 @@ export async function verifyPackagedDiagnostics(logger: DiagnosticLogger, destin
         throw new Error('Native zoom acceptance: ' + description);
       };
       const button = name => [...document.querySelectorAll('button')].find(element => element.textContent.trim() === name);
+      (await waitFor('Action Details unavailable', () => button('Details'))).click();
+      await waitFor('Action Details lost the structured startup finding', () => document.getElementById('action-notice-details')?.textContent.includes('Synthetic startup finding remains available in Details'));
+      const recovery = await waitFor('Correlated diagnostic action unavailable', () => button('Open Diagnostics'));
+      recovery.scrollIntoView({ block: 'center', inline: 'nearest' }); recovery.focus();
+      await waitFor('Action Details recovery unreachable at 200% zoom', () => {
+        const rect = recovery.getBoundingClientRect();
+        return document.activeElement === recovery && rect.width > 0 && rect.height > 0
+          && rect.left >= 0 && rect.right <= innerWidth && rect.top >= 0 && rect.bottom <= innerHeight;
+      });
+      recovery.click();
+      await waitFor('Correlated startup timeline unavailable', () => [...document.querySelectorAll('h2,h3')].some(element => element.textContent.trim() === 'Stage timeline'));
+      button('Dismiss')?.click();
       (await waitFor('Diagnostics navigation unavailable', () => button('Diagnostics'))).click();
       (await waitFor('Capture controls unavailable', () => button('Capture & storage'))).click();
       const control = await waitFor('Debug control unavailable', () => button('Enable debug for 30 minutes'));
@@ -217,13 +237,26 @@ export function registerDiagnosticsIpc(options: {
   });
 }
 
-export function registerLoggedIpc(ipcMain: { handle: (channel: string, handler: (...args: unknown[]) => unknown) => void }, logger: Pick<DiagnosticLogger, "error"> & Partial<Pick<DiagnosticLogger, "operation">>, channel: string, handler: (...args: unknown[]) => unknown) {
+export function registerLoggedIpc(ipcMain: { handle: (channel: string, handler: (...args: unknown[]) => unknown) => void }, logger: Pick<DiagnosticLogger, "error"> & Partial<Pick<DiagnosticLogger, "operation" | "currentContext">>, channel: string, handler: (...args: unknown[]) => unknown) {
   ipcMain.handle(channel, async (...args) => {
+    const work = async () => {
+      try { return await handler(...args); }
+      catch (error) {
+        const failure = actionFailure(error);
+        if (failure && !isDiagnosticCancellation(error)) {
+          const context = logger.currentContext?.();
+          throw new DiagnosticError({ ...failure.problem, stage: failure.problem.stage ?? channel.replace("launcher:", ""), traceId: failure.problem.traceId ?? context?.traceId, spanId: failure.problem.spanId ?? context?.spanId });
+        }
+        throw error;
+      }
+    };
     try {
       // Query traffic is not recorded as new operations, preventing a self-observation loop.
-      return logger.operation && !/diagnostics-|snapshot|logs|browser-bounds|window-state/.test(channel) ? await logger.operation(channel.replace("launcher:", ""), async () => handler(...args)) : await handler(...args);
+      return logger.operation && !/diagnostics-|snapshot|logs|browser-bounds|window-state/.test(channel) ? await logger.operation(channel.replace("launcher:", ""), work) : await work();
     } catch (error) {
       if (isDiagnosticCancellation(error)) return requestFailure(error, "cancelled");
+      const failure = actionFailure(error);
+      if (failure) return failure;
       logger.error("launcher.ipc_failed", { channel }); throw error;
     }
   });

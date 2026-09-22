@@ -535,3 +535,36 @@ test("browser control server rejects malformed retained-conversation contracts",
     await server.close();
   }
 });
+
+test("campaign control polls shared admission, rejects Pro and cancels queued work before creating a surface", async () => {
+  const previous = process.env.CODEX_WEB_GPT_CAPTURE_CAMPAIGN_ID;
+  process.env.CODEX_WEB_GPT_CAPTURE_CAMPAIGN_ID = '11111111-1111-4111-8111-111111111111';
+  const starts = [];
+  const host = {
+    turnTabs: new Map(), browserInteractionMode: () => 'automatic',
+    beginTurn: async (traceId, _reveal, helperPid) => { starts.push(traceId); host.turnTabs.set(traceId, { traceId, helperPid, status: 'running' }); return { surfaceId: traceId, reused: false, connectorBound: false }; },
+    endTurn: async traceId => { host.turnTabs.delete(traceId); return { cancelledByUser: false }; },
+    heartbeatTurn: (traceId, helperPid) => { assert.equal(host.turnTabs.get(traceId)?.helperPid, helperPid); },
+  };
+  const server = await new BrowserControlServer({ logger: { info() {}, warn() {} }, getBrowserHost: () => host, getPreferences: () => ({}) }).start();
+  const { endpoint, token } = server.descriptor();
+  const post = (phase, traceId, extra = {}) => fetch(`${endpoint}/v1/turn/${phase}`, { method: 'POST', headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' }, body: JSON.stringify({ phase, traceId, helperPid: process.pid, queueAware: true, proGeneration: false, ...extra }) });
+  try {
+    assert.equal((await post('start', 'trace-pro', { proGeneration: true })).status, 403);
+    assert.equal((await post('start', 'trace-old', { queueAware: false })).status, 403);
+    for (const id of ['trace-one', 'trace-two', 'trace-three']) assert.equal((await post('start', id)).status, 202);
+    assert.deepEqual(starts, ['trace-one', 'trace-two']);
+    assert.equal((await post('start', 'trace-one')).status, 200);
+    assert.equal((await post('park', 'trace-one', { revision: 1 })).status, 200);
+    assert.equal(host.turnTabs.size, 3, 'parked parent keeps its page while queued child starts');
+    assert.equal((await post('resume', 'trace-one', { revision: 1 })).status, 202);
+    assert.equal((await post('end', 'trace-three', { status: 'aborted' })).status, 200);
+    assert.equal((await post('resume', 'trace-one', { revision: 1 })).status, 200);
+    assert.equal((await post('end', 'trace-one', { status: 'completed' })).status, 200);
+    assert.equal(host.turnTabs.size, 1);
+    assert.deepEqual(starts, ['trace-one', 'trace-two', 'trace-three']);
+  } finally {
+    await server.close();
+    if (previous === undefined) delete process.env.CODEX_WEB_GPT_CAPTURE_CAMPAIGN_ID; else process.env.CODEX_WEB_GPT_CAPTURE_CAMPAIGN_ID = previous;
+  }
+});

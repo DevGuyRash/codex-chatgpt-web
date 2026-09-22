@@ -20,3 +20,4 @@ output/
 notes.md
 context/verify-scratch-*/
 context/*-failure.png
+context/*-preview.png

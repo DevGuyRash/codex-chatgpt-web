@@ -13,7 +13,7 @@ const {
 } = require("./connector-identity.cjs");
 const { embeddedRuntimeInvocation, runtimeInvocation } = require("./runtime-command.cjs");
 const { redactText } = require("./logging.cjs");
-const { isDiagnosticCancellation } = require("./generated/diagnostics.cjs");
+const { isDiagnosticCancellation, DiagnosticError } = require("./generated/diagnostics.cjs");
 const { parseConfigurationPreview, resolutionArguments } = require("./configuration-review.cjs");
 const { problemFor, runtimeFailure, withRecovery } = require("./problems.cjs");
 const { DETACH_OWNED_CHILD, terminateOwnedProcessTree } = require("./process-tree.cjs");
@@ -121,19 +121,26 @@ function parseBridgeRouteResult(stdout, { expectedActive, requireInstalled = fal
   try {
     result = JSON.parse(stdout);
   } catch {
-    throw new Error("Codex bridge route command returned invalid JSON");
+    throw new DiagnosticError({ code: "codex_route_invalid_output", message: "Codex bridge route command returned invalid JSON" });
   }
   if (typeof result?.active !== "boolean") {
-    throw new Error("Codex bridge route command did not report its active state");
+    throw new DiagnosticError({ code: "codex_route_invalid_output", message: "Codex bridge route command did not report its active state" });
   }
   if (requireInstalled && typeof result.installed !== "boolean") {
-    throw new Error("Codex bridge route status did not report whether the integration is installed");
+    throw new DiagnosticError({ code: "codex_route_invalid_output", message: "Codex bridge route status did not report whether the integration is installed" });
+  }
+  if ((result.errors !== undefined && (!Array.isArray(result.errors) || result.errors.some(error => typeof error !== "string")))
+    || (result.conflicts !== undefined && (!Array.isArray(result.conflicts) || result.conflicts.some(conflict => !conflict || typeof conflict !== "object" || typeof conflict.message !== "string" || (conflict.path !== undefined && typeof conflict.path !== "string"))))) {
+    throw new DiagnosticError({ code: "codex_route_invalid_output", message: "Codex bridge route command returned malformed configuration findings" });
+  }
+  if (Array.isArray(result.conflicts) && result.conflicts.length) {
+    throw new DiagnosticError(problemFor({ code: "codex_configuration_conflict", conflicts: result.conflicts }, undefined, { recovery: "not-started" }));
   }
   if (Array.isArray(result.errors) && result.errors.length > 0) {
-    throw new Error(`Codex bridge route is inconsistent: ${result.errors.join("; ")}`);
+    throw new DiagnosticError({ code: "codex_route_inconsistent", message: "Codex bridge route is inconsistent; review configuration before changing it", actions: ["review-configuration", "open-diagnostics", "run-doctor"], recovery: "not-started" });
   }
   if (typeof expectedActive === "boolean" && result.active !== expectedActive) {
-    throw new Error(`Codex bridge route remained ${result.active ? "connected" : "disconnected"}`);
+    throw new DiagnosticError({ code: "codex_route_verification_failed", message: `Codex bridge route remained ${result.active ? "connected" : "disconnected"}` });
   }
   return result;
 }
@@ -748,7 +755,7 @@ class RuntimeHost {
         throw runtimeFailure(result.stderr, detail, { exitCode: result.code, signal: result.signal, ...this.logger.currentContext?.() });
       }
       this.logger.info("runtime.operation_completed", { name });
-      this.publishOperation?.({ name, status: "completed", message: options.successMessage || "Completed" });
+      this.publishOperation?.({ name, status: "completed", message: options.successMessage || "Completed", summary: options.successMessage ? redactText(options.successMessage) : undefined });
       return result;
     } catch (error) {
       if (isDiagnosticCancellation(error)) { this.publishOperation?.({ name, status: "cancelled", message: "Operation cancelled" }); throw error; }
@@ -874,13 +881,13 @@ class RuntimeHost {
     try {
       const preview = await this.previewIntegrationRepair(protocol, name, resolutions);
       if (preview.status !== "ready" || preview.approvalId !== approvalId) throw new Error("Configuration changed; review a fresh preview before applying repair");
-      await this.supervisor.stopForSetup();
+      if (preview.codexRestartRequired !== false || preview.launcherRestartRequired !== false) await this.supervisor.stopForSetup();
       const result = await this.run(name, ["route", "repair", "apply", "--subagent-protocol", protocol, "--approve", approvalId, "--launcher-control", ...resolutionArguments(resolutions)], {
         embedded: true, privateOutput: true, env: this.launcherControlEnvironment(), timeoutMs: 15_000,
         message: "Applying approved configuration repair", successMessage: "Configuration repaired; restart Codex and the launcher",
       });
       const applied = JSON.parse(result.stdout);
-      if (!applied || typeof applied.changed !== "boolean" || applied.codexRestartRequired !== true || applied.launcherRestartRequired !== true) {
+      if (!applied || typeof applied.changed !== "boolean" || typeof applied.codexRestartRequired !== "boolean" || typeof applied.launcherRestartRequired !== "boolean") {
         throw new Error("Repair verification returned an unexpected result; inspect configuration before restarting");
       }
       return applied;
@@ -899,7 +906,7 @@ class RuntimeHost {
     const result = parseBridgeRouteResult(disconnected.stdout, { expectedActive: false });
     const verified = await this.bridgeStatus(operationName);
     if (!verified.installed || verified.active) {
-      throw new Error("Codex bridge route restore did not persist in the active config");
+      throw new DiagnosticError({ code: "codex_route_verification_failed", message: "Codex bridge route restore did not persist in the active config" });
     }
     return {
       ...result,
@@ -924,7 +931,7 @@ class RuntimeHost {
     this.lifecycleOperation = name;
     try {
       const current = await this.bridgeStatus(name);
-      if (!current.installed) throw new Error("Install the Codex integration before connecting the bridge route");
+      if (!current.installed) throw new DiagnosticError({ code: "codex_route_missing", message: "Install the Codex integration before connecting the bridge route" });
       if (current.active) return current;
       try {
         const connected = await this.run(name, ["route", "connect"], {
@@ -936,10 +943,11 @@ class RuntimeHost {
         const result = parseBridgeRouteResult(connected.stdout, { expectedActive: true });
         const verified = await this.bridgeStatus(name);
         if (!verified.installed || !verified.active) {
-          throw new Error("Codex bridge route connection did not persist in the active config");
+          throw new DiagnosticError({ code: "codex_route_verification_failed", message: "Codex bridge route connection did not persist in the active config" });
         }
         return result;
       } catch (error) {
+        if (["codex_configuration_conflict", "codex_route_inconsistent", "CONFIGURATION_REVIEW_REQUIRED"].includes(error?.code)) throw error;
         let cleanupError;
         try { await this.supervisor.stopForSetup(); } catch (caught) { cleanupError = caught; }
         if (!cleanupError) throw error;
@@ -1417,6 +1425,7 @@ class RuntimeHost {
     this.lifecycleOperation = name;
     let setupCommandStarted = false;
     let runtimeTransitionStarted = false;
+    let codexRestartRequired = this.launcherProfile !== "development";
     try {
       if (this.launcherProfile === "production") {
         if (!this.reviewConfiguration) throw new Error("Setup requires a configuration preview in the launcher");
@@ -1450,6 +1459,7 @@ class RuntimeHost {
           return next;
         });
         if (approved !== preview.approvalId || preview.status !== "ready") throw new Error("Exact setup preview approval is required");
+        codexRestartRequired = preview.codexRestartRequired;
         this.logger.event?.("setup.approved", "User approved this configuration preview", { protocol: preview.protocol, previewFingerprint: preview.approvalId });
         args = [...args, "--approve-configuration", approved];
         await this.run(name, [...args, "--preflight-only"], {
@@ -1474,7 +1484,7 @@ class RuntimeHost {
         throw new Error(`Setup completed, but the launcher-owned runtime is ${runtime.status}: ${runtime.detail || "not ready"}`);
       }
       await options.afterRuntimeReady?.();
-      return result;
+      return { ...result, codexRestartRequired };
     } catch (error) {
       const primary = error instanceof Error ? error.message : String(error);
       const failures = [];

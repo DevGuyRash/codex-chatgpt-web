@@ -37,6 +37,7 @@ test.skipIf(!process.env.CHATGPT_TEST_CHROME_EXECUTABLE)("grouped review sends s
     const main = readFileSync(resolve("launcher/electron/main.cjs"), "utf8");
     const registration = main.slice(main.indexOf("function registerIpc("), main.indexOf("async function requestQuit("));
     runInNewContext(`${registration}\nregisterIpc({ logger: { error() {} }, stateStore: { update() { return {}; } } });`, {
+      IS_DEV_PROFILE: false, IS_CODEX_PROFILE: true, IS_ISOLATED_CAMPAIGN: false,
       configurationReview: review, registerLoggedIpc, registerDiagnosticsIpc, ipcMain: { handle: (name: string, handler: (...args: unknown[]) => unknown) => handlers.set(name, handler), on() {} },
       browserHost: { setSurfaceActive: (value: boolean) => surfaceStates.push(value) }, runtimeSupervisor: null,
     });

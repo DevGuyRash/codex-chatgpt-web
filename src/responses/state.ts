@@ -1,6 +1,8 @@
-import { chmodSync, existsSync, mkdirSync, readFileSync } from "node:fs";
-import { dirname, join } from "node:path";
-import { atomicWriteFile, getConfigDir } from "../config";
+import { existsSync, readFileSync } from "node:fs";
+import { join } from "node:path";
+import { atomicWriteFileAsync, getConfigDir } from "../config";
+import { runtimeDiagnostics } from "../diagnostics/runtime";
+import { DiagnosticError } from "../diagnostics/problems";
 
 const MAX_STORED_RESPONSES = 1_000;
 const RESPONSE_TTL_MS = 60 * 60 * 1_000;
@@ -59,6 +61,9 @@ const replayedInputPrefixLengths = new WeakMap<object, number>();
 let loaded = false;
 let persistTimer: ReturnType<typeof setTimeout> | null = null;
 let pendingPersistPath: string | null = null;
+let persisting: Promise<void> | null = null;
+let requestedRevision = 0;
+let settledRevision = 0;
 
 function now(): number {
   return Date.now();
@@ -72,8 +77,8 @@ function snapshotPath(): string {
  * Best-effort disk snapshot so previous_response_id chains survive a proxy restart (the
  * dominant expansion-miss cause: an in-memory-only store dies with the process, and the next
  * chained turn then reaches the upstream as a naked delta). Load is lazy on first store access;
- * persistence is debounced + unref'd so the hot path never blocks and the process can exit.
- * Every disk failure is swallowed — the snapshot is a cache, not a source of truth.
+ * Persistence coalesces updates behind one asynchronous writer. Disk failures leave the
+ * in-memory cache usable and report a recovery limitation through ordinary diagnostics.
  */
 function ensureLoaded(): void {
   if (loaded) return;
@@ -101,53 +106,70 @@ function ensureLoaded(): void {
   }
 }
 
-function persistNow(path: string): void {
+function persistNow(): Promise<void> {
+  if (persisting) return persisting;
+  if (!pendingPersistPath) return Promise.resolve();
   if (persistTimer) {
     clearTimeout(persistTimer);
     persistTimer = null;
   }
+  const path = pendingPersistPath, revision = requestedRevision;
   pendingPersistPath = null;
-  try {
-    const entries: [string, StoredResponseState][] = [];
-    let total = 0;
-    // Newest-first so the most recent chains survive both caps.
-    for (const entry of [...states].reverse()) {
-      // sizeBytes is in-memory accounting only; keep it out of the disk snapshot.
-      const [id, state] = entry;
-      const { sizeBytes: _sizeBytes, ...persistable } = state;
-      const persistEntry: [string, StoredResponseState] = [id, persistable];
-      const size = JSON.stringify(persistEntry).length;
-      if (size > SNAPSHOT_ENTRY_MAX_BYTES) continue;
-      if (total + size > SNAPSHOT_TOTAL_MAX_BYTES) break;
-      total += size;
-      entries.push(persistEntry);
+  const diagnostic = runtimeDiagnostics()?.begin("response_state.snapshot", { revision });
+  const operation = (async () => {
+    try {
+      const entries: [string, StoredResponseState][] = [];
+      let total = 0;
+      // Newest-first so the most recent chains survive both caps.
+      for (const entry of [...states].reverse()) {
+        // sizeBytes is in-memory accounting only; keep it out of the disk snapshot.
+        const [id, state] = entry;
+        const { sizeBytes: _sizeBytes, ...persistable } = state;
+        const persistEntry: [string, StoredResponseState] = [id, persistable];
+        const size = JSON.stringify(persistEntry).length;
+        if (size > SNAPSHOT_ENTRY_MAX_BYTES) continue;
+        if (total + size > SNAPSHOT_TOTAL_MAX_BYTES) break;
+        total += size;
+        entries.push(persistEntry);
+      }
+      entries.reverse();
+      await atomicWriteFileAsync(path, JSON.stringify({ version: 1, states: entries }));
+      diagnostic?.end("succeeded");
+    } catch {
+      diagnostic?.problem(new DiagnosticError({ code: "response_state_persistence_failed", origin: "response-state",
+        message: "The continuation cache could not be saved; some tasks may not resume after a runtime restart" }));
+      diagnostic?.end("failed");
     }
-    entries.reverse();
-    mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
-    // mkdirSync's mode only applies on creation — re-harden an existing config dir so the
-    // conversation-content snapshot never lands in a group/world-readable directory.
-    try { chmodSync(dirname(path), 0o700); } catch { /* best-effort (e.g. Windows) */ }
-    atomicWriteFile(path, JSON.stringify({ version: 1, states: entries }));
-  } catch {
-    /* best-effort: disk trouble must never affect request handling */
-  }
+  })();
+  persisting = operation.finally(() => {
+    settledRevision = revision;
+    persisting = null;
+    if (pendingPersistPath) armPersistTimer();
+  });
+  return persisting;
+}
+
+function armPersistTimer(): void {
+  if (persistTimer || persisting || !pendingPersistPath) return;
+  persistTimer = setTimeout(() => { persistTimer = null; void persistNow(); }, SNAPSHOT_DEBOUNCE_MS);
+  persistTimer.unref?.();
 }
 
 function schedulePersist(): void {
-  if (persistTimer) return;
   // Resolve the target path now: tests may swap CODEX_CHATGPT_WEB_HOME before the
   // debounce fires, and a late write must land in the home that owned the recorded state.
-  pendingPersistPath = snapshotPath();
-  const path = pendingPersistPath;
-  persistTimer = setTimeout(() => persistNow(path), SNAPSHOT_DEBOUNCE_MS);
-  (persistTimer as { unref?: () => void }).unref?.();
+  pendingPersistPath ??= snapshotPath();
+  requestedRevision++;
+  armPersistTimer();
 }
 
-/** Flush any pending debounced snapshot write (graceful shutdown / deterministic tests). */
-export function flushResponseState(): void {
-  if (!persistTimer) return;
-  // Use the path captured when the write was scheduled; CODEX_CHATGPT_WEB_HOME may have moved.
-  persistNow(pendingPersistPath ?? snapshotPath());
+/** Join writes covering the revisions already requested; later updates keep their own scheduled owner. */
+export async function flushResponseState(): Promise<void> {
+  const revision = requestedRevision;
+  while (settledRevision < revision) {
+    if (persistTimer) { clearTimeout(persistTimer); persistTimer = null; }
+    await persistNow();
+  }
 }
 
 function inputItems(input: unknown): unknown[] {

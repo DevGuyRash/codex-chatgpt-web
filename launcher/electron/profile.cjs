@@ -1,6 +1,6 @@
 const os = require("node:os");
 const path = require("node:path");
-const { resolveIntegrationTarget } = require("./integration-target.cjs");
+const { canonicalConfigurationPath, resolveIntegrationTarget } = require("./integration-target.cjs");
 
 const PRODUCTION_PROFILE = "production";
 const DEVELOPMENT_PROFILE = "development";
@@ -31,6 +31,8 @@ function resolveLauncherProfile({
   };
   const codexProfile = option("--codex-profile");
   const selectedCodexHome = option("--codex-home");
+  const isolatedCampaign = Boolean(env.CODEX_WEB_GPT_CAPTURE_CAMPAIGN_ID);
+  if (isolatedCampaign && (development || !selectedCodexHome || !env.CODEX_CHATGPT_WEB_HOME?.trim() || !env.CODEX_WEB_GPT_LAUNCHER_DATA_DIR?.trim())) throw new Error("Campaign launch requires explicit, isolated Codex, runtime, and launcher data homes");
   if (development && (codexProfile || selectedCodexHome)) throw new Error("DEV mode cannot own a Codex integration target");
   if (!development) {
     const coreHome = env.CODEX_CHATGPT_WEB_HOME?.trim()
@@ -43,8 +45,15 @@ function resolveLauncherProfile({
       codexHome: selectedCodexHome ? resolveUserPath(selectedCodexHome, homeDir) : env.CODEX_HOME?.trim() ? resolveUserPath(env.CODEX_HOME.trim(), homeDir) : path.join(homeDir, ".codex"),
       runtimeRoot: coreHome, profile: codexProfile,
     });
+    if (isolatedCampaign) {
+      const selected = [target.codexHome, coreHome, userData].map(canonicalConfigurationPath);
+      const protectedRoots = [path.join(homeDir, ".codex"), path.join(homeDir, ".codex-chatgpt-web"), path.join(appData, "Codex Web GPT")].map(canonicalConfigurationPath);
+      const overlaps = (left, right) => { const relative = path.relative(left, right); return relative === "" || !relative.startsWith(`..${path.sep}`) && relative !== ".." && !path.isAbsolute(relative); };
+      if (new Set(selected).size !== 3 || selected.some(root => protectedRoots.some(protectedRoot => overlaps(root, protectedRoot) || overlaps(protectedRoot, root)))) throw new Error("Campaign homes must be separate and must not overlap production data");
+    }
     return {
       kind: PRODUCTION_PROFILE,
+      ...(isolatedCampaign ? { isolatedCampaign: true } : {}),
       displayName: codexProfile ? `Codex Web GPT · ${codexProfile}` : "Codex Web GPT",
       coreHome: target.runtimeHome,
       runtimeRoot: coreHome,

@@ -15,6 +15,7 @@ import {
   notifyLauncherTurn,
   markLauncherManualTurnStarted,
   readLauncherBrowserHostDescriptor,
+  readLauncherBrowserHostDescriptorFile,
   releaseLauncherRetainedConversation,
   selectLauncherPage,
   startLauncherManualTurn,
@@ -22,6 +23,8 @@ import {
   waitForLauncherManualTerminal,
 } from "../src/launcher-browser-host";
 import type { Browser, BrowserContext, Page } from "playwright-core";
+import { Diagnostics } from "../src/diagnostics/instrumentation";
+import { runtimeDiagnostics, setRuntimeDiagnostics } from "../src/diagnostics/runtime";
 
 const roots: string[] = [];
 
@@ -60,6 +63,17 @@ function descriptorFile(
   })}\n`, { mode: 0o600 });
   return path;
 }
+
+test("persisted descriptor inspection preserves validation without treating a stopped host as live", () => {
+  const path = descriptorFile(), descriptor = JSON.parse(readFileSync(path, "utf8"));
+  descriptor.pid = 2147483647;
+  writeFileSync(path, JSON.stringify(descriptor));
+  expect(readLauncherBrowserHostDescriptorFile(path).pid).toBe(descriptor.pid);
+  expect(() => readLauncherBrowserHostDescriptor(path)).toThrow("not running");
+  descriptor.control.endpoint = "https://example.invalid";
+  writeFileSync(path, JSON.stringify(descriptor));
+  expect(() => readLauncherBrowserHostDescriptorFile(path)).toThrow();
+});
 
 test("launcher descriptor is owner-only, loopback-only, and process-bound", () => {
   const path = descriptorFile();
@@ -567,4 +581,43 @@ test("manual Sent wait preserves typed timeout and cancellation signals", async 
       await new Promise<void>(resolveClose => server.close(() => resolveClose()));
     }
   }
+});
+
+test("queued admission uses bounded polls and cancellation releases the same owner without acquiring another turn", async () => {
+  const { acquireLauncherTurn } = await import("../src/launcher-browser-host");
+  const requests: { phase: string; traceId: string; helperPid: number; queueAware?: boolean }[] = [];
+  const abort = new AbortController();
+  const server = createServer(async (request, response) => {
+    const chunks = [];
+    for await (const chunk of request) chunks.push(Buffer.from(chunk));
+    const body = JSON.parse(Buffer.concat(chunks).toString("utf8")); requests.push(body);
+    response.writeHead(body.phase === "start" ? 202 : 200, { "content-type": "application/json" });
+    response.end(JSON.stringify(body.phase === "start" ? { queued: true, position: 1 } : { cancelledByUser: true }));
+  });
+  await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
+  try {
+    const address = server.address(); if (!address || typeof address === 'string') throw new Error('missing port');
+    const path = descriptorFile(`http://127.0.0.1:${address.port}`);
+    await expect(acquireLauncherTurn(path, { phase: 'start', traceId: 'queued-trace', helperPid: process.pid }, abort.signal, () => abort.abort())).rejects.toMatchObject({ name: 'AbortError' });
+    expect(requests.map(request => request.phase)).toEqual(['start', 'end']);
+    expect(requests.every(request => request.traceId === 'queued-trace' && request.helperPid === process.pid)).toBe(true);
+    expect(requests[0]?.queueAware).toBe(true);
+  } finally { await new Promise<void>(resolve => server.close(() => resolve())); }
+});
+
+test("helper lifecycle control carries the active HTTP diagnostic parent without replacing the browser identity", async () => {
+  const received: { parent: string | null; body: unknown }[] = [];
+  const server = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: async request => {
+    received.push({ parent: request.headers.get("traceparent"), body: await request.json() });
+    return Response.json({ ok: true, surfaceId: "launcher_surface_id_0123456789AB", reused: false, connectorBound: false });
+  } });
+  const diagnostics = new Diagnostics({ emit: () => {} }, { component: "browser-helper", environment: "test", target: "fixture" });
+  const previous = runtimeDiagnostics(); setRuntimeDiagnostics(diagnostics);
+  try {
+    const path = descriptorFile(`http://127.0.0.1:${server.port}`), activity = { phase: "start" as const, traceId: "browser123456", helperPid: process.pid };
+    await diagnostics.withContext({ traceId: "a".repeat(32), spanId: "b".repeat(16) }, () => notifyLauncherTurn(path, activity));
+    await notifyLauncherTurn(path, activity);
+    expect(received.map(item => item.parent)).toEqual([`00-${"a".repeat(32)}-${"b".repeat(16)}-01`, null]);
+    expect(received.map(item => item.body)).toEqual([activity, activity]);
+  } finally { setRuntimeDiagnostics(previous); await diagnostics.close(); await server.stop(true); }
 });

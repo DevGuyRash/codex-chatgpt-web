@@ -3,6 +3,7 @@ import { useEffect, useId, useRef, useState } from "react";
 import type { CodexRepairPreview, Language, LauncherApi, LauncherState, SubagentProtocol } from "./types";
 import { ConfigurationCards } from "./ConfigurationCards";
 import { alignConfigurationDiff, diffSections, type DiffLine } from "./configuration-diff";
+import { configurationSummary } from "../../src/configuration-summary";
 
 function selectedResolutions(preview: CodexRepairPreview, occurrenceId: string) {
   const setting = preview.groups?.flatMap(group => group.settings).find(item => item.occurrences.some(occurrence => occurrence.id === occurrenceId));
@@ -118,9 +119,12 @@ export function ConfigurationRepair({ api, language, disabled, onBusyChange, onR
 
 export function ConfigurationChanges({ preview, language, selectOccurrence }: { preview: CodexRepairPreview; language: Language; selectOccurrence?: (id: string) => void }) {
   const copy = labels[language];
+  const summary = configurationSummary(preview);
+  const summaryLabels = language === "en" ? { success: "No changes", info: "Configuration changes", warning: "Changes requiring attention", error: "Configuration conflicts", settings: "settings", files: "files", findings: "findings" } : language === "ja" ? { success: "変更なし", info: "設定の変更", warning: "確認が必要な変更", error: "設定の競合", settings: "設定", files: "ファイル", findings: "確認事項" } : { success: "无更改", info: "配置更改", warning: "需要处理的更改", error: "配置冲突", settings: "项设置", files: "个文件", findings: "项检查结果" };
   const paths = [...new Set([...preview.changes.map(change => change.path), ...preview.conflicts.filter(conflict => conflict.current !== undefined || conflict.expected !== undefined || ["missing", "commented_out", "value_changed"].includes(conflict.category)).map(conflict => conflict.path)])];
   const value = (item: string | number | boolean | null | undefined) => item == null ? copy.absent : String(item);
   return <>
+    <p className="configuration-summary" data-tone={summary.tone} role="status"><strong>{summaryLabels[summary.tone]}</strong>{summary.tone !== "success" ? ` · ${summary.settings} ${summaryLabels.settings} · ${summary.files} ${summaryLabels.files} · ${summary.conflicts || summary.attention} ${summaryLabels.findings}` : ""}</p>
     {preview.version === 2 ? <ConfigurationCards preview={preview} language={language} selectOccurrence={selectOccurrence} /> : paths.length ? <div className="repair-comparison" tabIndex={0} role="region" aria-label={copy.preview}>
       <table><thead><tr><th>{copy.setting}</th><th>{copy.current}</th><th>{copy.expected}</th><th>{copy.proposed}</th></tr></thead>
         <tbody>{paths.map(path => {

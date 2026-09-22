@@ -225,6 +225,10 @@ export interface FileSnapshot {
   data?: Buffer;
 }
 
+export function configurationWritesChanged(writes: readonly { path: string; data: string }[], snapshots: readonly FileSnapshot[]): boolean {
+  return writes.some(write => !snapshots.find(snapshot => snapshot.path === write.path)?.data?.equals(Buffer.from(write.data)));
+}
+
 export interface InstallCodexIntegrationOptions {
   replaceExistingRoute?: boolean;
   target?: import("./contracts/codex-integration").IntegrationTarget;

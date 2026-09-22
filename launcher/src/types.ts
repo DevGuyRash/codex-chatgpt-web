@@ -70,6 +70,8 @@ export interface OperationState {
   status: "running" | "completed" | "failed" | "cancelled";
   message: string;
   problem?: DiagnosticProblem;
+  /** Application-owned completion summary, never a subprocess output line. */
+  summary?: string;
 }
 
 export type UpdateState =
@@ -176,7 +178,9 @@ export interface LauncherApi {
   onUpdateState(listener: (state: UpdateState) => void): () => void;
 }
 
-export type LauncherBridgeApi = Omit<LauncherApi, "diagnostics"> & { diagnostics: DiagnosticsBridgeApi };
+type LauncherMethods = Omit<LauncherApi, "diagnostics">;
+export type LauncherBridgeApi = { [K in keyof LauncherMethods]: LauncherMethods[K] extends (...args: infer A) => Promise<infer R>
+  ? (...args: A) => Promise<R | import("../../src/diagnostics/action-error").ActionFailure> : LauncherMethods[K] } & { diagnostics: DiagnosticsBridgeApi };
 
 declare global {
   interface Window {

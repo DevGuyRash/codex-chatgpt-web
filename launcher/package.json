@@ -1,6 +1,7 @@
 {
   "name": "codex-web-gpt-launcher",
   "version": "5.0.3",
+  "codexWebGptElectronPatch": "webauthn-v44.4.4",
   "private": true,
   "description": "Desktop control center for Codex ChatGPT Web",
   "author": "miuuyy",
@@ -19,10 +20,13 @@
     "package:linux": "bun run build && bun run build:runtime && bun run scripts/package.cjs --linux",
     "smoke:package": "bun run scripts/smoke-package.cjs",
     "test": "bun run ../scripts/build-diagnostics.ts && node --test tests/*.test.cjs",
-    "start": "electron ."
+    "start": "node scripts/start.cjs"
   },
   "dependencies": {
+    "electron-chrome-extensions": "4.9.0",
+    "electron-chrome-web-store": "0.13.0",
     "motion": "^12.42.2",
+    "qrcode": "1.5.4",
     "react": "^19.0.0",
     "react-dom": "^19.0.0"
   },
@@ -31,7 +35,7 @@
     "@types/react": "^19.0.0",
     "@types/react-dom": "^19.0.0",
     "@vitejs/plugin-react": "^5.2.0",
-    "electron": "41.10.7",
+    "electron": "44.4.4",
     "electron-builder": "^26.8.1",
     "typescript": "^5.9.3",
     "vite": "^6.0.0"
@@ -44,6 +48,7 @@
   "build": {
     "appId": "dev.codexwebgpt.launcher",
     "productName": "Codex Web GPT",
+    "executableName": "codex-web-gpt",
     "artifactName": "codex-web-gpt-${version}-${os}-${arch}.${ext}",
     "asar": true,
     "asarUnpack": [
@@ -55,6 +60,7 @@
     "files": [
       "dist/**",
       "electron/**",
+      "build/webauthn-runtime.json",
       "assets/icon.png",
       "assets/linux-appimage-runner.sh",
       "package.json"
@@ -93,5 +99,8 @@
       "createStartMenuShortcut": true,
       "runAfterFinish": true
     }
+  },
+  "patchedDependencies": {
+    "electron-chrome-extensions@4.9.0": "patches/electron-chrome-extensions@4.9.0.patch"
   }
 }

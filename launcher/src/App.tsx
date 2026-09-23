@@ -1,5 +1,6 @@
 import { AnimatePresence, motion } from "motion/react";
 import {
+  createElement,
   useCallback,
   useEffect,
   useLayoutEffect,
@@ -26,6 +27,7 @@ import { NoticeRow } from "./NoticeRow";
 import type {
   BrowserInteractionMode,
   BrowserState,
+  BrowserExtensionState,
   DoctorReport,
   Language,
   LauncherSnapshot,
@@ -175,6 +177,7 @@ export function App() {
             key="launcher"
             language={language}
             operation={operation}
+            refreshSnapshot={() => { void api!.snapshot().then(setSnapshot).catch(cause => setError(messageOf(cause))); }}
             setError={setError}
             snapshot={snapshot}
             updateState={updateState}
@@ -380,6 +383,7 @@ function LauncherShell({
   copy,
   language,
   operation,
+  refreshSnapshot,
   setError,
   snapshot,
   updateState,
@@ -390,6 +394,7 @@ function LauncherShell({
   copy: Copy;
   language: Language;
   operation: OperationState | null;
+  refreshSnapshot: () => void;
   setError: (error: string | null) => void;
   snapshot: LauncherSnapshot;
   updateState: (state: LauncherState) => void;
@@ -713,8 +718,11 @@ function LauncherShell({
                 copy={copy}
                 interactionMode={snapshot.state.browserInteractionMode}
                 operation={operation}
+                passkeys={snapshot.passkeys}
+                browserPartition={snapshot.browserPartition}
                 platform={snapshot.platform}
                 setError={setError}
+                onPasskeysChanged={refreshSnapshot}
               />
             ) : null}
             {surface === "setup" ? (
@@ -762,6 +770,7 @@ function LauncherShell({
                 language={language}
                 setError={setError}
                 snapshot={snapshot}
+                onExtensionsChanged={refreshSnapshot}
                 updateState={updateState}
               />
             ) : null}
@@ -869,18 +878,25 @@ function BrowserSurface({
   copy,
   interactionMode,
   operation,
+  passkeys,
+  browserPartition,
   platform,
   setError,
+  onPasskeysChanged,
 }: {
   browser: BrowserState | null;
   browserSlotRef: (node: HTMLDivElement | null) => void;
   copy: Copy;
   interactionMode: BrowserInteractionMode;
   operation: OperationState | null;
+  passkeys?: LauncherSnapshot["passkeys"];
+  browserPartition?: string;
   platform: string;
   setError: (error: string | null) => void;
+  onPasskeysChanged: () => void;
 }) {
   const [passkeyContinuationRequested, setPasskeyContinuationRequested] = useState(false);
+  const [providerBusy, setProviderBusy] = useState(false);
   const visible = browser?.visible === true;
   const manualInteraction = interactionMode === "manual";
   const passkeyAvailable = !manualInteraction
@@ -935,6 +951,16 @@ function BrowserSurface({
     if (operation?.status === "running") return;
     setError(null);
     void api!.openPasskeyLogin().catch(cause => setError(messageOf(cause)));
+  };
+  const installOnePassword = async () => {
+    if (providerBusy || operation?.status === "running") return;
+    setProviderBusy(true);
+    setError(null);
+    try {
+      await api!.installOnePassword();
+      onPasskeysChanged();
+    } catch (cause) { setError(messageOf(cause)); }
+    finally { setProviderBusy(false); }
   };
   const continuePasskeyLogin = async () => {
     if (!passkeyWaiting || passkeyContinuationRequested) return;
@@ -1040,6 +1066,14 @@ function BrowserSurface({
               : copy.passkeySignIn}
           </button>
         ) : null}
+        {!passkeys?.installed ? (
+          <button className="toolbar-text-button" disabled={providerBusy || operation?.status === "running"} onClick={() => void installOnePassword()} type="button">
+            {copy.onePasswordEnable}
+          </button>
+        ) : <span className="browser-provider-ready">
+          {browserPartition ? createElement("browser-action-list", { partition: browserPartition, alignment: "right" }) : null}
+          <span>{copy.onePasswordReady}</span>
+        </span>}
         <button className="toolbar-text-button" onClick={() => void toggle()} type="button">
           {visible ? copy.hideBrowser : copy.openChatgpt}
         </button>
@@ -1586,11 +1620,96 @@ function McpSurface({
 }
 
 
+function ExtensionSettings({
+  copy,
+  initial,
+  language,
+  onExtensionsChanged,
+  setError,
+}: {
+  copy: Copy;
+  initial: BrowserExtensionState | null | undefined;
+  language: Language;
+  onExtensionsChanged: () => void;
+  setError: (error: string | null) => void;
+}) {
+  const [extensions, setExtensions] = useState<BrowserExtensionState | null>(initial ?? null);
+  const [busy, setBusy] = useState<string | null>(null);
+  useEffect(() => { setExtensions(initial ?? null); }, [initial]);
+  useEffect(() => {
+    let active = true;
+    const refresh = () => { void api!.snapshot().then(value => {
+      if (active) setExtensions(value.extensions ?? null);
+    }).catch(() => {}); };
+    refresh();
+    const timer = setInterval(refresh, 60_000);
+    return () => { active = false; clearInterval(timer); };
+  }, []);
+  const run = async (key: string, action: () => Promise<BrowserExtensionState>) => {
+    if (busy) return;
+    setBusy(key);
+    setError(null);
+    try {
+      setExtensions(await action());
+      onExtensionsChanged();
+    } catch (cause) {
+      setError(messageOf(cause));
+    } finally {
+      setBusy(null);
+    }
+  };
+  return (
+    <>
+      <SectionHeading label={copy.extensionsTitle} spaced />
+      <p className="extension-description">{copy.extensionsDescription}</p>
+      <div className="extension-list">
+        {(extensions?.providers ?? []).map(provider => (
+          <div className="extension-row" key={provider.id}>
+            <div className="extension-details">
+              <strong>{provider.name}</strong>
+              <small>{provider.installed
+                ? `${copy.extensionReady} · ${provider.version}`
+                : provider.note ?? copy.extensionStore}</small>
+              {provider.availableVersion ? <small>{copy.extensionNewVersion} · {provider.availableVersion}</small> : null}
+            </div>
+            <div className="extension-actions">
+              <button disabled={!!busy} onClick={() => void api!.openExternal(provider.storeUrl).catch(cause => setError(messageOf(cause)))} type="button">
+                {copy.extensionStore}
+              </button>
+              {provider.installed ? (
+                <button disabled={!!busy} onClick={() => void api!.openBrowserExtension(provider.id).catch(cause => setError(messageOf(cause)))} type="button">
+                  {copy.extensionOpen}
+                </button>
+              ) : (
+                <button disabled={!!busy} onClick={() => void run(provider.id, () => api!.installBrowserExtension(provider.id))} type="button">
+                  {copy.extensionInstall}
+                </button>
+              )}
+              {provider.availableVersion ? (
+                <button disabled={!!busy} onClick={() => void run(provider.id, () => api!.updateBrowserExtension(provider.id))} type="button">
+                  {copy.extensionUpdate}
+                </button>
+              ) : null}
+            </div>
+          </div>
+        ))}
+      </div>
+      <div className="extension-check-row">
+        <button disabled={!!busy || extensions?.checking} onClick={() => void run("check", () => api!.checkBrowserExtensionUpdates())} type="button">
+          {busy === "check" || extensions?.checking ? copy.extensionChecking : copy.extensionCheck}
+        </button>
+        {extensions?.lastCheckedAt ? <small>{copy.extensionLastChecked}: {new Date(extensions.lastCheckedAt).toLocaleString(language)}</small> : null}
+      </div>
+    </>
+  );
+}
+
 function SettingsSurface({
   configureInteractionMode,
   copy,
   devProfile,
   language,
+  onExtensionsChanged,
   setError,
   snapshot,
   updateState,
@@ -1599,6 +1718,7 @@ function SettingsSurface({
   copy: Copy;
   devProfile: boolean;
   language: Language;
+  onExtensionsChanged: () => void;
   setError: (error: string | null) => void;
   snapshot: LauncherSnapshot;
   updateState: (state: LauncherState) => void;
@@ -1731,6 +1851,8 @@ function SettingsSurface({
         </SettingRow>
       </div>
 
+      <ExtensionSettings copy={copy} initial={snapshot.extensions} language={language} onExtensionsChanged={onExtensionsChanged} setError={setError} />
+
       {!devProfile && snapshot.state.codexRestartRequired ? (
         <NoticeRow icon="alert" tone="warning" action={<RestartOptions language={language} />}>
           {copy.restartCodex}
@@ -1775,6 +1897,7 @@ function SettingsSurface({
             {devProfile ? `${copy.devBadge} · ${snapshot.profilePaths.coreHome} · ` : ""}
             {platformLabel(snapshot.platform)} · v{snapshot.version}
           </small>
+          {snapshot.nativeRuntime ? <small>Electron {snapshot.nativeRuntime.version} · WebAuthn build {snapshot.nativeRuntime.electronCommit.slice(0, 12)}</small> : null}
         </span>
       </div>
     </ContentSurface>

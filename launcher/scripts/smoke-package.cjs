@@ -5,7 +5,8 @@ const { spawnSync } = require("node:child_process");
 const { validateRuntimeBundle } = require("../electron/runtime-install.cjs");
 
 const launcherRoot = path.resolve(__dirname, "..");
-const artifactsDirectory = path.join(launcherRoot, "artifacts");
+const artifactsDirectory = process.env.CODEX_WEB_GPT_ARTIFACTS_DIR || path.join(launcherRoot, "artifacts");
+if (!path.isAbsolute(artifactsDirectory)) throw new Error("CODEX_WEB_GPT_ARTIFACTS_DIR must be absolute");
 const launcherManifest = JSON.parse(
   fs.readFileSync(path.join(launcherRoot, "package.json"), "utf8"),
 );
@@ -112,6 +113,7 @@ try {
   if (marker.ok !== true
     || marker.packaged !== true
     || marker.runtimeVerified !== true
+    || marker.nativeRuntimeVerified !== true
     || marker.diagnosticsVerified !== true
     || marker.version !== expectedVersion
     || marker.platform !== process.platform) {

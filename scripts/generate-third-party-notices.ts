@@ -17,6 +17,8 @@ const destinationArgument = argumentsList.find(argument => argument !== "--inclu
 const visited = new Map<string, { directory: string; manifest: PackageJson }>();
 const bundledLicenseOverrides = new Map([
   ["tiktoken@1.0.22", join(root, "LICENSES", "tiktoken-MIT.txt")],
+  ["electron-chrome-web-store@0.13.0", join(root, "LICENSES", "electron-chrome-web-store-MIT.txt")],
+  ["emoji-regex@8.0.0", join(root, "LICENSES", "emoji-regex-8.0.0-MIT.txt")],
 ]);
 
 function packageDirectory(name: string, from: string): string | undefined {
@@ -54,7 +56,7 @@ if (includeLauncher) {
 
 function licenseFiles(directory: string): string[] {
   return readdirSync(directory)
-    .filter(name => /^(licen[cs]e|copying|notice)(?:\..*)?$/i.test(name))
+    .filter(name => /^(licen[cs]e|copying|notice)(?:[-_.].*)?$/i.test(name))
     .filter(name => statSync(join(directory, name)).isFile())
     .sort();
 }

@@ -23,6 +23,7 @@ export interface LauncherState {
   sidebarOpen: boolean;
   sidebarWidth: number;
   browserSmokePassed?: boolean;
+  chatGptLocallySignedOut: boolean;
   browserSmokeVersion?: string | null;
   coreSetupComplete?: boolean;
   codexCatalogVerified?: boolean;
@@ -48,6 +49,22 @@ export interface BrowserState {
   activeTabId: string;
   maxTabs: number;
   tabs: BrowserTabState[];
+}
+
+export interface BrowserExtensionProvider {
+  id: string;
+  name: string;
+  storeUrl: string;
+  note: string | null;
+  installed: boolean;
+  version: string | null;
+  availableVersion: string | null;
+}
+
+export interface BrowserExtensionState {
+  providers: BrowserExtensionProvider[];
+  checking: boolean;
+  lastCheckedAt: string | null;
 }
 
 export interface BrowserTabState {
@@ -89,6 +106,11 @@ export interface LauncherSnapshot {
   };
   state: LauncherState;
   browser: BrowserState | null;
+  passkeys?: { installed: boolean; id: string; version?: string } | null;
+  extensions?: BrowserExtensionState | null;
+  browserPartition?: string;
+  nativeWebAuthn?: boolean;
+  nativeRuntime?: { patched: true; version: string; electronCommit: string; patchSha256: string; chromiumPatchSha256: string } | null;
   connectorName: string;
   connectorNames: Record<BrowserInteractionMode, string>;
   mcpCredentialsConfigured: boolean;
@@ -134,6 +156,11 @@ export interface LauncherApi {
   confirmManualSent(tabId: string): Promise<BrowserState>;
   openLogin(): Promise<BrowserState>;
   openPasskeyLogin(): Promise<BrowserState>;
+  installOnePassword(): Promise<{ installed: boolean; id: string; version?: string }>;
+  installBrowserExtension(id: string): Promise<BrowserExtensionState>;
+  openBrowserExtension(id: string): Promise<boolean>;
+  checkBrowserExtensionUpdates(): Promise<BrowserExtensionState>;
+  updateBrowserExtension(id: string): Promise<BrowserExtensionState>;
   continuePasskeyLogin(): Promise<boolean>;
   logoutChatGpt(): Promise<{ browser: BrowserState; state: LauncherState }>;
   dismissSessionReminder(): Promise<LauncherState>;

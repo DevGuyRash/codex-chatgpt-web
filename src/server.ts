@@ -27,7 +27,8 @@ import { providerConfig } from "./config";
 import { AsyncEventQueue } from "./event-queue";
 import { readJsonRequestBody } from "./http-body";
 import { httpStatusFromTerminalError } from "./lib/errors";
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
+import { DiagnosticError, problemFor } from "./diagnostics/problems";
 import { augmentNativeModelCatalog } from "./model-catalog";
 import { profileCatalogRefreshCheck } from "./profile-model-catalog";
 import type { InterruptCleanupClaims } from "./interrupt-cleanup";
@@ -42,7 +43,9 @@ import {
   requireChatGptWebModelRoute,
   type ChatGptWebModelRoute,
 } from "./chatgpt-web-models";
-import { forwardNativeCodexRequest, type NativeFetch } from "./native-passthrough";
+import { forwardNativeCodexRequest, type NativeFetch, type NativeImageEndpoint } from "./native-passthrough";
+import { fetchNativeCodex } from "./native-network";
+import { isChatGptCompactionTurn } from "./responses/native-metadata";
 import {
   buildCompactV1Output,
   COMPACT_PROMPT,
@@ -56,7 +59,7 @@ import type { CodexProviderConfig } from "./types";
 import type { ProviderAdapter } from "./adapters/base";
 import { VERSION } from "./version";
 
-type HttpTrackedEndpoint = "models" | "responses" | "compact" | "search" | "unspecified";
+type HttpTrackedEndpoint = "models" | "responses" | "compact" | "search" | "unspecified" | NativeImageEndpoint;
 
 export interface NativeCodexTurnIdentity {
   threadId: string;
@@ -415,23 +418,40 @@ export function routeChatGptWebRequest(parsed: CodexParsedRequest, config: AppCo
   return route;
 }
 
+interface ModelCatalogFailure {
+  stage: "config" | "request" | "transport" | "upstream" | "catalog";
+  code?: string;
+}
+
+function modelCatalogFailure(stage: ModelCatalogFailure["stage"], error: unknown): ModelCatalogFailure {
+  const code = error && typeof error === "object" && "code" in error ? error.code : undefined;
+  return { stage, ...(typeof code === "string" && /^[A-Za-z0-9_.-]{1,64}$/.test(code) ? { code } : {}) };
+}
+
 export async function modelsRequest(
   req: Request,
   config: AppConfig,
   fetchUpstream?: NativeFetch,
   contextOverride?: () => CodexModelContextOverride | undefined,
+  onFailure?: (failure: ModelCatalogFailure) => void,
 ): Promise<Response> {
   let upstream: Response;
+  let sent = false;
   try {
-    upstream = await forwardNativeCodexRequest(req, "models", fetchUpstream);
+    upstream = await forwardNativeCodexRequest(req, "models", input => {
+      sent = true;
+      return (fetchUpstream ?? fetchNativeCodex)(input);
+    });
   } catch (error) {
+    onFailure?.(modelCatalogFailure(sent ? "transport" : "request", error));
     return formatErrorResponse(502, "upstream_error", error instanceof Error ? error.message : String(error));
   }
-  if (!upstream.ok) return upstream;
+  if (!upstream.ok) { onFailure?.({ stage: "upstream" }); return upstream; }
   let catalog: Record<string, unknown>;
   try {
     catalog = augmentNativeModelCatalog(await upstream.json(), config, contextOverride?.());
   } catch (error) {
+    onFailure?.(modelCatalogFailure("catalog", error));
     return formatErrorResponse(502, "invalid_response_error", error instanceof Error ? error.message : String(error));
   }
   const body = JSON.stringify(catalog);
@@ -450,6 +470,24 @@ export async function nativeSearchRequest(
   try {
     return await forwardNativeCodexRequest(req, "alpha/search", fetchUpstream);
   } catch (error) {
+    return formatErrorResponse(502, "upstream_error", error instanceof Error ? error.message : String(error));
+  }
+}
+
+async function nativeImagesRequest(
+  req: Request,
+  endpoint: NativeImageEndpoint,
+  fetchUpstream?: NativeFetch,
+): Promise<Response> {
+  if (campaignGenerationRestricted()) {
+    return formatErrorResponse(403, "permission_error", "Native image generation is disabled for this scoped non-Pro campaign");
+  }
+  const authorization = req.headers.get("authorization") ?? "";
+  if (!authorization.startsWith("Bearer ") || authorization.length <= "Bearer ".length) {
+    return formatErrorResponse(401, "authentication_error", "Native image requests require incoming Codex Bearer authorization");
+  }
+  try { return await forwardNativeCodexRequest(req, endpoint, fetchUpstream); }
+  catch (error) {
     return formatErrorResponse(502, "upstream_error", error instanceof Error ? error.message : String(error));
   }
 }
@@ -539,6 +577,7 @@ export async function responseRequest(
   }
 
   const compaction = parsed._compactionRequest === true;
+  const compactionTurn = isChatGptCompactionTurn(parsed);
   const rememberCompletedResponse = (response: Record<string, unknown>): void => {
     if (!compaction) {
       if (options.rememberState !== false) rememberResponseState(parsed._rawBody, response, { force: true });
@@ -561,21 +600,23 @@ export async function responseRequest(
     });
     rememberCompactionContinuation(parsed, identity, [source, v1Source], summary);
   };
-  if (compaction && route.backendModel === CHATGPT_WEB_LUNA_BACKEND_MODEL) {
+  if (compactionTurn && route.backendModel === CHATGPT_WEB_LUNA_BACKEND_MODEL) {
     return formatErrorResponse(
       409,
       "invalid_request_error",
       "ChatGPT Web Luna uses a rolling checkpoint on every completed browser turn; separate Codex compaction is disabled for this route.",
     );
   }
-  if (compaction) {
+  if (compactionTurn) {
     // History compaction is a dedicated summarization turn. It must never bind the active Codex
     // tool bridge or continue an in-flight MCP round; the returned summary becomes the next turn's
     // replacement history through the Responses compaction contract.
     delete parsed.context.tools;
     delete parsed.options.toolChoice;
     delete parsed.options.parallelToolCalls;
-    parsed.context.messages.push({ role: "user", content: COMPACT_PROMPT, timestamp: Date.now() });
+    // Local memento already carries Codex's own summarization instruction. Only remote
+    // compaction needs this bridge-authored prompt and an encrypted compaction output item.
+    if (compaction) parsed.context.messages.push({ role: "user", content: COMPACT_PROMPT, timestamp: Date.now() });
   }
 
   const provider = providerConfig(config);
@@ -839,6 +880,17 @@ export function startServer(
   let shutdownPromise: Promise<void> | undefined;
   let successfulModelCatalogRequests = 0;
   let lastSuccessfulModelCatalogRequestAt: string | null = null;
+  let modelCatalogRequests = 0;
+  let lastModelCatalogResult: { request: number; at: string; status: number; failure?: ModelCatalogFailure } | null = null;
+  const cancellations = new Map<string, {
+    id: string;
+    status: "accepted" | "completed" | "failed";
+    startedAt: number;
+    cancelledBrokerTurns: number;
+    cancelledBrowserTurns?: number;
+    cancelledCompactionRuns?: number;
+    failureCode?: string;
+  }>();
   const httpTurns = new HttpTurnCounter(undefined, dependencies.cleanupClaims, identity => Promise.all([
     chatGptTurnSessions.physicalSettlementForNativeTurn(identity.threadId, identity.turnId),
     structuredCompactionSettlementForNativeTurn(identity.threadId, identity.turnId),
@@ -872,6 +924,8 @@ export function startServer(
           accepting_turns: !draining && profileCatalog?.ready !== false,
           successful_model_catalog_requests: successfulModelCatalogRequests,
           last_successful_model_catalog_request_at: lastSuccessfulModelCatalogRequestAt,
+          model_catalog_requests: modelCatalogRequests,
+          last_model_catalog_result: lastModelCatalogResult,
           profile_model_catalog: profileCatalog,
           ...activity(),
         });
@@ -882,7 +936,8 @@ export function startServer(
         turnBroker?.setExternalOwnersAccepted(!draining);
         return Response.json({ status: "ok", accepting_turns: !draining, ...activity() });
       }
-      if (req.method === "POST" && url.pathname === "/admin/cancel-turn") {
+      if (req.method === "POST" && (url.pathname === "/admin/cancel-turn"
+        || url.pathname === "/admin/cancel-status")) {
         if (!controlAuthorized(req)) return new Response("Unauthorized", { status: 401 });
         let traceId: string;
         try {
@@ -895,23 +950,62 @@ export function startServer(
             { status: 400 },
           );
         }
-        const reason = chatGptBrowserTabClosedError();
-        // Revoke the owner first. This prevents a compaction callback that observes its retained
-        // source being cancelled below from starting a fresh fallback during operator shutdown.
-        const compactionCancellation = cancelStructuredCompactionTrace(traceId, reason);
-        const browserCancellation = chatGptTurnSessions.cancelTrace(traceId, reason);
-        const [cancelledBrowserTurns, cancelledCompactionRuns] = await Promise.all([
-          browserCancellation,
-          compactionCancellation,
-        ]);
-        const cancelledBrokerTurns = turnBroker?.revokeTrace(traceId, reason) ?? 0;
+        let record = cancellations.get(traceId);
+        if (url.pathname === "/admin/cancel-status") {
+          return Response.json(record ? {
+            status: record.status,
+            trace_id: traceId,
+            cancellation_id: record.id,
+            cancelled_broker_turns: record.cancelledBrokerTurns,
+            ...(record.cancelledBrowserTurns === undefined ? {} : { cancelled_browser_turns: record.cancelledBrowserTurns }),
+            ...(record.cancelledCompactionRuns === undefined ? {} : { cancelled_compaction_runs: record.cancelledCompactionRuns }),
+            ...(record.failureCode ? { failure_code: record.failureCode } : {}),
+          } : { status: "missing", trace_id: traceId });
+        }
+        if (!record) {
+          for (const [key, previous] of cancellations) {
+            if (cancellations.size <= 256) break;
+            if (previous.status !== "accepted" && Date.now() - previous.startedAt > 10 * 60_000) cancellations.delete(key);
+          }
+          record = { id: randomUUID(), status: "accepted", startedAt: Date.now(), cancelledBrokerTurns: 0 };
+          cancellations.set(traceId, record);
+          const activeRecord = record;
+          const operation = runtimeDiagnostics()?.begin("turn.cancel", { traceId }, null);
+          try {
+            const reason = chatGptBrowserTabClosedError();
+            // Both owners receive their exact cancellation before the acknowledgement is sent.
+            // Settlement continues under this process-retained receipt; another request reads
+            // its status and never invokes cancellation a second time.
+            const compactionCancellation = cancelStructuredCompactionTrace(traceId, reason);
+            const browserCancellation = chatGptTurnSessions.cancelTrace(traceId, reason);
+            activeRecord.cancelledBrokerTurns = turnBroker?.revokeTrace(traceId, reason) ?? 0;
+            void Promise.all([browserCancellation, compactionCancellation]).then(([browserTurns, compactionRuns]) => {
+              activeRecord.cancelledBrowserTurns = browserTurns;
+              activeRecord.cancelledCompactionRuns = compactionRuns;
+              if (browserTurns + compactionRuns + activeRecord.cancelledBrokerTurns === 0) {
+                throw new DiagnosticError({ code: "cancel_target_absent", message: "No active exact turn acknowledged cancellation", origin: "runtime", stage: "browser.cancel", retryable: false });
+              }
+              activeRecord.status = "completed";
+              operation?.end("succeeded");
+            }).catch(error => {
+              activeRecord.status = "failed";
+              activeRecord.failureCode = problemFor(error).code;
+              operation?.problem(error);
+              operation?.end("failed");
+            });
+          } catch (error) {
+            activeRecord.status = "failed";
+            activeRecord.failureCode = problemFor(error).code;
+            operation?.problem(error);
+            operation?.end("failed");
+          }
+        }
         return Response.json({
-          status: "ok",
+          status: record.status,
           trace_id: traceId,
-          cancelled_browser_turns: cancelledBrowserTurns,
-          cancelled_broker_turns: cancelledBrokerTurns,
-          cancelled_compaction_runs: cancelledCompactionRuns,
-          ...activity(),
+          cancellation_id: record.id,
+          cancelled_broker_turns: record.cancelledBrokerTurns,
+          ...(record.failureCode ? { failure_code: record.failureCode } : {}),
         });
       }
       if (req.method === "POST" && url.pathname === "/admin/interrupt-turn") {
@@ -1018,6 +1112,7 @@ export function startServer(
           );
         }
         return httpTurns.track(async signal => {
+          const request = ++modelCatalogRequests;
           let catalogConfig: AppConfig;
           try {
             catalogConfig = {
@@ -1025,18 +1120,23 @@ export function startServer(
               subagentProtocol: readCodexSubagentProtocol(config.subagentProtocol, config.integrationTarget),
             };
           } catch (error) {
+            const failure = modelCatalogFailure("config", error);
+            lastModelCatalogResult = { request, at: new Date().toISOString(), status: 500, failure };
             return formatErrorResponse(
               500,
               "server_error",
               `Could not resolve the installed subagent protocol: ${error instanceof Error ? error.message : String(error)}`,
             );
           }
+          let failure: ModelCatalogFailure | undefined;
           const response = await modelsRequest(
             new Request(req, { signal }),
             catalogConfig,
             dependencies.fetchUpstream,
             () => readCodexModelContextOverride(config.integrationTarget),
+            observed => { failure = observed; },
           );
+          lastModelCatalogResult = { request, at: new Date().toISOString(), status: response.status, ...(failure ? { failure } : {}) };
           if (response.ok) {
             successfulModelCatalogRequests += 1;
             lastSuccessfulModelCatalogRequestAt = new Date().toISOString();
@@ -1086,6 +1186,17 @@ export function startServer(
           req.signal,
           process.platform,
           "search",
+        );
+      }
+      if (req.method === "POST" && (url.pathname === "/v1/images/generations" || url.pathname === "/v1/images/edits")) {
+        if (draining) return formatErrorResponse(503, "server_error", "codex-chatgpt-web is draining for a requested service operation");
+        const endpoint: NativeImageEndpoint = url.pathname === "/v1/images/generations"
+          ? "images/generations" : "images/edits";
+        return httpTurns.track(
+          signal => nativeImagesRequest(new Request(req, { signal }), endpoint, dependencies.fetchUpstream),
+          req.signal,
+          process.platform,
+          endpoint,
         );
       }
       return new Response("Not found", { status: 404 });

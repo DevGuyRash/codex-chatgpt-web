@@ -14,10 +14,15 @@ const {
   nativeImage,
   nativeTheme,
   screen,
+  session,
   shell,
   Tray,
 } = require("electron");
 const { BrowserHost, navigationErrorForLog } = require("./browser-host.cjs");
+const { BrowserExtensions } = require("./browser-extensions.cjs");
+const { BROWSER_EXTENSION_CATALOG } = require("./browser-extension-catalog.cjs");
+const { ElectronChromeExtensions } = require("electron-chrome-extensions");
+const { WebAuthnPrompts } = require("./webauthn-prompts.cjs");
 const { BrowserControlServer } = require("./control-server.cjs");
 const { getAutostart, setAutostart } = require("./autostart.cjs");
 const {
@@ -56,6 +61,7 @@ const {
 const isDev = Boolean(process.env.VITE_DEV_SERVER_URL);
 const SOURCE_ROOT = path.resolve(__dirname, "../..");
 const LAUNCHER_PROFILE = resolveLauncherProfile({ appData: app.getPath("appData") });
+const PATCHED_WEB_AUTHN = require("../package.json").codexWebGptElectronPatch === "webauthn-v44.4.4";
 const IS_DEV_PROFILE = LAUNCHER_PROFILE.kind === DEVELOPMENT_PROFILE;
 const CORE_HOME = LAUNCHER_PROFILE.coreHome;
 const IS_CODEX_PROFILE = LAUNCHER_PROFILE.integrationTarget?.kind === "profile";
@@ -70,7 +76,8 @@ const X_URL = "https://x.com/miu21590";
 const CONNECTORS_URL = "https://chatgpt.com/#settings/Plugins";
 const TUNNELS_URL = "https://platform.openai.com/settings/organization/tunnels";
 const KEYS_URL = "https://platform.openai.com/settings/organization/api-keys";
-const ALLOWED_EXTERNAL_URLS = new Set([GITHUB_URL, X_URL, CONNECTORS_URL, TUNNELS_URL, KEYS_URL]);
+const ALLOWED_EXTERNAL_URLS = new Set([GITHUB_URL, X_URL, CONNECTORS_URL, TUNNELS_URL, KEYS_URL,
+  ...BROWSER_EXTENSION_CATALOG.map(provider => provider.storeUrl)]);
 const PACKAGED_RENDERER_URL = pathToFileURL(path.join(__dirname, "..", "dist", "index.html")).href;
 const APP_ICON_PATH = path.join(__dirname, "..", "assets", "icon.png");
 
@@ -93,6 +100,9 @@ let mainWindow = null;
 let mainWindowReadyToShow = false;
 let mainWindowShowRequested = false;
 let browserHost = null;
+let browserExtensions = null;
+let webAuthnPrompts = null;
+let nativeRuntimeIdentity = null;
 let runtimeHost = null;
 let browserControl = null;
 let runtimeSupervisor = null;
@@ -110,6 +120,42 @@ const configurationReview = new ConfigurationReview({ publish: preview => {
   if (preview) browserHost?.setSurfaceActive(false);
   send("launcher:configuration-preview", preview);
 } });
+
+function fileSha256(file) {
+  const hash = createHash("sha256");
+  const descriptor = fs.openSync(file, "r");
+  const chunk = Buffer.allocUnsafe(1024 * 1024);
+  try {
+    for (;;) {
+      const bytes = fs.readSync(descriptor, chunk, 0, chunk.length, null);
+      if (bytes === 0) break;
+      hash.update(chunk.subarray(0, bytes));
+    }
+  } finally { fs.closeSync(descriptor); }
+  return hash.digest("hex");
+}
+
+function verifyNativeRuntimeIdentity() {
+  if (!PATCHED_WEB_AUTHN) return null;
+  const recordPath = app.isPackaged
+    ? path.join(__dirname, "..", "build", "webauthn-runtime.json")
+    : process.env.CODEX_WEB_GPT_ELECTRON_BUILD_RECORD;
+  if (!recordPath || !fs.statSync(recordPath, { throwIfNoEntry: false })?.isFile()) {
+    throw new Error("The reviewed WebAuthn runtime identity record is missing");
+  }
+  const record = JSON.parse(fs.readFileSync(recordPath, "utf8"));
+  const patchIdentity = session.defaultSession.getCodexWebGptWebAuthnPatch?.();
+  if (record.version !== 1 || !/^[a-f0-9]{40}$/.test(record.electronCommit)
+    || !/^[a-f0-9]{64}$/.test(record.patchSha256)
+    || !/^[a-f0-9]{64}$/.test(record.chromiumPatchSha256)
+    || !/^[a-f0-9]{64}$/.test(record.binarySha256)
+    || patchIdentity !== "webauthn-v44.4.4"
+    || (process.platform === "linux" && fileSha256(process.execPath) !== record.binarySha256)) {
+    throw new Error("The launcher is not running the reviewed WebAuthn-enabled Electron binary");
+  }
+  return { patched: true, version: process.versions.electron, electronCommit: record.electronCommit,
+    patchSha256: record.patchSha256, chromiumPatchSha256: record.chromiumPatchSha256 };
+}
 
 function findFreePort() {
   return new Promise((resolve, reject) => {
@@ -143,6 +189,7 @@ function stopCatalogVerificationMonitor() {
 
 function startCatalogVerificationMonitor({ logger, stateStore }) {
   stopCatalogVerificationMonitor();
+  let reportedFailure = null;
   const check = async () => {
     const current = stateStore.read();
     if (current.coreSetupComplete !== true || (current.codexCatalogVerified === true && current.codexRestartRequired !== true)) {
@@ -164,7 +211,24 @@ function startCatalogVerificationMonitor({ logger, stateStore }) {
         return;
       }
       if (!Number.isInteger(health?.successful_model_catalog_requests)
-        || health.successful_model_catalog_requests < 1) return;
+        || health.successful_model_catalog_requests < 1) {
+        const result = health?.last_model_catalog_result;
+        if (!result || !Number.isInteger(result.status) || result.status < 400 || result.status > 599
+          || !Number.isInteger(result.request) || result.request < 1 || lastOperation?.status === "running") return;
+        const identity = `${health.pid}:${result.request}:${result.at}`;
+        if (identity === reportedFailure) return;
+        reportedFailure = identity;
+        const reason = typeof result.failure?.code === "string" && /^[A-Za-z0-9_.-]{1,64}$/.test(result.failure.code)
+          ? result.failure.code
+          : ["config", "request", "transport", "upstream", "catalog"].includes(result.failure?.stage) ? result.failure.stage : "catalog";
+        const restart = current.codexRestartRequired === true ? await codexRestartController?.restartEvidence() : null;
+        const restartVerified = current.codexRestartRequired !== true || (restart && Date.parse(result.at) >= restart.after);
+        stateStore.update({ codexCatalogVerified: false, codexRestartRequired: !restartVerified });
+        logger.warn("codex.model_catalog_failed", { status: result.status, reason, request: result.request });
+        publishOperation({ name: "catalog-verification", status: "failed", message: nativeCopyFor(current.language).catalogFailure
+          .replace("{status}", String(result.status)).replace("{reason}", reason) });
+        return;
+      }
       const restart = current.codexRestartRequired === true ? await codexRestartController?.restartEvidence() : null;
       const restartVerified = current.codexRestartRequired !== true || (restart && Date.parse(health.last_successful_model_catalog_request_at) >= restart.after);
       if (current.codexCatalogVerified === true && current.codexRestartRequired === !restartVerified) return;
@@ -231,6 +295,7 @@ const NATIVE_COPY = Object.freeze({
     removeTitle: "Remove Codex Web GPT",
     removeMessage: "Remove the ChatGPT Web models from Codex and restore the previous model route?",
     removeDetail: "The launcher's ChatGPT login profile will be preserved. Codex must be restarted once.",
+    catalogFailure: "Codex reached the launcher, but loading its model catalog failed (HTTP {status}; {reason}). Check Activity for details.",
   }),
   "zh-CN": Object.freeze({
     openLauncher: "打开 Codex Web GPT",
@@ -241,6 +306,7 @@ const NATIVE_COPY = Object.freeze({
     removeTitle: "移除 Codex Web GPT",
     removeMessage: "从 Codex 中移除 ChatGPT Web 模型并恢复此前的模型路由？",
     removeDetail: "启动器中的 ChatGPT 登录 profile 会保留。Codex 需要重启一次。",
+    catalogFailure: "Codex 已连接到启动器，但模型列表加载失败（HTTP {status}；{reason}）。请查看“活动”了解详情。",
   }),
   ja: Object.freeze({
     openLauncher: "Codex Web GPT を開く",
@@ -251,6 +317,7 @@ const NATIVE_COPY = Object.freeze({
     removeTitle: "Codex Web GPT を削除",
     removeMessage: "Codex から ChatGPT Web モデルを削除し、以前のモデルルートを復元しますか？",
     removeDetail: "ランチャーの ChatGPT ログインプロファイルは保持されます。Codex を一度再起動する必要があります。",
+    catalogFailure: "Codex はランチャーに接続しましたが、モデル一覧を読み込めませんでした（HTTP {status}、{reason}）。「アクティビティ」で詳細を確認してください。",
   }),
 });
 
@@ -469,6 +536,11 @@ function registerIpc({ logger, stateStore }) {
     },
     state: stateStore.read(),
     browser: browserHost?.snapshot() ?? null,
+    passkeys: browserExtensions?.status() ?? null,
+    extensions: browserExtensions?.catalogStatus() ?? null,
+    browserPartition: LAUNCHER_PROFILE.browserPartition,
+    nativeWebAuthn: nativeRuntimeIdentity?.patched === true,
+    nativeRuntime: nativeRuntimeIdentity,
     connectorName: runtimeHost.browserConnectorName(),
     connectorNames: {
       automatic: runtimeHost.setupConnectorName(),
@@ -613,6 +685,11 @@ function registerIpc({ logger, stateStore }) {
     return browser;
   });
   handle("launcher:browser-passkey-login-continue", () => runtimeHost.continuePasskeyLogin());
+  handle("launcher:browser-install-onepassword", () => browserExtensions.installOnePassword());
+  handle("launcher:browser-extension-install", (_event, id) => browserExtensions.install(id));
+  handle("launcher:browser-extension-open", (_event, id) => browserExtensions.open(id));
+  handle("launcher:browser-extension-check-updates", () => browserExtensions.checkUpdates());
+  handle("launcher:browser-extension-update", (_event, id) => browserExtensions.update(id));
   handle("launcher:browser-logout", async () => {
     const browser = await browserHost.logout();
     const state = stateStore.update({ sessionRefreshReminderAt: nextSessionRefreshReminderAt() });
@@ -999,7 +1076,9 @@ async function requestQuit({ idleOnly = false, beforeClose } = {}) {
   }
   shutdownInProgress = true;
   try {
-    const activeOperation = runtimeHost?.currentOperation() || browserHost?.currentOperation();
+    const browserOperation = browserHost?.currentOperation();
+    const activeOperation = runtimeHost?.currentOperation()
+      || (browserOperation === "ChatGPT login" ? null : browserOperation);
     if (activeOperation) {
       throw new Error(`Wait for ${activeOperation} to finish before quitting Codex Web GPT`);
     }
@@ -1008,7 +1087,9 @@ async function requestQuit({ idleOnly = false, beforeClose } = {}) {
     quitting = true;
     await browserHost?.persistSession();
     await beforeClose?.();
+    webAuthnPrompts?.destroy();
     browserHost?.destroy();
+    browserExtensions?.destroy();
     await browserControl?.close();
     await diagnosticsLogger?.close();
     exitCommitted = true;
@@ -1059,6 +1140,8 @@ async function start() {
   app.commandLine.appendSwitch("remote-debugging-port", String(cdpPort));
 
   await app.whenReady();
+  nativeRuntimeIdentity = verifyNativeRuntimeIdentity();
+  ElectronChromeExtensions.handleCRXProtocol(session.defaultSession);
   if (runtimeRegistry) runtimeRegistry.assertBaseOwner(LAUNCHER_PROFILE.integrationTarget);
 
   const targetReservation = IS_CODEX_PROFILE ? await runtimeRegistry.ensure(LAUNCHER_PROFILE.integrationTarget) : null;
@@ -1107,11 +1190,30 @@ async function start() {
     windowStatePath: path.join(app.getPath("userData"), "window-state.json"),
     startHidden,
   });
+  browserExtensions = new BrowserExtensions({
+    browserSession: session.fromPartition(LAUNCHER_PROFILE.browserPartition),
+    userData: LAUNCHER_PROFILE.userData,
+    parent: mainWindow,
+    logger,
+  });
+  await browserExtensions.restore().catch(error => {
+    logger.warn("browser.extension_restore_failed", { code: typeof error?.code === "string" ? error.code : "extension_restore_failed" });
+  });
+  webAuthnPrompts = new WebAuthnPrompts({
+    browserSession: session.fromPartition(LAUNCHER_PROFILE.browserPartition),
+    parent: mainWindow,
+    browserExtensions,
+    ownsWebContents: contents => browserHost?.ownsWebContents(contents) === true
+      || browserExtensions?.ownsWebContents(contents) === true,
+    logger,
+    publishOperation,
+  });
   browserControl = await new BrowserControlServer({
     logger,
     getBrowserHost: () => browserHost,
     getPreferences: () => stateStore.read(),
     shutdownIdle: beforeClose => requestQuit({ idleOnly: true, beforeClose }),
+    resolveProxy: url => session.fromPartition(LAUNCHER_PROFILE.browserPartition).resolveProxy(url),
   }).start();
   runtimeSupervisor = new RuntimeSupervisor({
     app,
@@ -1157,9 +1259,14 @@ async function start() {
     helper: { executable: process.execPath, script: BROWSER_HELPER_PATH },
     logger,
     loginWithPasskey: () => runtimeHost.capturePasskeyLogin(),
+    browserExtensions,
+    hasActiveWebAuthnRequest: () => webAuthnPrompts?.currentOperation() != null,
+    getLocallySignedOut: () => stateStore.read().chatGptLocallySignedOut === true,
+    setLocallySignedOut: value => stateStore.update({ chatGptLocallySignedOut: value === true }),
     partition: LAUNCHER_PROFILE.browserPartition,
     profile: LAUNCHER_PROFILE.kind,
     publishState: (state) => send("launcher:browser-state", state),
+    publishOperation,
     showWindow: showMainWindow,
     getBrowserInteractionMode: () => stateStore.read().browserInteractionMode,
   });
@@ -1169,7 +1276,7 @@ async function start() {
     currentVersion: app.getVersion(),
     platform: process.platform,
     arch: process.arch,
-    packaged: app.isPackaged && !IS_DEV_PROFILE,
+    packaged: app.isPackaged && !IS_DEV_PROFILE && !PATCHED_WEB_AUTHN,
     executablePath: process.execPath,
     runtimeExecutable: updaterRuntimeRoot
       ? runtimeBundlePaths(updaterRuntimeRoot, process.platform).executable
@@ -1193,6 +1300,9 @@ async function start() {
   await loadRenderer(mainWindow);
   if (!launcherSmokeTest) void updateController.checkOnce();
   if (launcherSmokeTest) {
+    if (nativeRuntimeIdentity?.patched !== true) {
+      throw new Error("Packaged smoke test requires the reviewed WebAuthn-enabled Electron runtime");
+    }
     const smokeRuntimeRoot = runtimeRootProvider();
     if (app.isPackaged && !smokeRuntimeRoot) {
       throw new Error("Packaged launcher smoke test could not install its durable runtime");
@@ -1230,10 +1340,13 @@ async function start() {
       version: app.getVersion(),
       platform: process.platform,
       packaged: app.isPackaged,
+      nativeRuntimeVerified: nativeRuntimeIdentity?.patched === true,
       runtimeVerified: true,
       diagnosticsVerified: true,
     })}\n`);
+    webAuthnPrompts.destroy();
     browserHost.destroy();
+    browserExtensions.destroy();
     await browserControl.close();
     await logger.close();
     mainWindow.destroy();

@@ -412,7 +412,7 @@ input.on("line", line => {
     if (prepared.multipart !== undefined) {
       const multipart = prepared.multipart;
       if (!multipart || !Array.isArray(multipart.parts)
-        || (multipart.parts.length !== 2 && multipart.parts.length !== 3)
+        || !isChatGptWebMultipartPartCount(multipart.parts.length)
         || multipart.parts.some(part => typeof part !== "string")
         || typeof multipart.commit !== "string") {
         writeProtocol({ type: "error", id: message.id, message: "Browser helper multipart prompt is invalid" });
@@ -526,3 +526,4 @@ process.once("SIGTERM", () => {
 
 // Advertise the optional frames this helper understands so the daemon can negotiate them explicitly.
 writeProtocol({ type: "ready", features: ["progress", "tool-boundary-ack", "completion-fence", "multipart-stage-ack"] });
+import { isChatGptWebMultipartPartCount } from "./prompt";

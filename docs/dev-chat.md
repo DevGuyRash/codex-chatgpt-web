@@ -8,6 +8,7 @@ usable.
 ## Prerequisites
 
 - Use the repository-pinned Bun version.
+- Build the WebAuthn-enabled Electron runtime in [native/electron](../native/electron/README.md) and select its packaged launcher; source `bun run dev` also requires that reviewed binary.
 - Install a launcher built from the same working tree.
 - Start the isolated launcher with `bun run dev:launcher`.
 - It skips the normal marketing onboarding and opens the setup surface directly. Sign in inside the
@@ -90,42 +91,13 @@ transaction; it is not a launcher-only preference. Production setup also rewrite
 Codex model catalog with 3x context and auto-compaction thresholds and asks you to restart Codex.
 The DEV CLI reads the same setting from its isolated runtime configuration on each command.
 
-When enabled, a normal turn stays on the original single-message path while its estimated input
-is below the selected mode's existing auto-compaction threshold. At the first threshold it uses two
-messages; at twice that threshold it uses three messages. The final context part also commits the
-transaction and starts the task, so there is no extra request. The existing DEV compaction threshold
-remains three times the selected mode's base limit.
+When enabled, a normal turn stays on the original single-message path while its estimated input is below the selected mode's existing auto-compaction threshold. It uses two parts when that fits the complete records and measured message limits, or six when more parts are needed. Compaction uses six parts. The final context part also commits the transaction and starts the task, so there is no extra request. The existing DEV compaction threshold remains three times the selected mode's base limit.
 
-Each stage contains complete semantic records, never a raw JSON string cut in the middle. The model
-must return an exact transaction-bound SHA-256 acknowledgement before the next part is sent.
-Images, the MCP connector, and the private `turn_token` are attached only to the final part.
-In Full/MCP mode, compaction does not replay the expanded history into an unrelated summarizer. If
-the source Web response is still waiting on a tool boundary, its canonical tool results finish that
-response first without a compaction suffix. If those results are enough for an ordinary final
-answer, that committed answer remains owned by the logical Responses turn across the physical chat
-retirement. If the Web model instead requests another tool, the broker blocks that new execution
-and tells the response to stop; the compacted continuation then resumes the unfinished work. The
-exact retained chat receives one strict checkpoint message with only the one-shot MCP control
-capability and no ordinary work capability. The checkpoint never rides in the tail of a potentially
-huge tool result, and its wait is capped at five minutes independently of the normal turn timeout.
-After the structured handoff is accepted, the bridge explicitly ends that one-purpose browser turn
-and waits for its physical launcher settlement before closing the old surface; the next epoch then
-starts a fresh Temporary Chat. This does not depend on ChatGPT rendering assistant text or a Copy
-action after the control-only response. If the retained private chat was already closed, the bridge
-starts one read-only fallback chat from the canonical Codex history instead. Browser-only mode
-has no retained MCP boundary and keeps the three-message compaction path so its summarizer receives
-the complete expanded history.
+Each stage contains complete semantic records, never a raw JSON string cut in the middle. The model must return an exact transaction-bound SHA-256 acknowledgement before the next part is sent. Images, the MCP connector, and the private `turn_token` are attached only to the final part. In Full/MCP mode, compaction does not replay the expanded history into an unrelated summarizer. If the source Web response is still waiting on a tool boundary, its canonical tool results finish that response first without a compaction suffix. If those results are enough for an ordinary final answer, that committed answer remains owned by the logical Responses turn across the physical chat retirement. If the Web model instead requests another tool, the broker blocks that new execution and tells the response to stop; the compacted continuation then resumes the unfinished work. The exact retained chat receives one strict checkpoint message with only the one-shot MCP control capability and no ordinary work capability. The checkpoint never rides in the tail of a potentially huge tool result, and its wait is capped at five minutes independently of the normal turn timeout. After the structured handoff is accepted, the bridge explicitly ends that one-purpose browser turn and waits for its physical launcher settlement before closing the old surface; the next epoch then starts a fresh Temporary Chat. This does not depend on ChatGPT rendering assistant text or a Copy action after the control-only response. If the retained private chat was already closed, the bridge starts one read-only fallback chat from the canonical Codex history instead. Browser-only mode has no retained MCP boundary and keeps the six-part compaction path so its summarizer receives the complete expanded history.
 
-Any missing or malformed acknowledgement fails the whole transaction. No later part or final
-commit is sent, and a retry starts again from part one in a fresh Temporary Chat. The model context
-and auto-compaction ceilings are reported as 3× while the switch is active, but every individual
-stage must still fit the selected ChatGPT mode's measured one-message boundary.
+Any missing or malformed acknowledgement fails the whole transaction. No later part or final commit is sent, and a retry starts again from part one in a fresh Temporary Chat. The model context and auto-compaction ceilings are reported as 3× while the switch is active, but every individual stage must still fit the selected ChatGPT mode's measured one-message boundary.
 
-Small turns add no requests. Two-part turns add two staging requests and acknowledgements; three-part
-turns add three. Browser-only compaction also uses three stages. Large turns are therefore slower and may increase the probability of
-rate limits or a temporary account cooldown. The experiment is intentionally unavailable for Luna:
-Luna's later requests still include the accumulated transcript inside the same measured
-28,000-token browser transport budget.
+Small turns add no staging requests. A two-part transaction sends one inert stage and one final commit; a six-part transaction sends five inert stages and one final commit. Each submission has a transaction-bound acknowledgement. Browser-only compaction uses the six-part path. These extra browser requests can increase rate limits or temporary cooldowns. The experiment remains unavailable for Luna because its later requests still include the accumulated transcript inside the same measured 28,000-token browser transport budget.
 
 Browser-only chats do not advertise outer tools and never claim simulated effects. Full setup keeps
 the launcher-owned DEV tunnel ready so ChatGPT can create and validate `Codex Native2 DEV` before a

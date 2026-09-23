@@ -739,6 +739,24 @@ code {
   color: var(--color-text-primary);
 }
 
+.browser-provider-ready {
+  display: inline-flex;
+  height: 28px;
+  flex: none;
+  align-items: center;
+  gap: 5px;
+  padding: 0 9px;
+  border-radius: var(--radius-sm);
+  background: rgb(39 147 95 / 12%);
+  color: #81ccad;
+  font-size: var(--text-xs);
+}
+
+.browser-provider-ready browser-action-list {
+  min-width: 28px;
+  min-height: 28px;
+}
+
 .browser-loading-line {
   position: absolute;
   right: 0;
@@ -1973,6 +1991,81 @@ code {
 
 .setting-row > div {
   padding: 12px 0;
+}
+
+.extension-description {
+  margin: 4px 0 14px;
+  color: var(--color-text-secondary);
+  font-size: var(--text-sm);
+  line-height: 1.5;
+}
+
+.extension-list {
+  border-top: 1px solid var(--color-border-light);
+}
+
+.extension-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 0;
+  border-bottom: 1px solid var(--color-border-light);
+}
+
+.extension-details strong,
+.extension-details small {
+  display: block;
+}
+
+.extension-details small,
+.extension-check-row small {
+  margin-top: 3px;
+  color: var(--color-text-tertiary);
+  font-size: var(--text-xs);
+}
+
+.extension-actions,
+.extension-check-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.extension-actions button,
+.extension-check-row button {
+  min-height: 30px;
+  padding: 4px 9px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  background: var(--color-background-control);
+  color: var(--color-text-secondary);
+  cursor: pointer;
+  font-size: var(--text-xs);
+}
+
+.extension-actions button:hover:not(:disabled),
+.extension-check-row button:hover:not(:disabled) {
+  border-color: var(--color-text-tertiary);
+  color: var(--color-text-primary);
+}
+
+.extension-actions button:disabled,
+.extension-check-row button:disabled {
+  cursor: default;
+  opacity: 0.5;
+}
+
+.extension-check-row {
+  justify-content: space-between;
+  padding-top: 12px;
+}
+
+@media (max-width: 720px) {
+  .extension-row {
+    grid-template-columns: minmax(0, 1fr);
+  }
 }
 
 .language-menu {

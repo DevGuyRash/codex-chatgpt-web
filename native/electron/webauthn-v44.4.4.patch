@@ -1,0 +1,653 @@
+diff --git a/shell/browser/api/electron_api_session.cc b/shell/browser/api/electron_api_session.cc
+index 84ad350..1105d47 100644
+--- a/shell/browser/api/electron_api_session.cc
++++ b/shell/browser/api/electron_api_session.cc
+@@ -131,6 +131,10 @@ using content::StoragePartition;
+ 
+ namespace {
+ 
++std::string CodexWebGptWebAuthnPatchIdentity() {
++  return "webauthn-v44.4.4";
++}
++
+ struct ClearStorageDataOptions {
+   blink::StorageKey storage_key;
+   uint32_t storage_types = StoragePartition::REMOVE_DATA_MASK_ALL;
+@@ -1795,6 +1799,8 @@ void Session::FillObjectTemplate(v8::Isolate* isolate,
+                                  v8::Local<v8::ObjectTemplate> templ) {
+   gin::ObjectTemplateBuilder(isolate, GetClassName(), templ)
+       .SetMethod("resolveHost", &Session::ResolveHost)
++      .SetMethod("getCodexWebGptWebAuthnPatch",
++                 &CodexWebGptWebAuthnPatchIdentity)
+       .SetMethod("resolveProxy", &Session::ResolveProxy)
+       .SetMethod("getCacheSize", &Session::GetCacheSize)
+       .SetMethod("clearCache", &Session::ClearCache)
+diff --git a/shell/browser/webauthn/electron_authenticator_request_client_delegate.cc b/shell/browser/webauthn/electron_authenticator_request_client_delegate.cc
+index 90510c0..c7a74e3 100644
+--- a/shell/browser/webauthn/electron_authenticator_request_client_delegate.cc
++++ b/shell/browser/webauthn/electron_authenticator_request_client_delegate.cc
+@@ -4,15 +4,25 @@
+ 
+ #include "shell/browser/webauthn/electron_authenticator_request_client_delegate.h"
+ 
++#include <array>
+ #include <string>
+ #include <utility>
+ 
+ #include "base/base64url.h"
+ #include "base/containers/span.h"
+ #include "base/functional/bind.h"
++#include "base/uuid.h"
++#include "content/public/browser/browser_context.h"
+ #include "content/public/browser/render_frame_host.h"
++#include "content/public/browser/storage_partition.h"
+ #include "content/public/browser/web_contents.h"
++#include "crypto/random.h"
+ #include "device/fido/authenticator_get_assertion_response.h"
++#include "device/fido/cable/v2_constants.h"
++#include "device/fido/cable/v2_handshake.h"
++#include "device/fido/fido_discovery_factory.h"
++#include "device/fido/pin.h"
++#include "device/fido/public/fido_transport_protocol.h"
+ #include "device/fido/public/public_key_credential_descriptor.h"
+ #include "device/fido/public/public_key_credential_user_entity.h"
+ #include "gin/arguments.h"
+@@ -45,12 +55,102 @@ std::string CredentialIdFor(
+   return {};
+ }
+ 
++const char* PINReasonName(device::pin::PINEntryReason reason) {
++  switch (reason) {
++    case device::pin::PINEntryReason::kSet:
++      return "set";
++    case device::pin::PINEntryReason::kChange:
++      return "change";
++    case device::pin::PINEntryReason::kChallenge:
++      return "challenge";
++  }
++  return "unknown";
++}
++
++const char* PINErrorName(device::pin::PINEntryError error) {
++  switch (error) {
++    case device::pin::PINEntryError::kNoError:
++      return "none";
++    case device::pin::PINEntryError::kInternalUvLocked:
++      return "internal-uv-locked";
++    case device::pin::PINEntryError::kWrongPIN:
++      return "wrong-pin";
++    case device::pin::PINEntryError::kTooShort:
++      return "too-short";
++    case device::pin::PINEntryError::kInvalidCharacters:
++      return "invalid-characters";
++    case device::pin::PINEntryError::kSameAsCurrentPIN:
++      return "same-as-current";
++  }
++  return "unknown";
++}
++
++const char* BluetoothStatusName(
++    device::FidoRequestHandlerBase::BleStatus status) {
++  switch (status) {
++    case device::FidoRequestHandlerBase::BleStatus::kOn:
++      return "on";
++    case device::FidoRequestHandlerBase::BleStatus::kOff:
++      return "off";
++    case device::FidoRequestHandlerBase::BleStatus::kPermissionDenied:
++      return "permission-denied";
++    case device::FidoRequestHandlerBase::BleStatus::kPendingPermissionRequest:
++      return "permission-required";
++  }
++  return "unknown";
++}
++
++const char* FailureReasonName(
++    content::AuthenticatorRequestClientDelegate::InterestingFailureReason
++        reason) {
++  using Reason =
++      content::AuthenticatorRequestClientDelegate::InterestingFailureReason;
++  switch (reason) {
++    case Reason::kTimeout:
++      return "timeout";
++    case Reason::kKeyNotRegistered:
++      return "key-not-registered";
++    case Reason::kKeyAlreadyRegistered:
++      return "key-already-registered";
++    case Reason::kSoftPINBlock:
++      return "pin-temporarily-locked";
++    case Reason::kHardPINBlock:
++      return "pin-locked";
++    case Reason::kAuthenticatorRemovedDuringPINEntry:
++      return "key-removed";
++    case Reason::kAuthenticatorMissingResidentKeys:
++      return "key-no-resident-keys";
++    case Reason::kAuthenticatorMissingUserVerification:
++      return "key-no-user-verification";
++    case Reason::kAuthenticatorMissingLargeBlob:
++      return "key-no-large-blob";
++    case Reason::kNoCommonAlgorithms:
++      return "key-no-common-algorithm";
++    case Reason::kStorageFull:
++      return "key-storage-full";
++    case Reason::kUserConsentDenied:
++      return "consent-denied";
++    case Reason::kWinUserCancelled:
++      return "platform-cancelled";
++    case Reason::kHybridTransportError:
++      return "phone-connection-failed";
++    case Reason::kNoPasskeys:
++      return "no-passkeys";
++    case Reason::kEnclaveError:
++      return "platform-error";
++    case Reason::kEnclaveCancel:
++      return "platform-cancelled";
++  }
++  return "unknown";
++}
++
+ }  // namespace
+ 
+ ElectronAuthenticatorRequestClientDelegate::
+     ElectronAuthenticatorRequestClientDelegate(
+         content::RenderFrameHost* render_frame_host)
+-    : render_frame_host_id_(render_frame_host->GetGlobalId()) {}
++    : render_frame_host_id_(render_frame_host->GetGlobalId()),
++      request_id_(base::Uuid::GenerateRandomV4().AsLowercaseString()) {}
+ 
+ ElectronAuthenticatorRequestClientDelegate::
+     ~ElectronAuthenticatorRequestClientDelegate() = default;
+@@ -67,6 +167,8 @@ void ElectronAuthenticatorRequestClientDelegate::StartObserving(
+ 
+ void ElectronAuthenticatorRequestClientDelegate::StopObserving(
+     device::FidoRequestHandlerBase* request_handler) {
++  EmitRequestClosed();
++  provide_pin_callback_.Reset();
+   request_handler_observation_.Reset();
+ }
+ 
+@@ -83,6 +185,380 @@ void ElectronAuthenticatorRequestClientDelegate::RegisterActionCallbacks(
+         void(device::FidoRequestHandlerBase::BlePermissionCallback)>
+         request_ble_permission_callback) {
+   cancel_callback_ = std::move(cancel_callback);
++  bluetooth_power_on_callback_ = std::move(bluetooth_adapter_power_on_callback);
++  request_bluetooth_permission_callback_ =
++      std::move(request_ble_permission_callback);
++}
++
++bool ElectronAuthenticatorRequestClientDelegate::SupportsPIN() const {
++  return true;
++}
++
++void ElectronAuthenticatorRequestClientDelegate::CollectPIN(
++    CollectPINOptions options,
++    base::OnceCallback<void(std::u16string)> provide_pin_cb) {
++  content::RenderFrameHost* rfh =
++      content::RenderFrameHost::FromID(render_frame_host_id_);
++  content::WebContents* contents =
++      rfh ? content::WebContents::FromRenderFrameHost(rfh) : nullptr;
++  gin::WeakCell<api::Session>* session =
++      contents ? api::Session::FromBrowserContext(contents->GetBrowserContext())
++               : nullptr;
++  provide_pin_callback_ = std::move(provide_pin_cb);
++  if (!session || !session->Get()) {
++    provide_pin_callback_.Reset();
++    if (cancel_callback_)
++      std::move(cancel_callback_).Run();
++    return;
++  }
++
++  v8::Isolate* isolate = JavascriptEnvironment::GetIsolate();
++  v8::HandleScope scope(isolate);
++  v8::Local<v8::Object> details =
++      gin::DataObjectBuilder(isolate)
++          .Set("requestId", request_id_)
++          .Set("relyingPartyId", relying_party_id_)
++          .Set("frame", rfh)
++          .Set("reason", std::string(PINReasonName(options.reason)))
++          .Set("error", std::string(PINErrorName(options.error)))
++          .Set("minPinLength", options.min_pin_length)
++          .Set("attempts", options.attempts)
++          .Build();
++  v8::Local<v8::Object> wrapper;
++  if (!session->Get()->GetWrapper(isolate).ToLocal(&wrapper)) {
++    provide_pin_callback_.Reset();
++    if (cancel_callback_)
++      std::move(cancel_callback_).Run();
++    return;
++  }
++  v8::Local<v8::Object> event = gin_helper::internal::Event::New(isolate)
++                                    ->GetWrapper(isolate)
++                                    .ToLocalChecked();
++  base::WeakPtr<ElectronAuthenticatorRequestClientDelegate> weak_this =
++      weak_factory_.GetWeakPtr();
++  v8::Local<v8::Value> result = gin_helper::EmitEvent(
++      isolate, wrapper, "webauthn-pin-request", event, details,
++      base::BindRepeating(
++          &ElectronAuthenticatorRequestClientDelegate::OnPINProvided,
++          weak_factory_.GetWeakPtr()));
++  if (!weak_this)
++    return;
++  bool had_listener = false;
++  if (!gin::ConvertFromV8(isolate, result, &had_listener) || !had_listener) {
++    provide_pin_callback_.Reset();
++    if (cancel_callback_)
++      std::move(cancel_callback_).Run();
++  }
++}
++
++void ElectronAuthenticatorRequestClientDelegate::OnPINProvided(
++    gin::Arguments* args) {
++  if (!provide_pin_callback_)
++    return;
++  std::u16string pin;
++  if (!args->GetNext(&pin) || pin.empty()) {
++    provide_pin_callback_.Reset();
++    if (cancel_callback_)
++      std::move(cancel_callback_).Run();
++    return;
++  }
++  std::move(provide_pin_callback_).Run(std::move(pin));
++}
++
++void ElectronAuthenticatorRequestClientDelegate::ConfigureDiscoveries(
++    const url::Origin& origin,
++    const std::string& rp_id,
++    RequestSource request_source,
++    device::FidoRequestType request_type,
++    std::optional<device::ResidentKeyRequirement> resident_key_requirement,
++    device::UserVerificationRequirement user_verification_requirement,
++    bool cmtg_key_requested,
++    std::optional<std::string_view> user_name,
++    bool is_enclave_authenticator_available,
++    device::FidoDiscoveryFactory* factory) {
++  if (!factory || request_source != RequestSource::kWebAuthentication)
++    return;
++  std::array<uint8_t, device::cablev2::kQRKeySize> qr_key;
++  crypto::RandBytes(qr_key);
++  hybrid_qr_ = device::cablev2::qr::Encode(qr_key, request_type);
++  factory->set_cable_data(request_type, qr_key);
++  factory->set_cable_event_callback(base::BindRepeating(
++      &ElectronAuthenticatorRequestClientDelegate::OnCableEvent,
++      weak_factory_.GetWeakPtr()));
++  factory->set_network_context_factory(base::BindRepeating(
++      [](content::GlobalRenderFrameHostId frame_id)
++          -> network::mojom::NetworkContext* {
++        auto* frame = content::RenderFrameHost::FromID(frame_id);
++        return frame ? frame->GetBrowserContext()
++                           ->GetDefaultStoragePartition()
++                           ->GetNetworkContext()
++                     : nullptr;
++      },
++      render_frame_host_id_));
++}
++
++void ElectronAuthenticatorRequestClientDelegate::
++    OnTransportAvailabilityEnumerated(
++        device::FidoRequestHandlerBase::TransportAvailabilityInfo data) {
++  const bool hybrid_available =
++      !hybrid_qr_.empty() && data.available_transports.contains(
++                                 device::FidoTransportProtocol::kHybrid);
++  const bool security_key_available =
++      data.available_transports.contains(
++          device::FidoTransportProtocol::kUsbHumanInterfaceDevice) ||
++      data.available_transports.contains(
++          device::FidoTransportProtocol::kNearFieldCommunication) ||
++      data.available_transports.contains(
++          device::FidoTransportProtocol::kBluetoothLowEnergy);
++  const bool platform_available = data.available_transports.contains(
++      device::FidoTransportProtocol::kInternal);
++  content::RenderFrameHost* rfh =
++      content::RenderFrameHost::FromID(render_frame_host_id_);
++  content::WebContents* contents =
++      rfh ? content::WebContents::FromRenderFrameHost(rfh) : nullptr;
++  gin::WeakCell<api::Session>* session =
++      contents ? api::Session::FromBrowserContext(contents->GetBrowserContext())
++               : nullptr;
++  if (!session || !session->Get())
++    return;
++  v8::Isolate* isolate = JavascriptEnvironment::GetIsolate();
++  v8::HandleScope scope(isolate);
++  v8::Local<v8::Object> details =
++      gin::DataObjectBuilder(isolate)
++          .Set("requestId", request_id_)
++          .Set("relyingPartyId", relying_party_id_)
++          .Set("frame", rfh)
++          .Set("qr", hybrid_qr_)
++          .Set("bluetoothStatus",
++               std::string(BluetoothStatusName(data.ble_status)))
++          .Set("canPowerOnBluetooth", data.can_power_on_ble_adapter)
++          .Build();
++  v8::Local<v8::Object> wrapper;
++  if (!session->Get()->GetWrapper(isolate).ToLocal(&wrapper))
++    return;
++  v8::Local<v8::Object> event = gin_helper::internal::Event::New(isolate)
++                                    ->GetWrapper(isolate)
++                                    .ToLocalChecked();
++  v8::Local<v8::Object> transports =
++      gin::DataObjectBuilder(isolate)
++          .Set("requestId", request_id_)
++          .Set("relyingPartyId", relying_party_id_)
++          .Set("frame", rfh)
++          .Set("securityKeyAvailable", security_key_available)
++          .Set("phoneAvailable", hybrid_available)
++          .Set("platformAvailable", platform_available)
++          .Build();
++  base::WeakPtr<ElectronAuthenticatorRequestClientDelegate> weak_this =
++      weak_factory_.GetWeakPtr();
++  gin_helper::EmitEvent(
++      isolate, wrapper, "webauthn-transport-state", event, transports,
++      base::BindRepeating(
++          &ElectronAuthenticatorRequestClientDelegate::OnHybridAction,
++          weak_factory_.GetWeakPtr()));
++  if (!weak_this || !hybrid_available)
++    return;
++  event = gin_helper::internal::Event::New(isolate)
++              ->GetWrapper(isolate)
++              .ToLocalChecked();
++  gin_helper::EmitEvent(
++      isolate, wrapper, "webauthn-hybrid-qr", event, details,
++      base::BindRepeating(
++          &ElectronAuthenticatorRequestClientDelegate::OnHybridAction,
++          weak_factory_.GetWeakPtr()));
++}
++
++void ElectronAuthenticatorRequestClientDelegate::OnHybridAction(
++    gin::Arguments* args) {
++  std::string action;
++  if (!args->GetNext(&action))
++    return;
++  if (action == "cancel" && cancel_callback_) {
++    provide_pin_callback_.Reset();
++    std::move(cancel_callback_).Run();
++  } else if (hybrid_qr_.empty()) {
++    return;
++  } else if (action == "power-on-bluetooth" && bluetooth_power_on_callback_) {
++    bluetooth_power_on_callback_.Run();
++  } else if (action == "request-bluetooth-permission" &&
++             request_bluetooth_permission_callback_) {
++    request_bluetooth_permission_callback_.Run(
++        base::BindOnce(&ElectronAuthenticatorRequestClientDelegate::
++                           OnBluetoothPermissionResult,
++                       weak_factory_.GetWeakPtr()));
++  }
++}
++
++void ElectronAuthenticatorRequestClientDelegate::OnBluetoothPermissionResult(
++    device::FidoRequestHandlerBase::BleStatus status) {
++  BluetoothAdapterStatusChanged(status);
++}
++
++void ElectronAuthenticatorRequestClientDelegate::OnCableEvent(
++    device::cablev2::Event event) {
++  const char* state = nullptr;
++  switch (event) {
++    case device::cablev2::Event::kPhoneConnected:
++      state = "phone-connected";
++      break;
++    case device::cablev2::Event::kBLEAdvertReceived:
++      state = "bluetooth-seen";
++      break;
++    case device::cablev2::Event::kReady:
++      state = "ready";
++      break;
++  }
++  if (!state)
++    return;
++  content::RenderFrameHost* rfh =
++      content::RenderFrameHost::FromID(render_frame_host_id_);
++  content::WebContents* contents =
++      rfh ? content::WebContents::FromRenderFrameHost(rfh) : nullptr;
++  gin::WeakCell<api::Session>* session =
++      contents ? api::Session::FromBrowserContext(contents->GetBrowserContext())
++               : nullptr;
++  if (!session || !session->Get())
++    return;
++  v8::Isolate* isolate = JavascriptEnvironment::GetIsolate();
++  v8::HandleScope scope(isolate);
++  v8::Local<v8::Object> details = gin::DataObjectBuilder(isolate)
++                                      .Set("requestId", request_id_)
++                                      .Set("status", std::string(state))
++                                      .Build();
++  v8::Local<v8::Object> wrapper;
++  if (!session->Get()->GetWrapper(isolate).ToLocal(&wrapper))
++    return;
++  v8::Local<v8::Object> notification = gin_helper::internal::Event::New(isolate)
++                                           ->GetWrapper(isolate)
++                                           .ToLocalChecked();
++  gin_helper::EmitEvent(isolate, wrapper, "webauthn-hybrid-progress",
++                        notification, details);
++}
++
++void ElectronAuthenticatorRequestClientDelegate::BluetoothAdapterStatusChanged(
++    device::FidoRequestHandlerBase::BleStatus status) {
++  content::RenderFrameHost* rfh =
++      content::RenderFrameHost::FromID(render_frame_host_id_);
++  content::WebContents* contents =
++      rfh ? content::WebContents::FromRenderFrameHost(rfh) : nullptr;
++  gin::WeakCell<api::Session>* session =
++      contents ? api::Session::FromBrowserContext(contents->GetBrowserContext())
++               : nullptr;
++  if (!session || !session->Get())
++    return;
++  v8::Isolate* isolate = JavascriptEnvironment::GetIsolate();
++  v8::HandleScope scope(isolate);
++  v8::Local<v8::Object> details =
++      gin::DataObjectBuilder(isolate)
++          .Set("requestId", request_id_)
++          .Set("status", std::string(BluetoothStatusName(status)))
++          .Build();
++  v8::Local<v8::Object> wrapper;
++  if (!session->Get()->GetWrapper(isolate).ToLocal(&wrapper))
++    return;
++  v8::Local<v8::Object> event = gin_helper::internal::Event::New(isolate)
++                                    ->GetWrapper(isolate)
++                                    .ToLocalChecked();
++  gin_helper::EmitEvent(isolate, wrapper, "webauthn-bluetooth-status", event,
++                        details);
++}
++
++void ElectronAuthenticatorRequestClientDelegate::OnTransactionSuccessful(
++    RequestSource request_source,
++    device::FidoRequestType request_type,
++    device::AuthenticatorType authenticator_type) {
++  request_succeeded_ = true;
++  EmitRequestClosed();
++}
++
++bool ElectronAuthenticatorRequestClientDelegate::DoesBlockRequestOnFailure(
++    InterestingFailureReason reason) {
++  content::RenderFrameHost* rfh =
++      content::RenderFrameHost::FromID(render_frame_host_id_);
++  content::WebContents* contents =
++      rfh ? content::WebContents::FromRenderFrameHost(rfh) : nullptr;
++  gin::WeakCell<api::Session>* session =
++      contents ? api::Session::FromBrowserContext(contents->GetBrowserContext())
++               : nullptr;
++  if (!session || !session->Get())
++    return false;
++  v8::Isolate* isolate = JavascriptEnvironment::GetIsolate();
++  v8::HandleScope scope(isolate);
++  v8::Local<v8::Object> details =
++      gin::DataObjectBuilder(isolate)
++          .Set("requestId", request_id_)
++          .Set("relyingPartyId", relying_party_id_)
++          .Set("frame", rfh)
++          .Set("reason", std::string(FailureReasonName(reason)))
++          .Build();
++  v8::Local<v8::Object> wrapper;
++  if (!session->Get()->GetWrapper(isolate).ToLocal(&wrapper))
++    return false;
++  v8::Local<v8::Object> event = gin_helper::internal::Event::New(isolate)
++                                    ->GetWrapper(isolate)
++                                    .ToLocalChecked();
++  gin_helper::EmitEvent(isolate, wrapper, "webauthn-request-failed", event,
++                        details);
++  return false;
++}
++
++void ElectronAuthenticatorRequestClientDelegate::OnRetryUserVerification(
++    int attempts) {
++  content::RenderFrameHost* rfh =
++      content::RenderFrameHost::FromID(render_frame_host_id_);
++  content::WebContents* contents =
++      rfh ? content::WebContents::FromRenderFrameHost(rfh) : nullptr;
++  gin::WeakCell<api::Session>* session =
++      contents ? api::Session::FromBrowserContext(contents->GetBrowserContext())
++               : nullptr;
++  if (!session || !session->Get())
++    return;
++  v8::Isolate* isolate = JavascriptEnvironment::GetIsolate();
++  v8::HandleScope scope(isolate);
++  v8::Local<v8::Object> details = gin::DataObjectBuilder(isolate)
++                                      .Set("requestId", request_id_)
++                                      .Set("relyingPartyId", relying_party_id_)
++                                      .Set("frame", rfh)
++                                      .Set("attempts", attempts)
++                                      .Build();
++  v8::Local<v8::Object> wrapper;
++  if (!session->Get()->GetWrapper(isolate).ToLocal(&wrapper))
++    return;
++  v8::Local<v8::Object> event = gin_helper::internal::Event::New(isolate)
++                                    ->GetWrapper(isolate)
++                                    .ToLocalChecked();
++  gin_helper::EmitEvent(isolate, wrapper, "webauthn-verification-retry", event,
++                        details);
++}
++
++void ElectronAuthenticatorRequestClientDelegate::EmitRequestClosed() {
++  if (request_closed_emitted_)
++    return;
++  content::RenderFrameHost* rfh =
++      content::RenderFrameHost::FromID(render_frame_host_id_);
++  content::WebContents* contents =
++      rfh ? content::WebContents::FromRenderFrameHost(rfh) : nullptr;
++  gin::WeakCell<api::Session>* session =
++      contents ? api::Session::FromBrowserContext(contents->GetBrowserContext())
++               : nullptr;
++  if (!session || !session->Get())
++    return;
++  v8::Isolate* isolate = JavascriptEnvironment::GetIsolate();
++  v8::HandleScope scope(isolate);
++  v8::Local<v8::Object> details =
++      gin::DataObjectBuilder(isolate)
++          .Set("requestId", request_id_)
++          .Set("outcome",
++               std::string(request_succeeded_ ? "succeeded" : "unknown"))
++          .Build();
++  v8::Local<v8::Object> wrapper;
++  if (!session->Get()->GetWrapper(isolate).ToLocal(&wrapper))
++    return;
++  v8::Local<v8::Object> event = gin_helper::internal::Event::New(isolate)
++                                    ->GetWrapper(isolate)
++                                    .ToLocalChecked();
++  request_closed_emitted_ = true;
++  gin_helper::EmitEvent(isolate, wrapper, "webauthn-request-closed", event,
++                        details);
+ }
+ 
+ void ElectronAuthenticatorRequestClientDelegate::SelectAccount(
+@@ -133,6 +609,7 @@ void ElectronAuthenticatorRequestClientDelegate::SelectAccount(
+   }
+ 
+   v8::Local<v8::Object> details = gin::DataObjectBuilder(isolate)
++                                      .Set("requestId", request_id_)
+                                       .Set("relyingPartyId", relying_party_id_)
+                                       .Set("accounts", accounts)
+                                       .Set("frame", rfh)
+diff --git a/shell/browser/webauthn/electron_authenticator_request_client_delegate.h b/shell/browser/webauthn/electron_authenticator_request_client_delegate.h
+index f500296..ac02fed 100644
+--- a/shell/browser/webauthn/electron_authenticator_request_client_delegate.h
++++ b/shell/browser/webauthn/electron_authenticator_request_client_delegate.h
+@@ -5,12 +5,15 @@
+ #ifndef ELECTRON_SHELL_BROWSER_WEBAUTHN_ELECTRON_AUTHENTICATOR_REQUEST_CLIENT_DELEGATE_H_
+ #define ELECTRON_SHELL_BROWSER_WEBAUTHN_ELECTRON_AUTHENTICATOR_REQUEST_CLIENT_DELEGATE_H_
+ 
++#include <optional>
++#include <string_view>
+ #include <vector>
+ 
+ #include "base/memory/weak_ptr.h"
+ #include "base/scoped_observation.h"
+ #include "content/public/browser/authenticator_request_client_delegate.h"
+ #include "content/public/browser/global_routing_id.h"
++#include "device/fido/cable/v2_constants.h"
+ 
+ namespace content {
+ class RenderFrameHost;
+@@ -55,14 +58,54 @@ class ElectronAuthenticatorRequestClientDelegate
+       std::vector<device::AuthenticatorGetAssertionResponse> responses,
+       base::OnceCallback<void(device::AuthenticatorGetAssertionResponse)>
+           callback) override;
++  bool SupportsPIN() const override;
++  void CollectPIN(
++      CollectPINOptions options,
++      base::OnceCallback<void(std::u16string)> provide_pin_cb) override;
++  void ConfigureDiscoveries(
++      const url::Origin& origin,
++      const std::string& rp_id,
++      RequestSource request_source,
++      device::FidoRequestType request_type,
++      std::optional<device::ResidentKeyRequirement> resident_key_requirement,
++      device::UserVerificationRequirement user_verification_requirement,
++      bool cmtg_key_requested,
++      std::optional<std::string_view> user_name,
++      bool is_enclave_authenticator_available,
++      device::FidoDiscoveryFactory* fido_discovery_factory) override;
++  void OnTransportAvailabilityEnumerated(
++      device::FidoRequestHandlerBase::TransportAvailabilityInfo data) override;
++  void BluetoothAdapterStatusChanged(
++      device::FidoRequestHandlerBase::BleStatus ble_status) override;
++  void OnTransactionSuccessful(
++      RequestSource request_source,
++      device::FidoRequestType request_type,
++      device::AuthenticatorType authenticator_type) override;
++  bool DoesBlockRequestOnFailure(InterestingFailureReason reason) override;
++  void OnRetryUserVerification(int attempts) override;
+ 
+  private:
+   void OnAccountSelected(gin::Arguments* args);
+   void CancelPendingAccountSelection();
++  void OnPINProvided(gin::Arguments* args);
++  void OnHybridAction(gin::Arguments* args);
++  void OnBluetoothPermissionResult(
++      device::FidoRequestHandlerBase::BleStatus status);
++  void OnCableEvent(device::cablev2::Event event);
++  void EmitRequestClosed();
+ 
+   const content::GlobalRenderFrameHostId render_frame_host_id_;
+   std::string relying_party_id_;
+   base::OnceClosure cancel_callback_;
++  base::RepeatingClosure bluetooth_power_on_callback_;
++  base::RepeatingCallback<void(
++      device::FidoRequestHandlerBase::BlePermissionCallback)>
++      request_bluetooth_permission_callback_;
++  base::OnceCallback<void(std::u16string)> provide_pin_callback_;
++  std::string request_id_;
++  std::string hybrid_qr_;
++  bool request_closed_emitted_ = false;
++  bool request_succeeded_ = false;
+ 
+   base::ScopedObservation<device::FidoRequestHandlerBase,
+                           device::FidoRequestHandlerBase::Observer>
+diff --git a/shell/common/extensions/api/_permission_features.json b/shell/common/extensions/api/_permission_features.json
+index 0ab63fb..bb67bf5 100644
+--- a/shell/common/extensions/api/_permission_features.json
++++ b/shell/common/extensions/api/_permission_features.json
+@@ -139,6 +139,10 @@
+     "channel": "stable",
+     "extension_types": ["extension", "platform_app"]
+   },
++  "management": {
++    "channel": "stable",
++    "extension_types": ["extension"]
++  },
+   "idltest": {
+     "channel": "trunk",
+     "extension_types": ["extension"]
+@@ -245,4 +249,4 @@
+     "channel": "stable",
+     "extension_types": ["extension", "legacy_packaged_app"]
+   }
+-}
+\ No newline at end of file
++}

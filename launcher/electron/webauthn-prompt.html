@@ -1,0 +1,56 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta http-equiv="Content-Security-Policy" content="default-src 'none'; base-uri 'none'; img-src data:; style-src 'self'; script-src 'self'">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Passkey authentication</title>
+    <link rel="stylesheet" href="./webauthn-prompt.css">
+    <script src="./webauthn-fallback.js" defer></script>
+    <script src="./webauthn-prompt.js" defer></script>
+  </head>
+  <body>
+    <main>
+      <p class="eyebrow">Passkey authentication</p>
+      <h1 id="title">Waiting for a passkey request</h1>
+      <p class="site" id="site"></p>
+      <p class="help" id="help"></p>
+      <section id="method-section" hidden>
+        <button id="method-security-key" type="button">Use a security key</button>
+        <button id="method-phone" type="button">Use a phone</button>
+        <button id="method-device" type="button">Use this device</button>
+        <div id="method-extensions"></div>
+        <p id="method-extension-hint" class="hint" hidden>Opening a password manager ends this request. Unlock it, then retry passkey sign-in on the site.</p>
+      </section>
+      <section id="touch-section" hidden>
+        <p>Insert your security key and touch it when it flashes.</p>
+        <button id="touch-phone" type="button" hidden>Use a phone instead</button>
+      </section>
+      <section id="verification-section" hidden>
+        <p id="verification-hint">Complete the verification prompt on this device.</p>
+        <button id="verification-phone" type="button" hidden>Use a phone instead</button>
+      </section>
+      <form id="pin-form" hidden>
+        <label for="pin">Security key PIN</label>
+        <input id="pin" type="password" inputmode="text" autocomplete="off" required>
+        <p class="hint" id="pin-hint"></p>
+        <button class="primary" type="submit">Continue</button>
+        <button id="pin-phone" type="button" hidden>Use a phone instead</button>
+        <button id="pin-methods" type="button" hidden>Choose another method</button>
+      </form>
+      <section id="qr-section" hidden>
+        <img id="qr" alt="Passkey QR code to scan with your phone" width="280" height="280">
+        <p id="phone-progress" role="status"></p>
+        <p id="bluetooth-status"></p>
+        <button id="bluetooth-action" type="button" hidden></button>
+        <button id="security-key-action" type="button" hidden>Use a security key instead</button>
+        <button id="qr-methods" type="button" hidden>Choose another method</button>
+      </section>
+      <section id="account-section" hidden>
+        <div id="accounts"></div>
+      </section>
+      <p class="error" id="error" role="alert" hidden></p>
+      <button class="cancel" id="cancel" type="button">Cancel</button>
+    </main>
+  </body>
+</html>

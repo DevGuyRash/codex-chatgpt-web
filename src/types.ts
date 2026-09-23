@@ -14,6 +14,8 @@ export interface CodexParsedRequest {
    * (see src/responses/compaction.ts).
    */
   _compactionRequest?: boolean;
+  /** Native Responses memento summarization; its response is an ordinary assistant text turn. */
+  _localMementoCompaction?: boolean;
   /**
    * True when Codex MultiAgent V2 delegated an agent_message as provider-private encrypted_content.
    * ChatGPT Web has no OpenAI backend key for that blob; the Responses HTTP boundary rejects it
@@ -37,6 +39,7 @@ export type CodexMessage =
 
 export interface CodexUserMessage {
   role: "user";
+  origin?: "codex_skill";
   content: string | CodexContentPart[];
   timestamp: number;
 }

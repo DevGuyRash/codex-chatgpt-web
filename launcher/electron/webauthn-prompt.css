@@ -1,0 +1,23 @@
+:root { color-scheme: dark; font-family: system-ui, sans-serif; }
+* { box-sizing: border-box; }
+body { margin: 0; max-height: 100vh; overflow-y: auto; background: #181818; color: #f2f2f2; }
+main { display: flex; min-height: 100vh; flex-direction: column; gap: 10px; padding: 24px; }
+.eyebrow { margin: 0; color: #8da6d9; font-size: 12px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; }
+h1 { margin: 0; font-size: 22px; line-height: 1.25; }
+.site { margin: 0; overflow-wrap: anywhere; color: #c4c4c4; font-size: 13px; }
+.help, .hint, #bluetooth-status, #phone-progress { color: #aaa; line-height: 1.45; font-size: 13px; }
+form, section { display: flex; flex-direction: column; gap: 10px; }
+[hidden] { display: none !important; }
+label { font-weight: 600; font-size: 13px; }
+input { width: 100%; padding: 11px 12px; border: 1px solid #686868; border-radius: 8px; background: #252525; color: white; font-size: 17px; }
+input:focus-visible, button:focus-visible { outline: 2px solid #83a9ff; outline-offset: 2px; }
+button { min-height: 38px; padding: 8px 12px; border: 1px solid #656565; border-radius: 8px; background: #303030; color: #f2f2f2; cursor: pointer; font: inherit; }
+button:hover { background: #3d3d3d; }
+button.primary { border-color: #5279c7; background: #315da9; }
+button.primary:hover { background: #3d6dbf; }
+button.cancel { margin-top: auto; align-self: flex-start; }
+img { max-width: 100%; height: auto; align-self: center; padding: 8px; border-radius: 8px; background: white; }
+.error { color: #ffabab; }
+#accounts { display: flex; flex-direction: column; gap: 8px; }
+#accounts button { text-align: left; }
+#method-extensions { display: flex; max-height: 160px; flex-direction: column; gap: 8px; overflow-y: auto; }

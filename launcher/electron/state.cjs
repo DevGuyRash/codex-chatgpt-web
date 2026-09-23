@@ -17,6 +17,7 @@ const DEFAULT_STATE = Object.freeze({
   experimentalBiggerContext: false,
   zeroRiskProEnabled: false,
   browserSmokePassed: false,
+  chatGptLocallySignedOut: false,
   browserSmokeVersion: null,
   sidebarOpen: true,
   sidebarWidth: 252,
@@ -48,6 +49,7 @@ function readState(filePath) {
       "experimentalBiggerContext",
       "zeroRiskProEnabled",
       "browserSmokePassed",
+      "chatGptLocallySignedOut",
       "sidebarOpen",
     ]) {
       if (typeof state[key] !== "boolean") state[key] = DEFAULT_STATE[key];

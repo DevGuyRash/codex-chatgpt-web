@@ -1896,22 +1896,69 @@ class RuntimeSupervisor {
     if (!config || !daemon || daemon.exitCode !== null || daemon.signalCode !== null) {
       throw new Error("Launcher-owned runtime is unavailable for browser-turn cancellation");
     }
-    const result = await this.control(config, "cancel-turn", {
-      body: { traceId },
-      timeoutMs: 15_000,
-    });
-    if (result.status !== "ok"
-      || result.trace_id !== traceId
-      || !Number.isInteger(result.cancelled_browser_turns)
-      || !Number.isInteger(result.cancelled_broker_turns)) {
-      throw new Error("Launcher-owned runtime did not acknowledge targeted browser-turn cancellation");
+    let result;
+    try {
+      result = await this.control(config, "cancel-turn", { body: { traceId }, timeoutMs: 5_000 });
+    } catch {
+      // A lost acknowledgement is not permission to repeat a potentially accepted cancellation.
+      const deadline = Date.now() + 5_000;
+      do {
+        try { result = await this.control(config, "cancel-status", { body: { traceId }, timeoutMs: 2_000 }); }
+        catch { result = null; }
+        if (result && result.status !== "missing") break;
+        if (Date.now() < deadline) await sleep(200);
+      } while (Date.now() < deadline);
+      if (!result || result.status === "missing") {
+        throw new DiagnosticError({ code: "cancel_outcome_unknown", message: "Browser-turn cancellation may have been accepted; its status could not be read", origin: "launcher", stage: "browser.cancel", retryable: false });
+      }
     }
-    this.logger.info("runtime.browser_turn_cancelled", {
+    if (result.trace_id !== traceId || !/^[a-f0-9-]{36}$/.test(result.cancellation_id || "")
+      || !["accepted", "completed", "failed"].includes(result.status)) {
+      throw new DiagnosticError({ code: "cancel_outcome_unknown", message: "The runtime did not return a verified cancellation receipt", origin: "launcher", stage: "browser.cancel", retryable: false });
+    }
+    if (result.status === "failed") {
+      throw new DiagnosticError({ code: "cancel_settlement_failed", message: "The exact browser-turn cancellation failed", origin: "launcher", stage: "browser.cancel", findings: [{ message: String(result.failure_code || "unknown") }], retryable: false });
+    }
+    this.logger.info("runtime.browser_turn_cancel_accepted", { traceId, cancellationId: result.cancellation_id });
+    return {
+      status: "accepted",
       traceId,
-      browserTurns: result.cancelled_browser_turns,
-      brokerTurns: result.cancelled_broker_turns,
-    });
-    return result;
+      cancellationId: result.cancellation_id,
+      settlement: this.waitBrowserTurnCancellation(config, daemon, traceId, result.cancellation_id),
+    };
+  }
+
+  async waitBrowserTurnCancellation(config, daemon, traceId, cancellationId) {
+    const deadline = Date.now() + 120_000;
+    while (Date.now() < deadline) {
+      if (this.daemon !== daemon || daemon.exitCode !== null || daemon.signalCode !== null) {
+        throw new DiagnosticError({ code: "cancel_outcome_unknown", message: "The owning runtime stopped before cancellation settled", origin: "launcher", stage: "browser.cancel", retryable: false });
+      }
+      let result;
+      try { result = await this.control(config, "cancel-status", { body: { traceId }, timeoutMs: 5_000 }); }
+      catch {
+        await sleep(250);
+        continue;
+      }
+      if (result.trace_id !== traceId || result.cancellation_id !== cancellationId) {
+        throw new DiagnosticError({ code: "cancel_outcome_unknown", message: "The cancellation receipt no longer belongs to this runtime turn", origin: "launcher", stage: "browser.cancel", retryable: false });
+      }
+      if (result.status === "completed") {
+        if (!Number.isInteger(result.cancelled_browser_turns) || !Number.isInteger(result.cancelled_broker_turns)) {
+          throw new DiagnosticError({ code: "cancel_outcome_unknown", message: "The runtime omitted cancellation settlement counts", origin: "launcher", stage: "browser.cancel", retryable: false });
+        }
+        this.logger.info("runtime.browser_turn_cancelled", { traceId, browserTurns: result.cancelled_browser_turns, brokerTurns: result.cancelled_broker_turns });
+        return result;
+      }
+      if (result.status === "failed") {
+        throw new DiagnosticError({ code: "cancel_settlement_failed", message: "The runtime could not settle the cancelled browser turn", origin: "launcher", stage: "browser.cancel", findings: [{ message: String(result.failure_code || "unknown") }], retryable: false });
+      }
+      if (result.status !== "accepted") {
+        throw new DiagnosticError({ code: "cancel_outcome_unknown", message: "The runtime returned an unknown cancellation state", origin: "launcher", stage: "browser.cancel", retryable: false });
+      }
+      await sleep(250);
+    }
+    throw new DiagnosticError({ code: "cancel_outcome_unknown", message: "The cancellation remains unsettled after the observation deadline", origin: "launcher", stage: "browser.cancel", retryable: false });
   }
 
   async stopChild(name, timeoutMs = 10_000) {

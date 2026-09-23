@@ -5,6 +5,8 @@ import {
   decodeCompactionSummary,
 } from "./responses/compaction";
 import { BRIDGE_REASONING_PREFIX } from "./responses/reasoning-envelope";
+import { fetchNativeCodex } from "./native-network";
+import { runtimeDiagnostics } from "./diagnostics/runtime";
 
 const CODEX_BACKEND = "https://chatgpt.com/backend-api/codex";
 const FIRST_PARTY_CODEX_ORIGINATORS = new Set([
@@ -27,7 +29,8 @@ const HOP_BY_HOP_HEADERS = new Set([
 ]);
 
 export type NativeFetch = (request: Request) => Promise<Response>;
-export type NativeCodexEndpoint = "models" | "responses" | "responses/compact" | "alpha/search";
+export type NativeImageEndpoint = "images/generations" | "images/edits";
+export type NativeCodexEndpoint = "models" | "responses" | "responses/compact" | "alpha/search" | NativeImageEndpoint;
 
 type JsonObject = Record<string, unknown>;
 type BridgeCompactionItem = JsonObject & { type: "compaction"; encrypted_content: string };
@@ -202,7 +205,7 @@ function withUncleanCloseTolerance(
 export async function forwardNativeCodexRequest(
   request: Request,
   endpoint: NativeCodexEndpoint,
-  fetchUpstream: NativeFetch = fetch,
+  fetchUpstream: NativeFetch = fetchNativeCodex,
   decodedBody?: unknown,
 ): Promise<Response> {
   const authorization = request.headers.get("authorization") ?? "";
@@ -218,12 +221,25 @@ export async function forwardNativeCodexRequest(
   const headers = endToEndHeaders(request.headers);
   if (endpoint === "models") headers.delete("if-none-match");
   const method = endpoint === "models" ? "GET" : "POST";
+  const imageRequest = endpoint === "images/generations" || endpoint === "images/edits";
+  let compactionRequest = endpoint === "responses/compact";
   let body: BodyInit | undefined;
-  if (method === "POST") {
+  if (imageRequest) {
+    // Image requests can be multipart; their body is not a Responses history to parse or scrub.
+    body = await request.arrayBuffer();
+  } else if (method === "POST") {
     const parseRequest = decodedBody === undefined ? request.clone() : undefined;
     const originalBody = await request.arrayBuffer();
+    const parsedBody = decodedBody === undefined ? await readJsonRequestBody(parseRequest!) : decodedBody;
+    if (parsedBody && typeof parsedBody === "object" && !Array.isArray(parsedBody)) {
+      const items = (parsedBody as { input?: unknown }).input;
+      const tail = Array.isArray(items) ? items.at(-1) : undefined;
+      compactionRequest ||= endpoint === "responses"
+        && tail !== null && typeof tail === "object" && !Array.isArray(tail)
+        && (tail as { type?: unknown }).type === "compaction_trigger";
+    }
     const scrubbed = scrubBridgeArtifactsForNative(
-      decodedBody === undefined ? await readJsonRequestBody(parseRequest!) : decodedBody,
+      parsedBody,
     );
     if (scrubbed.changed) {
       headers.delete("content-encoding");
@@ -237,9 +253,23 @@ export async function forwardNativeCodexRequest(
     headers,
     ...(body ? { body } : {}),
     signal: request.signal,
+    redirect: imageRequest ? "manual" : "follow",
   });
   const upstream = await fetchUpstream(upstreamRequest);
+  if (compactionRequest && !upstream.ok) {
+    runtimeDiagnostics()?.event("native.compaction_upstream_failed", "Native compaction failed upstream", {
+      endpoint, status: upstream.status,
+      ...(["x-request-id", "cf-ray"] as const).reduce((ids, name) => {
+        const value = upstream.headers.get(name);
+        return value && /^[A-Za-z0-9._:-]{1,128}$/.test(value) ? { ...ids, [name]: value } : ids;
+      }, {} as Record<string, string>),
+    }, "error");
+  }
   const responseHeaders = endToEndHeaders(upstream.headers);
+  if (imageRequest) {
+    responseHeaders.delete("content-encoding");
+    responseHeaders.delete("content-length");
+  }
   const isEventStream = (upstream.headers.get("content-type") ?? "")
     .toLowerCase()
     .includes("text/event-stream");

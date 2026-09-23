@@ -1,4 +1,5 @@
 const { spawnSync } = require("node:child_process");
+const { createHash } = require("node:crypto");
 const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
@@ -38,9 +39,40 @@ const builderArgs = [
 if (target === "--mac" && !env.CSC_LINK && !env.CSC_NAME) {
   builderArgs.push("--config.mac.identity=-");
 }
+if (launcherManifest.codexWebGptElectronPatch === "webauthn-v44.4.4") {
+  const dist = env.CODEX_WEB_GPT_ELECTRON_DIST;
+  if (!dist || !path.isAbsolute(dist) || !dist.endsWith(".zip") || !fs.statSync(dist, { throwIfNoEntry: false })?.isFile()) {
+    throw new Error("Packaging this fork requires an absolute CODEX_WEB_GPT_ELECTRON_DIST path to its patched Electron ZIP");
+  }
+  const manifest = JSON.parse(fs.readFileSync(path.join(root, "..", "native", "electron", "manifest.json"), "utf8"));
+  const recordPath = path.join(path.dirname(dist), "codex-web-gpt-webauthn-build.json");
+  const record = JSON.parse(fs.readFileSync(recordPath, "utf8"));
+  const sha256 = file => createHash("sha256").update(fs.readFileSync(file)).digest("hex");
+  const patchSha256 = sha256(path.join(root, "..", "native", "electron", manifest.patch));
+  const chromiumPatchSha256 = sha256(path.join(root, "..", "native", "electron", manifest.chromiumPatch));
+  if (record.version !== 1 || record.electronCommit !== manifest.electronCommit
+    || record.chromiumCommit !== manifest.chromiumCommit
+    || record.buildToolsCommit !== manifest.buildToolsCommit || record.patchSha256 !== patchSha256
+    || record.chromiumPatchSha256 !== chromiumPatchSha256
+    || JSON.stringify(record.libnotifyHeaders) !== JSON.stringify(manifest.libnotifyHeaders)
+    || !/^[a-f0-9]{64}$/.test(record.binarySha256)
+    || record.distSha256 !== sha256(dist)) {
+    throw new Error("The selected Electron ZIP does not match the reviewed WebAuthn build record");
+  }
+  fs.mkdirSync(path.join(root, "build"), { recursive: true });
+  fs.writeFileSync(path.join(root, "build", "webauthn-runtime.json"), `${JSON.stringify({
+    version: 1,
+    electronCommit: record.electronCommit,
+    patchSha256: record.patchSha256,
+    chromiumPatchSha256: record.chromiumPatchSha256,
+    binarySha256: record.binarySha256,
+  })}\n`, { mode: 0o600 });
+  builderArgs.push(`--config.electronDist=${dist}`);
+}
 
 const staging = fs.mkdtempSync(path.join(os.tmpdir(), "codex-web-gpt-package-"));
-const artifactsDirectory = path.join(root, "artifacts");
+const artifactsDirectory = env.CODEX_WEB_GPT_ARTIFACTS_DIR || path.join(root, "artifacts");
+if (!path.isAbsolute(artifactsDirectory)) throw new Error("CODEX_WEB_GPT_ARTIFACTS_DIR must be absolute");
 
 function runChecked(command, args) {
   const result = spawnSync(command, args, {

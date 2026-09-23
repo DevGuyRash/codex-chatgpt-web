@@ -2,6 +2,9 @@ const { contextBridge, ipcRenderer } = require("electron");
 const { unwrapDiagnosticResult } = require("../../src/diagnostics/request-error.ts");
 const invoke = (...args) => ipcRenderer.invoke(...args).then(unwrapDiagnosticResult);
 const { createDiagnosticsBridge } = require("../diagnostics/preload.ts");
+const { injectBrowserAction } = require("electron-chrome-extensions/browser-action");
+
+injectBrowserAction();
 
 function subscription(channel, listener) {
   const wrapped = (_event, value) => listener(value);
@@ -39,6 +42,11 @@ contextBridge.exposeInMainWorld("codexWebLauncher", {
   confirmManualSent: (tabId) => invoke("launcher:manual-prompt-sent", tabId),
   openLogin: () => invoke("launcher:browser-login"),
   openPasskeyLogin: () => invoke("launcher:browser-passkey-login"),
+  installOnePassword: () => invoke("launcher:browser-install-onepassword"),
+  installBrowserExtension: id => invoke("launcher:browser-extension-install", id),
+  openBrowserExtension: id => invoke("launcher:browser-extension-open", id),
+  checkBrowserExtensionUpdates: () => invoke("launcher:browser-extension-check-updates"),
+  updateBrowserExtension: id => invoke("launcher:browser-extension-update", id),
   continuePasskeyLogin: () => invoke("launcher:browser-passkey-login-continue"),
   logoutChatGpt: () => invoke("launcher:browser-logout"),
   dismissSessionReminder: () => invoke("launcher:session-reminder-dismiss"),

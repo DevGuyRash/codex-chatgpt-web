@@ -25,11 +25,16 @@ if [ -z "$LIBNOTIFY" ]; then
   echo "Final AppImage contains no libnotify.so.4" >&2
   exit 1
 fi
-if ! nm -D --defined-only "$LIBNOTIFY" \
-  | awk '$3 == "notify_notification_get_activation_app_launch_context" { found = 1 } END { exit found ? 0 : 1 }'; then
-  echo "Final AppImage libnotify is missing notify_notification_get_activation_app_launch_context" >&2
-  exit 1
-fi
+# Electron 44.4.4's generated LibNotifyLoader resolves these symbols with dlsym.
+# A newer host-only libnotify API is not a requirement of this pinned runtime.
+REQUIRED_SYMBOLS="notify_is_initted notify_init notify_get_server_caps notify_get_server_info notify_notification_new notify_notification_add_action notify_notification_set_image_from_pixbuf notify_notification_set_timeout notify_notification_set_urgency notify_notification_set_hint notify_notification_show notify_notification_close"
+AVAILABLE_SYMBOLS="$(nm -D --defined-only "$LIBNOTIFY" | awk '{print $3}')"
+for symbol in $REQUIRED_SYMBOLS; do
+  if ! printf '%s\n' "$AVAILABLE_SYMBOLS" | grep -Fxq "$symbol"; then
+    echo "Final AppImage libnotify is missing Electron's required symbol: $symbol" >&2
+    exit 1
+  fi
+done
 
 EXECUTABLE=""
 for candidate in "$APP_DIR"/*; do

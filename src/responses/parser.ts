@@ -14,6 +14,7 @@ import type {
 import { namespacedToolName } from "../types";
 import { responsesRequestSchema } from "./schema";
 import { compactionItemToText } from "./compaction";
+import { codexNativeTurnMetadata, isLocalMementoCompactionRequest } from "./native-metadata";
 import { previousResponseReplayPrefixLength } from "./state";
 import { decodeReasoningEnvelope } from "./reasoning-envelope";
 
@@ -619,6 +620,14 @@ export function parseRequest(body: unknown): CodexParsedRequest {
   Object.assign(options, parseTextControls(data.text));
   if (data.prompt_cache_key !== undefined) options.promptCacheKey = data.prompt_cache_key;
 
+  const localMementoCompaction = isLocalMementoCompactionRequest(body);
+  if (compactionRequest && localMementoCompaction) {
+    throw new Error("Responses request mixes encrypted and local memento compaction contracts");
+  }
+  if (codexNativeTurnMetadata(body)?.request_kind === "compaction"
+    && !compactionRequest && !localMementoCompaction) {
+    throw new Error("This native Codex compaction contract is unsupported by the Web bridge");
+  }
   return {
     modelId: data.model,
     ...(data.previous_response_id ? { previousResponseId: data.previous_response_id } : {}),
@@ -628,6 +637,7 @@ export function parseRequest(body: unknown): CodexParsedRequest {
     _rawBody: body,
     ...(replayedInputPrefixLength > 0 ? { _replayPrefixLen: replayedInputPrefixLength } : {}),
     ...(compactionRequest ? { _compactionRequest: true } : {}),
+    ...(localMementoCompaction ? { _localMementoCompaction: true } : {}),
     ...(opaqueMultiAgentV2Payload ? { _opaqueMultiAgentV2Payload: true } : {}),
   };
 }

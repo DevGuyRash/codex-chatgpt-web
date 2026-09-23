@@ -39,6 +39,10 @@ export const CHATGPT_WEB_INSTANT_COMPOSER_CHAR_LIMIT = 211_256;
 export const CHATGPT_WEB_MEDIUM_HIGH_COMPOSER_CHAR_LIMIT = 1_048_572;
 /** Hidden ChatGPT product prompt and Codex Native schema reserve included in usage estimates. */
 export const CHATGPT_WEB_PLATFORM_RESERVE_TOKENS = 8_192;
+/** Reserve for each attachment in the final browser message; inert stages carry no images. */
+export function chatGptWebImageTokenReserve(detail?: string): number {
+  return detail === "original" ? 8_192 : 4_096;
+}
 /** Pro-account usable browser windows and separately measured one-message boundaries. */
 export const CHATGPT_WEB_PRO_AUTO_COMPACT_TOKEN_LIMIT = 95_000;
 export const CHATGPT_WEB_PRO_STANDARD_MESSAGE_TOKEN_LIMIT = 103_000;
@@ -59,7 +63,8 @@ export const CHATGPT_WEB_ZERO_RISK_PRO_CONTEXT_WINDOW =
 export const CHATGPT_WEB_ZERO_RISK_PRO_AUTO_COMPACT_TOKEN_LIMIT =
   CHATGPT_WEB_PRO_AUTO_COMPACT_TOKEN_LIMIT * 3;
 export const CHATGPT_WEB_PRO_INSTANT_COMPOSER_CHAR_LIMIT = 545_000;
-export const CHATGPT_WEB_PRO_REASONING_COMPOSER_CHAR_LIMIT = 1_045_000;
+// The upstream browser accepts longer editor text but can reject the request with HTTP 413.
+export const CHATGPT_WEB_PRO_REASONING_COMPOSER_CHAR_LIMIT = 500_000;
 export const CHATGPT_WEB_PRO_MODEL_COMPOSER_CHAR_LIMIT = 1_635_000;
 /**
  * The underlying Luna model owns this context window. ChatGPT Free's much smaller browser request
@@ -189,6 +194,23 @@ export function resolveChatGptWebTransportLimits(
     browserMessageTokenLimit: CHATGPT_WEB_PRO_STANDARD_MESSAGE_TOKEN_LIMIT,
     browserComposerCharLimit: CHATGPT_WEB_PRO_REASONING_COMPOSER_CHAR_LIMIT,
   };
+}
+
+/** One message's visible-text budget after the hidden product reserve and attachments. */
+export function resolveChatGptWebMessageTokenBudget(
+  backendModel: typeof CHATGPT_WEB_BACKEND_MODEL,
+  effort: ChatGptWebAdapterEffort,
+  capabilities: ChatGptWebAccountCapabilities,
+  imageTokens = 0,
+): number {
+  const { contextWindow } = resolveChatGptWebContextLimits(
+    backendModel, effort, { ...capabilities, experimentalBiggerContext: false },
+  );
+  const { browserMessageTokenLimit } = resolveChatGptWebTransportLimits(backendModel, effort, capabilities);
+  return Math.max(0, Math.min(
+    contextWindow - CHATGPT_WEB_PLATFORM_RESERVE_TOKENS - imageTokens - 1,
+    browserMessageTokenLimit ?? Infinity,
+  ));
 }
 
 interface ChatGptWebModelRouteBase {

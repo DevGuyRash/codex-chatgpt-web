@@ -1,0 +1,29 @@
+{
+  "electronTag": "v44.4.4",
+  "electronCommit": "b2004823e907e9a8dd4aa2e7c078963000c04e2e",
+  "chromiumVersion": "152.0.7977.130",
+  "chromiumCommit": "33132c03ce60a8ac280193cd6251e6faf0bb03d6",
+  "buildToolsCommit": "4fb8cc9d5e36080368e564aacb820195f94cf1d6",
+  "buildConfig": "codex-web-gpt-v44-release",
+  "gnArgs": [
+    "import(\"//electron/build/args/release.gn\")",
+    "is_official_build=false",
+    "is_debug=false",
+    "symbol_level=0",
+    "chrome_pgo_phase=0",
+    "v8_builtins_profiling_log_file=\"\""
+  ],
+  "patch": "webauthn-v44.4.4.patch",
+  "chromiumPatch": "hybrid-discovery-retry.patch",
+  "libnotifyHeaders": {
+    "version": "0.8.8",
+    "sha256": {
+      "notification.h": "8f2d583016288355e9049daacfdb8edf0a799471e5f1d4b7f5dadfe05d54b465",
+      "notification-hints.h": "a9f39a4992af40566a3077ea6978d72320827b549ad00ef460b647fda902c0ba",
+      "notify-enum-types.h": "845968effe31796eb1eb11a89a31e98748d455638218271d57219583e1ffc068",
+      "notify-features.h": "f2f5c7a41c63cd9c4e094e9e49f7bd336006a4288b7e65cfd978e78e60cb5641",
+      "notify.h": "c02c1c54c1857346b157e300b055453f87a98d452d5867160d6b58a6eeb44dd3"
+    }
+  },
+  "purpose": "Embedded security-key PIN, hybrid phone passkeys, and compatible extension permission features"
+}

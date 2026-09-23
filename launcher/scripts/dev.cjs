@@ -4,7 +4,7 @@ const path = require("node:path");
 const root = path.resolve(__dirname, "..");
 const vitePackage = require.resolve("vite/package.json", { paths: [root] });
 const viteBin = path.join(path.dirname(vitePackage), "bin", "vite.js");
-const electronBin = require("electron");
+const { executable: electronBin, recordPath: electronRecord } = require("./native-electron.cjs").reviewedElectronBinary();
 const bun = process.env.CODEX_WEB_GPT_BUN || process.execPath;
 const diagnosticsBuild = spawnSync(bun, ["run", "scripts/build-diagnostics.ts"], { cwd: path.resolve(root, ".."), env: process.env, stdio: "inherit" });
 if (diagnosticsBuild.error) throw diagnosticsBuild.error;
@@ -55,6 +55,7 @@ void waitForVite().then(() => {
       VITE_DEV_SERVER_URL: "http://127.0.0.1:4178",
       CODEX_WEB_GPT_BUN: bun,
       CODEX_CHATGPT_WEB_BUN: bun,
+      CODEX_WEB_GPT_ELECTRON_BUILD_RECORD: electronRecord,
     },
   });
   electron.once("exit", (code) => {

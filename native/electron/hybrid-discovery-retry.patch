@@ -1,0 +1,54 @@
+diff --git a/device/bluetooth/bluez/bluetooth_adapter_bluez.cc b/device/bluetooth/bluez/bluetooth_adapter_bluez.cc
+index 7103973846..c9bf206344 100644
+--- a/device/bluetooth/bluez/bluetooth_adapter_bluez.cc
++++ b/device/bluetooth/bluez/bluetooth_adapter_bluez.cc
+@@ -1960,6 +1960,12 @@ void BluetoothAdapterBlueZ::OnStartDiscoveryError(
+     DiscoverySessionResultCallback callback,
+     const std::string& error_name,
+     const std::string& error_message) {
++  if (error_name == "org.bluez.Error.InProgress" && IsDiscovering()) {
++    BLUETOOTH_LOG(EVENT) << object_path_.value()
++                         << ": Sharing an already active discovery session.";
++    OnStartDiscovery(std::move(callback));
++    return;
++  }
+   BLUETOOTH_LOG(ERROR) << object_path_.value()
+                        << ": Failed to start discovery: " << error_name << ": "
+                        << error_message;
+diff --git a/device/fido/cable/v2_discovery.cc b/device/fido/cable/v2_discovery.cc
+index 839102f7a2..6e64e8ff42 100644
+--- a/device/fido/cable/v2_discovery.cc
++++ b/device/fido/cable/v2_discovery.cc
+@@ -450,11 +450,20 @@ void Discovery::StartCableDiscovery() {
+ void Discovery::OnStartDiscoverySession(
+     std::unique_ptr<BluetoothDiscoverySession> session) {
+   FIDO_LOG(DEBUG) << "Discovery session started.";
++  scan_start_retries_ = 0;
+   SetDiscoverySession(std::move(session));
+ }
+ 
+ void Discovery::OnStartDiscoverySessionError() {
+   FIDO_LOG(ERROR) << "Failed to start caBLE discovery";
++  if (scan_start_retries_ >= 3 || !adapter() || !adapter()->IsPowered())
++    return;
++  ++scan_start_retries_;
++  base::SequencedTaskRunner::GetCurrentDefault()->PostDelayedTask(
++      FROM_HERE,
++      base::BindOnce(&Discovery::StartCableDiscovery,
++                     weak_factory_.GetWeakPtr()),
++      base::Milliseconds(750 * scan_start_retries_));
+ }
+ 
+ }  // namespace device::cablev2
+diff --git a/device/fido/cable/v2_discovery.h b/device/fido/cable/v2_discovery.h
+index a6291ec271..e6b67315fa 100644
+--- a/device/fido/cable/v2_discovery.h
++++ b/device/fido/cable/v2_discovery.h
+@@ -149,6 +149,7 @@ class COMPONENT_EXPORT(DEVICE_FIDO) Discovery
+   base::flat_set<std::array<uint8_t, kAdvertSize>> observed_adverts_;
+   bool started_ = false;
+   bool device_committed_ = false;
++  int scan_start_retries_ = 0;
+ 
+   base::WeakPtrFactory<Discovery> weak_factory_{this};
+ };

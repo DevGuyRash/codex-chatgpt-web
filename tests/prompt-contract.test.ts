@@ -156,12 +156,12 @@ test("Bigger Context sends three semantic record envelopes and starts work from 
   expect(commit.match(new RegExp(token, "g"))).toHaveLength(1);
 });
 
-test("Bigger Context uses the minimum transport and reserves three stages for compaction", () => {
+test("Bigger Context uses the minimum transport and reserves full staging for compaction", () => {
   expect(biggerContextPartCount(94_999, 95_000, false)).toBeUndefined();
   expect(biggerContextPartCount(95_000, 95_000, false)).toBe(2);
   expect(biggerContextPartCount(189_999, 95_000, false)).toBe(2);
-  expect(biggerContextPartCount(190_000, 95_000, false)).toBe(3);
-  expect(biggerContextPartCount(1, 95_000, true)).toBe(3);
+  expect(biggerContextPartCount(190_000, 95_000, false)).toBe(CHATGPT_BIGGER_CONTEXT_PARTS);
+  expect(biggerContextPartCount(1, 95_000, true)).toBe(CHATGPT_BIGGER_CONTEXT_PARTS);
 
   const compiled = compileChatGptWebPrompt(
     request("high"),

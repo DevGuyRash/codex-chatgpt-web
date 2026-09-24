@@ -52,8 +52,10 @@ export class GoldenAppServer {
       }
       if (frame.message.method === "turn/completed") {
         const turn = readNativeTurn(params.turn);
+        // Native compaction and ancillary work can settle on the same thread.
+        // Only this driver's accepted turn may occupy its completion cache.
+        if (!this.active?.id || turn.id !== this.active.id) return;
         if (turn.status === "inProgress") throw invalid("Native completion event still reports an active turn");
-        if (this.completed.size >= 128 && !this.completed.has(turn.id)) throw invalid("Unconsumed native completions exceeded their bounded history");
         this.completed.set(turn.id, turn);
       }
     } });

@@ -14,11 +14,16 @@ process.stdin.on("data", chunk => { buffer+=chunk.toString(); for (;;) {
  const i=buffer.indexOf("\\n"); if(i<0)break; const m=JSON.parse(buffer.slice(0,i)); buffer=buffer.slice(i+1);
  if(m.method==="initialize")send({id:m.id,result:{userAgent:"fixture"}});
  if(m.method==="thread/start" || m.method==="thread/resume")send({id:m.id,result:{thread:{id:"thread-one"},model:m.params.model,modelProvider:"openai",reasoningEffort:"low",cwd:m.params.cwd}});
+ if(m.method==="test/ancillary") {
+  for(let i=0;i<140;i++)send({method:"turn/completed",params:{threadId:"thread-one",turn:{id:"background-"+i,status:"completed",items:[]}}});
+  send({id:m.id,result:{observed:140}});
+ }
  if(m.method==="turn/start") {
   const id="turn-"+(++n), text=m.params.input[0].text;
   send({method:"turn/started",params:{threadId:"thread-one",turn:{id,status:"inProgress",items:[]}}});
+  if(text==="early-with-ancillary")for(let i=0;i<140;i++)send({method:"turn/completed",params:{threadId:"thread-one",turn:{id:"background-active-"+i,status:"completed",items:[]}}});
   if(text==="uncertain")continue;
-  if(text==="early")send({method:"turn/completed",params:{threadId:"thread-one",turn:{id,status:"completed",items:[]}}});
+  if(text==="early" || text==="early-with-ancillary")send({method:"turn/completed",params:{threadId:"thread-one",turn:{id,status:"completed",items:[]}}});
   if(text==="wrong-thread")send({method:"turn/completed",params:{threadId:"other",turn:{id,status:"completed",items:[]}}});
   send({id:m.id,result:{turn:{id,status:"inProgress",items:[]}}});
  }
@@ -34,6 +39,17 @@ process.stdin.on("end",()=>process.exit(0));
   const app = new GoldenAppServer({ executable: process.execPath, args: [peer], cwd: root, env: {}, route: CHATGPT_WEB_MODEL_ROUTES[0]!, onFrame: frame => { frames.push(frame); } });
   return { app, root, frames, close: async () => { await app.close(100); rmSync(root, { recursive: true, force: true }); } };
 }
+
+test("ancillary same-thread completions cannot occupy an owned turn cache", async () => {
+  const f = fixture();
+  try {
+    await f.app.initialize(); await f.app.openThread();
+    expect(await f.app.rpc.request("test/ancillary", {})).toEqual({ observed: 140 });
+    const turn = await f.app.startTurn({ text: "early-with-ancillary" });
+    expect(await f.app.waitForCompletion(turn.id)).toMatchObject({ id: "turn-1", status: "completed" });
+    expect(f.frames.filter(frame => frame.direction === "received" && frame.message.method === "turn/completed")).toHaveLength(281);
+  } finally { await f.close(); }
+});
 
 test("native turn completion can precede its acknowledgement without being lost", async () => {
   const f = fixture();

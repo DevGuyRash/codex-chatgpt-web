@@ -435,6 +435,7 @@ export class DevChatDriver {
   }
 
   setModel(state: DevChatState, model: DevChatModel): void {
+    if (state.pendingSubmission) throw new Error("Resolve or discard the pending DEV message before changing its model");
     requireChatGptWebModelRoute(model, this.config);
     this.assertBiggerContextModel(model);
     state.model = model;
@@ -445,7 +446,14 @@ export class DevChatDriver {
     this.store.reset(state);
   }
 
+  discardPending(state: DevChatState): void {
+    if (!state.pendingSubmission) throw new Error("DEV chat has no pending message to discard");
+    delete state.pendingSubmission;
+    this.store.save(state);
+  }
+
   fill(state: DevChatState, targetTokens: number): { addedTokens: number; status: DevContextStatus } {
+    if (state.pendingSubmission) throw new Error("Resolve or discard the pending DEV message before changing context");
     const filler = createDevContextFiller(targetTokens);
     const fillerTurnId = id("dev_fill_turn");
     state.input.push({
@@ -470,6 +478,7 @@ export class DevChatDriver {
     state: DevChatState,
     emit: (event: DevChatEvent) => void = () => {},
   ): Promise<DevContextStatus> {
+    if (state.pendingSubmission) throw new Error("Resolve or discard the pending DEV message before compaction");
     if (state.input.length === 0) throw new Error("DEV chat has no history to compact");
     const output = await this.compactInput(state, state.input, "manual", emit);
     state.input = output;
@@ -482,9 +491,22 @@ export class DevChatDriver {
     state: DevChatState,
     message: string,
     emit: (event: DevChatEvent) => void = () => {},
+    signal?: AbortSignal,
+    options: { retryPending?: boolean } = {},
   ): Promise<DevChatTurnResult> {
+    signal?.throwIfAborted();
     const prompt = message.trim();
     if (!prompt) throw new Error("DEV chat message must not be empty");
+    const pending = state.pendingSubmission;
+    if (options.retryPending) {
+      if (!pending) throw new Error("DEV chat has no pending message to retry");
+      if (pending.status !== "unsent") throw new Error("DEV message submission is uncertain; inspect the ChatGPT tab before deciding whether to discard it");
+      if (prompt !== pending.message || state.model !== pending.model) {
+        throw new Error("DEV retry must preserve the exact pending message and model");
+      }
+    } else if (pending) {
+      throw new Error("DEV chat has a pending rate-limited message; retry or discard it before sending another instruction");
+    }
     const turnId = id("dev_turn");
     let compactions = 0;
     let pendingCompactions = 0;
@@ -506,22 +528,42 @@ export class DevChatDriver {
       );
     }
 
+    if (options.retryPending) {
+      state.pendingSubmission = { ...pending!, status: "uncertain" };
+      this.store.save(state);
+    }
+
     let totalToolCalls = 0;
     const usage: DevChatUsage = { inputTokens: 0, outputTokens: 0, totalTokens: 0 };
     let finalText = "";
     for (let round = 0; round < 64; round += 1) {
+      signal?.throwIfAborted();
       const body = requestBody(state, this.cwd, turnId, workingInput, false, this.config.mode === "full");
       const response = await responseRequest(new Request("http://codex-web-gpt.dev/v1/responses", {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify(body),
+        ...(signal ? { signal } : {}),
       }), this.config, this.adapterFactory, {
         rememberState: false,
         onAdapterEvent: event => observeAdapterEvent(event, emit),
       });
       const envelope = await response.json() as ResponsesEnvelope;
       if (!Array.isArray(envelope.output)) throw new Error("DEV Responses handler returned no output array");
-      if (envelope.status !== "completed") throw new Error(responseError(envelope));
+      if (envelope.status !== "completed") {
+        if (round === 0 && envelope.error?.code === "rate_limit_before_send") {
+          state.pendingSubmission = {
+            message: prompt,
+            model: state.model,
+            status: "unsent",
+            reason: "rate_limit_before_send",
+            observedAt: new Date().toISOString(),
+          };
+          this.store.save(state);
+          throw new Error(`${responseError(envelope)} The exact unsent DEV message was saved; wait for capacity, then use /retry or --retry-pending.`);
+        }
+        throw new Error(responseError(envelope));
+      }
       const output = historyOutput(envelope.output!, turnId);
       workingInput.push(...output);
       const roundUsage = usageOf(envelope);
@@ -535,6 +577,7 @@ export class DevChatDriver {
         }
         finalText = outputText(output);
         state.input = workingInput;
+        delete state.pendingSubmission;
         state.turns += 1;
         state.compactions += pendingCompactions;
         state.lastUsage = usage;

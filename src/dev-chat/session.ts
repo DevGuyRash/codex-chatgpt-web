@@ -23,6 +23,16 @@ const usageSchema = z.object({
   totalTokens: z.number().int().nonnegative(),
 });
 
+const pendingSubmissionSchema = z.object({
+  message: z.string().min(1),
+  model: z.enum(DEV_CHAT_MODELS),
+  status: z.enum(["unsent", "uncertain"]),
+  reason: z.literal("rate_limit_before_send"),
+  observedAt: z.string(),
+});
+
+export type DevPendingSubmission = z.infer<typeof pendingSubmissionSchema>;
+
 const stateSchema = z.object({
   version: z.literal(1),
   name: z.string(),
@@ -36,6 +46,7 @@ const stateSchema = z.object({
   createdAt: z.string(),
   updatedAt: z.string(),
   lastUsage: usageSchema.optional(),
+  pendingSubmission: pendingSubmissionSchema.optional(),
 });
 
 export interface DevChatUsage {
@@ -57,6 +68,7 @@ export interface DevChatState {
   createdAt: string;
   updatedAt: string;
   lastUsage?: DevChatUsage;
+  pendingSubmission?: DevPendingSubmission;
 }
 
 export interface DevChatSummary {
@@ -93,6 +105,9 @@ function parseState(value: unknown, path: string): DevChatState {
   if (!isAbsolute(parsed.data.cwd)) throw new Error(`Invalid DEV chat cwd in ${path}`);
   if (Number.isNaN(Date.parse(parsed.data.createdAt)) || Number.isNaN(Date.parse(parsed.data.updatedAt))) {
     throw new Error(`Invalid DEV chat timestamps in ${path}`);
+  }
+  if (parsed.data.pendingSubmission && Number.isNaN(Date.parse(parsed.data.pendingSubmission.observedAt))) {
+    throw new Error(`Invalid pending DEV message timestamp in ${path}`);
   }
   return parsed.data;
 }
@@ -160,6 +175,7 @@ export class DevChatStore {
     state.compactions = 0;
     state.syntheticFills = 0;
     delete state.lastUsage;
+    delete state.pendingSubmission;
     this.save(state);
   }
 

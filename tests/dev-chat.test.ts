@@ -291,6 +291,149 @@ test("browser-only DEV driver runs real turns without advertising simulated tool
   }
 });
 
+test("interrupting a DEV message aborts its active browser request without committing history", async () => {
+  const root = scratch("cgw-dev-abort");
+  const config = {
+    ...defaultConfig("browser-only"),
+    purpose: "dev-harness" as const,
+    solAvailable: true,
+  };
+  let started!: () => void;
+  const reachedAdapter = new Promise<void>(resolve => { started = resolve; });
+  const factory = (): ProviderAdapter => ({
+    name: "dev-abort-test",
+    async runTurn(_parsed, incoming) {
+      started();
+      const signal = incoming.abortSignal;
+      if (!signal) throw new Error("DEV request did not carry an abort signal");
+      await new Promise<void>((_resolve, reject) => {
+        signal.addEventListener("abort", () => reject(signal.reason), { once: true });
+      });
+    },
+  });
+  const store = new DevChatStore(join(root, "chats"));
+  const driver = new DevChatDriver(config, store, factory, root);
+  const state = driver.open("aborted", "chatgpt-web/high").state;
+  const controller = new AbortController();
+  try {
+    const pending = driver.send(state, "An interrupted message", () => {}, controller.signal);
+    await reachedAdapter;
+    controller.abort(new DOMException("DEV chat interrupted", "AbortError"));
+    await expect(pending).rejects.toThrow();
+    expect(state.input).toEqual([]);
+    expect(store.load("aborted")?.turns).toBe(0);
+  } finally {
+    await driver.close();
+  }
+});
+
+test("a pre-Send rate limit preserves the exact pending DEV message and requires an explicit retry", async () => {
+  const root = scratch("cgw-dev-rate-limit");
+  const config = {
+    ...defaultConfig("browser-only"),
+    purpose: "dev-harness" as const,
+    solAvailable: true,
+  };
+  const store = new DevChatStore(join(root, "chats"));
+  const rateLimited = new DevChatDriver(config, store, () => ({
+    name: "dev-rate-limit-test",
+    async runTurn(_parsed, _incoming, emit) {
+      emit({
+        type: "error",
+        message: "ChatGPT rate limit: too many requests. The pending message was not sent.",
+        status: 429,
+        errorType: "rate_limit_error",
+        code: "rate_limit_before_send",
+        retryable: false,
+      });
+    },
+  }), root);
+  const state = rateLimited.open("long-chat", "chatgpt-web/high").state;
+  state.input.push({ type: "message", role: "assistant", content: [{ type: "output_text", text: "Earlier completed answer" }] });
+  state.turns = 1;
+  store.save(state);
+  const previousInput = structuredClone(state.input);
+  try {
+    await expect(rateLimited.send(state, "Continue this exact long chat")).rejects.toThrow("exact unsent DEV message was saved");
+    expect(state.input).toEqual(previousInput);
+    expect(state.turns).toBe(1);
+    expect(store.load("long-chat")?.pendingSubmission).toMatchObject({
+      message: "Continue this exact long chat",
+      model: "chatgpt-web/high",
+      status: "unsent",
+      reason: "rate_limit_before_send",
+    });
+    await expect(rateLimited.send(state, "A different message")).rejects.toThrow("pending rate-limited message");
+    expect(() => rateLimited.setModel(state, "chatgpt-web/light")).toThrow("pending DEV message");
+  } finally {
+    await rateLimited.close();
+  }
+
+  const resumed = new DevChatDriver(config, store, () => ({
+    name: "dev-rate-limit-resume-test",
+    async runTurn(_parsed, _incoming, emit) {
+      expect(store.load("long-chat")?.pendingSubmission?.status).toBe("uncertain");
+      emit({ type: "text_delta", text: "Recovered exact message", phase: "final_answer" });
+      emit({
+        type: "done", stopReason: "stop", endTurn: true,
+        usage: { inputTokens: 10, outputTokens: 3, totalTokens: 13, estimated: true },
+      });
+    },
+  }), root);
+  try {
+    const recovered = resumed.open("long-chat").state;
+    await expect(resumed.send(recovered, recovered.pendingSubmission!.message, () => {}, undefined, { retryPending: true }))
+      .resolves.toMatchObject({ text: "Recovered exact message", toolCalls: 0 });
+    expect(store.load("long-chat")?.pendingSubmission).toBeUndefined();
+    expect(store.load("long-chat")?.turns).toBe(2);
+  } finally {
+    await resumed.close();
+  }
+});
+
+test("an interrupted pending-message retry becomes uncertain and cannot be replayed", async () => {
+  const root = scratch("cgw-dev-rate-limit-uncertain");
+  const config = { ...defaultConfig("browser-only"), purpose: "dev-harness" as const, solAvailable: true };
+  const store = new DevChatStore(join(root, "chats"));
+  const state = store.loadOrCreate("uncertain", "chatgpt-web/high", root).state;
+  state.pendingSubmission = {
+    message: "Exact unsent message",
+    model: state.model,
+    status: "unsent",
+    reason: "rate_limit_before_send",
+    observedAt: new Date().toISOString(),
+  };
+  store.save(state);
+  let started!: () => void;
+  const reachedAdapter = new Promise<void>(resolve => { started = resolve; });
+  const driver = new DevChatDriver(config, store, () => ({
+    name: "dev-uncertain-retry-test",
+    async runTurn(_parsed, incoming) {
+      started();
+      const signal = incoming.abortSignal;
+      if (!signal) throw new Error("DEV retry had no abort signal");
+      await new Promise<void>((_resolve, reject) => {
+        signal.addEventListener("abort", () => reject(signal.reason), { once: true });
+      });
+    },
+  }), root);
+  const controller = new AbortController();
+  try {
+    const pending = driver.send(state, state.pendingSubmission.message, () => {}, controller.signal, { retryPending: true });
+    await reachedAdapter;
+    controller.abort(new DOMException("DEV chat interrupted", "AbortError"));
+    await expect(pending).rejects.toThrow();
+    expect(store.load("uncertain")?.pendingSubmission?.status).toBe("uncertain");
+    await expect(driver.send(state, "Exact unsent message", () => {}, undefined, { retryPending: true }))
+      .rejects.toThrow("submission is uncertain");
+    driver.discardPending(state);
+    expect(store.load("uncertain")?.pendingSubmission).toBeUndefined();
+    expect(store.load("uncertain")?.input).toEqual([]);
+  } finally {
+    await driver.close();
+  }
+});
+
 test("DEV chat attaches its broker to the launcher-owned tunnel without a Responses listener", async () => {
   const root = scratch("cgw-dev-transport");
   const occupied = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: () => new Response("normal Codex route") });

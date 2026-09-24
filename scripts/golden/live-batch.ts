@@ -14,6 +14,7 @@ import { ContentManifestSchema } from "../../src/diagnostics/contracts";
 import { initializeRuntimeDiagnostics, closeRuntimeDiagnostics } from "../../src/diagnostics/runtime";
 import { DiagnosticError, problemFor } from "../../src/diagnostics/problems";
 import { GoldenEvidence, finishGoldenEvidence } from "./evidence";
+import { GoldenCaptureLane } from "./capture-lane";
 import { runNativeScenario, finiteNativeScenarios, type FiniteNativeScenario, type NativeScenarioCheckpoint } from "./native-scenarios";
 import { findNativeScenarioFailure, type NativeScenarioFailure } from "./structured-scenarios";
 import { findNativeTuiTitleFailure } from "./tui-scenarios";
@@ -132,7 +133,8 @@ export async function runLiveBatch(options: {
     const diagnostics = initializeRuntimeDiagnostics({ component: "golden", sink: client });
     if (!diagnostics) throw new Error("The live batch has no diagnostic owner");
     const operation = diagnostics.begin("golden.live_batch", { boundary, protocol, nativeCatalogSha256, browserHelperSha256: helperBuild.sha256, cells: cells.length });
-    type CellResult = { id: string; routeSlug: string; workload: WorkloadLevel; variant: string; work: string; traceId: string; passed: boolean; nativeFailure?: NativeScenarioFailure["nativeFailure"]; nativeExecFailure?: NativeExecFailure["nativeExecFailure"]; result?: { terminal: Awaited<ReturnType<typeof runNativeScenario>>; oracle: ReturnType<typeof evaluateWorkload>; commit: ReturnType<typeof verifyArtifactCommit> }; selections?: ReturnType<typeof verifyGoldenModelSelections> | ReturnType<typeof verifyGoldenModelSequence>; receipts?: ReturnType<typeof verifyGoldenToolReceipts>; titles?: ReturnType<typeof verifyGoldenTuiTitles>; error?: ReturnType<typeof problemFor> };
+    type CellResult = { id: string; routeSlug: string; workload: WorkloadLevel; variant: string; work: string; traceId: string; passed: boolean; nativeFailure?: NativeScenarioFailure["nativeFailure"]; nativeExecFailure?: NativeExecFailure["nativeExecFailure"]; result?: { terminal: Awaited<ReturnType<typeof runNativeScenario>>; oracle: ReturnType<typeof evaluateWorkload>; commit: ReturnType<typeof verifyArtifactCommit> }; selections?: ReturnType<typeof verifyGoldenModelSelections> | ReturnType<typeof verifyGoldenModelSequence>; receipts?: ReturnType<typeof verifyGoldenToolReceipts>; titles?: ReturnType<typeof verifyGoldenTuiTitles>; progress?: Awaited<ReturnType<GoldenCaptureLane["finishBatch"]>>; error?: ReturnType<typeof problemFor> };
+    const captureLanes = new Map<string, GoldenCaptureLane>();
     let failed = false, failure: unknown, results: CellResult[] = [], admission: AdmissionObservation | undefined;
     const nativeThreads = new Set<string>();
     try {
@@ -161,12 +163,14 @@ export async function runLiveBatch(options: {
         const completed = await Promise.allSettled(cells.map(async cell => {
           const cellOperation = diagnostics.begin("golden.native_cell", { variant: cell.request.variant, route: cell.request.route.slug, workload: cell.workload.level }, null, { id: cell.request.id });
           const item: CellResult = { id: cell.request.id, routeSlug: cell.request.route.slug, workload: cell.workload.level, variant: cell.request.variant, work: cell.task, traceId: cellOperation.context.traceId, passed: false };
+          const captureLane = new GoldenCaptureLane((category, text) => evidence.capture(item.traceId, category, text));
+          captureLanes.set(item.id, captureLane);
           try {
             await evidence.bind(item.traceId);
             await evidence.capture(item.traceId, "oracle", JSON.stringify({ workload: cell.workload, baseline: cell.baseline, nativeCatalogSha256, cellId: cell.request.id }));
             const terminal = await cellOperation.run(() => runNativeScenario({ executable: options.executable, cwd: cell.task, env: nativeEnv, route: cell.request.route, modelProvider: "golden", workload: cell.workload, variant: cell.request.variant, signal: options.signal, timeoutMs: options.turnTimeoutMs,
               modelSwitch: switches.get(cell.request.id),
-              onRecord: (category, text) => evidence.capture(item.traceId, category, text),
+              onRecord: (category, text, phase, receivedAtMs) => captureLane.record(category, text, phase, receivedAtMs),
               checkpoint: async identity => {
                 if (identity.threadId) nativeThreads.add(identity.threadId);
                 const checkpoint = { ...identity, traceId: item.traceId, campaignId, work: cell.task };
@@ -174,6 +178,7 @@ export async function runLiveBatch(options: {
                 await cell.request.checkpoint?.(checkpoint);
               },
             }));
+            await captureLane.flush();
             if ("scenario" in terminal && terminal.scenario && "titleTasks" in terminal.scenario) for (const title of terminal.scenario.titleTasks) nativeThreads.add(title.threadId);
             const project = cell.workload.level < 3 ? undefined : await runProjectOracle({ workload: cell.workload, work: cell.task, validationRoot: join(work, "validation", cell.request.id), nativeHome: join(work, "validation-native", cell.request.id), nativeExecutable: options.executable, bunExecutable: process.execPath, signal: options.signal,
               onValidation: async workload => { await evidence.capture(item.traceId, "oracle", JSON.stringify({ independentWorkload: workload })); },
@@ -186,6 +191,8 @@ export async function runLiveBatch(options: {
             if (terminal.status !== "completed" || !terminal.threadId || !terminal.toolItems) throw new DiagnosticError({ code: "golden_native_evidence_missing", message: "Native workload lacks its required completed terminal, task identity or tool evidence", origin: "golden-native", stage: "native_acceptance" });
             if (!oracle.passed || !commit.passed) throw new DiagnosticError({ code: "golden_artifact_rejected", message: "The native task completed but its artifacts did not satisfy independent acceptance", origin: "golden-oracle", stage: "artifact_acceptance", findings: [...oracle.failures, ...oracle.pendingChecks, ...commit.failures].map(message => ({ message })) });
           } catch (error) {
+            try { await captureLane.flush(); }
+            catch (captureError) { if (captureError !== error) error = new AggregateError([error, captureError], "Native work and retained capture did not both settle"); }
             const titleFailure = findNativeTuiTitleFailure(error);
             if (titleFailure) nativeThreads.add(titleFailure.threadId);
             item.error = problemFor(error); cellOperation.problem(error);
@@ -225,7 +232,10 @@ export async function runLiveBatch(options: {
         const terminal = item.result.terminal;
         if (cell.request.variant === "plan-tui-execute" && "scenario" in terminal && terminal.scenario && "titleTasks" in terminal.scenario) item.titles = verifyGoldenTuiTitles(observed.events, terminal.threadId!, terminal.scenario.titleTasks, cell.request.route);
         item.passed = item.selections.passed && item.receipts.passed && (cell.request.variant !== "plan-tui-execute" || item.titles?.passed === true);
-        await evidence.capture(item.traceId, "oracle", JSON.stringify({ nativeTraceIds: nativeEvents.traceIds, nativeTurnIds: nativeEvents.turnIds, selections: item.selections, receipts: item.receipts, ...(item.titles ? { titles: item.titles } : {}), passed: item.passed }));
+        // Persist observed intervals before any campaign may turn them into a duration claim.
+        // Finite cells never credit level-five time; that requires a separate sustained owner.
+        item.progress = await captureLanes.get(item.id)!.finishBatch(false);
+        await evidence.capture(item.traceId, "oracle", JSON.stringify({ nativeTraceIds: nativeEvents.traceIds, nativeTurnIds: nativeEvents.turnIds, selections: item.selections, receipts: item.receipts, ...(item.titles ? { titles: item.titles } : {}), progress: item.progress, passed: item.passed }));
       }
     } catch (error) {
       failed = true; failure = error; operation.problem(error);

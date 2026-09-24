@@ -46,6 +46,9 @@ const MCP_GUIDE_MEDIA = [
   new URL("./assets/mcp-connect-connector.mp4", import.meta.url).href,
   new URL("./assets/mcp-connect-connector.mp4", import.meta.url).href,
 ] as const;
+const DEV_TUNNEL_NAME = "Codex Web GPT DEV MCP";
+const DEV_TUNNEL_DESCRIPTION = "Private tunnel for the isolated Codex Web GPT DEV launcher and its local MCP tool tests. Production uses a separate connector.";
+const DEV_APP_DESCRIPTION = "Isolated development connector for Codex Web GPT local tools and test receipts; not the production Codex connector.";
 
 export function App() {
   const [snapshot, setSnapshot] = useState<LauncherSnapshot | null>(null);
@@ -1345,20 +1348,55 @@ function McpSurface({
       : false,
   );
   const [replacingCredentials, setReplacingCredentials] = useState(false);
+  const [reuseSavedDevKey, setReuseSavedDevKey] = useState(false);
   const [localBusy, setLocalBusy] = useState(false);
   const busy = localBusy || operation?.status === "running";
   const [doctor, setDoctor] = useState<DoctorReport | null>(null);
+  const [workspaceConfirmed, setWorkspaceConfirmed] = useState(false);
+  const [chatConfirmed, setChatConfirmed] = useState(false);
+  const [copiedReference, setCopiedReference] = useState<string | null>(null);
   const verified = !configuringInactiveMode && snapshot.state.mcpSetupComplete === true;
   const manualInteraction = interactionMode === "manual";
   const steps = useMemo(() => [
-    { title: copy.mcpStepOne, body: copy.mcpStepOneBody },
-    { title: copy.mcpStepTwo, body: copy.mcpStepTwoBody },
+    { title: copy.mcpStepOne, body: devProfile ? copy.devMcpStepOneBody : copy.mcpStepOneBody },
+    { title: copy.mcpStepTwo, body: devProfile ? copy.devMcpStepTwoBody : copy.mcpStepTwoBody },
     {
       title: copy.mcpStepThree,
-      body: manualInteraction ? copy.manualMcpStepThreeBody : copy.mcpStepThreeBody,
+      body: devProfile ? copy.devMcpStepThreeBody : manualInteraction ? copy.manualMcpStepThreeBody : copy.mcpStepThreeBody,
     },
-  ], [copy, manualInteraction]);
-  const guideMedia = MCP_GUIDE_MEDIA[step];
+  ], [copy, devProfile, manualInteraction]);
+  const guideMedia = devProfile ? (step === 0 ? MCP_GUIDE_MEDIA[0] : undefined) : MCP_GUIDE_MEDIA[step];
+
+  const copyReference = async (value: string) => {
+    try {
+      const selectionCopy = () => {
+        const previousFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+        const input = document.createElement("textarea");
+        input.value = value;
+        input.style.position = "fixed";
+        input.style.opacity = "0";
+        document.body.appendChild(input);
+        try {
+          input.focus();
+          input.select();
+          if (!document.execCommand("copy")) throw new Error(copy.devCopyFailed);
+        } finally {
+          input.remove();
+          previousFocus?.focus();
+        }
+      };
+      if (navigator.clipboard?.writeText) {
+        try { await navigator.clipboard.writeText(value); }
+        catch { selectionCopy(); }
+      } else {
+        selectionCopy();
+      }
+      setCopiedReference(value);
+      setError(null);
+    } catch (cause) {
+      setError(messageOf(cause));
+    }
+  };
 
   const move = async (next: number) => {
     setStep(next);
@@ -1390,12 +1428,13 @@ function McpSurface({
         interactionMode,
         ...(credentialsConfigured && !replacingCredentials
           ? { replace: false }
-          : { tunnelId, runtimeKey, replace: true }),
+          : { tunnelId, runtimeKey: reuseSavedDevKey ? "" : runtimeKey, replace: true, reuseSavedKey: devProfile && reuseSavedDevKey }),
       });
       setRuntimeKey("");
       setTunnelId("");
       setCredentialsConfigured(true);
       setReplacingCredentials(false);
+      setReuseSavedDevKey(false);
       updateState((await api!.snapshot()).state);
       await move(2);
     } catch (cause) {
@@ -1452,6 +1491,13 @@ function McpSurface({
             src={guideMedia}
           />
         ) : null}
+        {devProfile && step === 1 ? <div className="dev-mcp-transport" aria-label={copy.devTransportVisual} role="group">
+          <span>{copy.devTransportLauncher}</span>
+          <Icon name="chevron" />
+          <span>{copy.devTransportTunnel}</span>
+          <Icon name="chevron" />
+          <span>{copy.devTransportChat}</span>
+        </div> : null}
 
         <AnimatePresence mode="wait" initial={false}>
           <motion.section
@@ -1471,6 +1517,18 @@ function McpSurface({
             </header>
 
             {step === 0 ? (
+              devProfile ? <DevMcpReference
+                checked={workspaceConfirmed}
+                copiedReference={copiedReference}
+                copy={copy}
+                description={DEV_TUNNEL_DESCRIPTION}
+                name={DEV_TUNNEL_NAME}
+                onCheck={setWorkspaceConfirmed}
+                onCopy={copyReference}
+                phase="tunnel"
+              /> : null
+            ) : null}
+            {step === 0 ? (
               <div className="inline-actions">
                 <SecondaryButton icon="external" onClick={() => void openExternal(snapshot.urls.tunnels)}>
                   {copy.openTunnels}
@@ -1485,18 +1543,27 @@ function McpSurface({
                 <div className="saved-credentials">
                   <NoticeRow icon="check" tone="success">
                     <span>
-                      <strong>{copy.credentialsConfigured}</strong>
-                      <small>{copy.credentialsConfiguredBody}</small>
+                      <strong>{devProfile ? copy.devCredentialsConfigured : copy.credentialsConfigured}</strong>
+                      <small>{devProfile ? copy.devCredentialsConfiguredBody : copy.credentialsConfiguredBody}</small>
                     </span>
                   </NoticeRow>
-                  <button
+                  {devProfile ? <div className="dev-key-choices">
+                    <SecondaryButton disabled={busy} onClick={() => {
+                      setReuseSavedDevKey(true);
+                      setReplacingCredentials(true);
+                    }}>{copy.devChangeTunnelReuseKey}</SecondaryButton>
+                    <SecondaryButton disabled={busy} onClick={() => {
+                      setReuseSavedDevKey(false);
+                      setReplacingCredentials(true);
+                    }}>{copy.devEnterSeparateKey}</SecondaryButton>
+                  </div> : <button
                     className="text-button"
                     disabled={busy}
                     onClick={() => setReplacingCredentials(true)}
                     type="button"
                   >
                     {copy.replaceCredentials}
-                  </button>
+                  </button>}
                 </div>
               ) : (
                 <div className="field-list">
@@ -1510,7 +1577,14 @@ function McpSurface({
                       value={tunnelId}
                     />
                   </FieldRow>
-                  <FieldRow label={copy.runtimeKey}>
+                  {devProfile && credentialsConfigured && replacingCredentials ? <label className="dev-reuse-key">
+                    <input checked={reuseSavedDevKey} onChange={event => {
+                      setReuseSavedDevKey(event.target.checked);
+                      setRuntimeKey("");
+                    }} type="checkbox" />
+                    <span><strong>{copy.devReuseSavedKey}</strong><small>{copy.devReuseSavedKeyHint}</small></span>
+                  </label> : null}
+                  {!reuseSavedDevKey ? <FieldRow label={copy.runtimeKey}>
                     <input
                       autoCapitalize="none"
                       autoCorrect="off"
@@ -1520,7 +1594,7 @@ function McpSurface({
                       type="password"
                       value={runtimeKey}
                     />
-                  </FieldRow>
+                  </FieldRow> : null}
                   {credentialsConfigured ? (
                     <button
                       className="text-button keep-credentials"
@@ -1529,6 +1603,7 @@ function McpSurface({
                         setTunnelId("");
                         setRuntimeKey("");
                         setReplacingCredentials(false);
+                        setReuseSavedDevKey(false);
                       }}
                       type="button"
                     >
@@ -1541,7 +1616,7 @@ function McpSurface({
             {step === 1 ? (
               <p className="mcp-step-two-hint">
                 {manualInteraction || configuringInactiveMode || snapshot.state.codexCatalogVerified
-                  ? copy.mcpStepTwoHint
+                  ? devProfile ? copy.devMcpStepTwoHint : copy.mcpStepTwoHint
                   : copy.mcpCatalogRequired}
               </p>
             ) : null}
@@ -1552,10 +1627,20 @@ function McpSurface({
                     ? copy.manualConnectorNotice
                     : devProfile ? copy.devConnectorIsolationNotice : copy.connectorMigrationNotice}
                 </NoticeRow>
-                <div className="connector-name">
+                {!devProfile ? <div className="connector-name">
                   <span>{copy.connectorName}</span>
                   <code>{snapshot.connectorNames[interactionMode]}</code>
-                </div>
+                </div> : null}
+                {devProfile ? <DevMcpReference
+                  checked={chatConfirmed}
+                  copiedReference={copiedReference}
+                  copy={copy}
+                  description={DEV_APP_DESCRIPTION}
+                  name={snapshot.connectorNames[interactionMode]}
+                  onCheck={setChatConfirmed}
+                  onCopy={copyReference}
+                  phase="app"
+                /> : null}
                 <div className="inline-actions">
                   <SecondaryButton
                     icon="external"
@@ -1588,7 +1673,7 @@ function McpSurface({
             disabled={
               busy
               || (!manualInteraction && !configuringInactiveMode && !snapshot.state.codexCatalogVerified)
-              || ((!credentialsConfigured || replacingCredentials) && (!tunnelId || !runtimeKey))
+              || ((!credentialsConfigured || replacingCredentials) && (!tunnelId || (!runtimeKey && !reuseSavedDevKey)))
             }
             onClick={() => void install()}
           >
@@ -2153,6 +2238,69 @@ function TutorialVideo({ copy, label, src }: { copy: Copy; label: string; src: s
         document.body,
       ) : null}
     </>
+  );
+}
+
+function DevMcpReference({
+  checked,
+  copiedReference,
+  copy,
+  description,
+  name,
+  onCheck,
+  onCopy,
+  phase,
+}: {
+  checked: boolean;
+  copiedReference: string | null;
+  copy: Copy;
+  description: string;
+  name: string;
+  onCheck: (checked: boolean) => void;
+  onCopy: (value: string) => void | Promise<void>;
+  phase: "tunnel" | "app";
+}) {
+  const app = phase === "app";
+  return (
+    <div className="dev-mcp-reference">
+      <div className="dev-mcp-reference-window" aria-label={app ? copy.devAppReference : copy.devTunnelReference} role="group">
+        <div className="dev-mcp-reference-bar">
+          <span aria-hidden="true" className="dev-mcp-reference-dots"><i /><i /><i /></span>
+          <span>{app ? "chatgpt.com/plugins" : "platform.openai.com/settings/organization/tunnels"}</span>
+        </div>
+        <div className="dev-mcp-reference-content">
+          <strong>{app ? copy.devAppReference : copy.devTunnelReference}</strong>
+          <DevReferenceValue copy={copy} copied={copiedReference === name} label={app ? copy.connectorName : copy.devTunnelName} onCopy={() => onCopy(name)} value={name} />
+          <DevReferenceValue copy={copy} copied={copiedReference === description} label={copy.devDescription} onCopy={() => onCopy(description)} value={description} />
+          <div className="dev-mcp-reference-tags">
+            {app ? <><span>{copy.devConnectionTunnel}</span><span>{copy.devAuthenticationNone}</span></> : <span>{copy.devWorkspaceAssociation}</span>}
+          </div>
+        </div>
+      </div>
+      <label className="dev-mcp-reference-check">
+        <input checked={checked} onChange={event => onCheck(event.target.checked)} type="checkbox" />
+        <span>{app ? copy.devChatAvailabilityCheck : copy.devWorkspaceCheck}</span>
+      </label>
+      <p>{app ? copy.devWorkRedirectNotice : copy.devWorkspaceHint}</p>
+    </div>
+  );
+}
+
+function DevReferenceValue({ copy, copied, label, onCopy, value }: {
+  copy: Copy;
+  copied: boolean;
+  label: string;
+  onCopy: () => void | Promise<void>;
+  value: string;
+}) {
+  return (
+    <div className="dev-mcp-reference-value">
+      <span>{label}</span>
+      <div>
+        <code>{value}</code>
+        <button aria-label={`${copy.devCopy} ${label}`} onClick={() => void onCopy()} type="button">{copied ? copy.devCopied : copy.devCopy}</button>
+      </div>
+    </div>
   );
 }
 

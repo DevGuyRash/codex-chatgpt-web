@@ -1766,8 +1766,53 @@ code {
   margin-top: 9px;
 }
 
+.dev-key-choices {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.dev-key-choices .button-secondary {
+  min-height: 34px;
+  white-space: normal;
+  text-align: left;
+}
+
 .field-row input::placeholder {
   color: var(--color-text-disabled);
+}
+
+.dev-reuse-key {
+  display: flex;
+  align-items: flex-start;
+  gap: 9px;
+  padding: 12px 0;
+  border-bottom: 1px solid var(--color-border);
+  cursor: pointer;
+}
+
+.dev-reuse-key input {
+  flex: none;
+  margin: 3px 0 0;
+  accent-color: var(--color-text-accent);
+}
+
+.dev-reuse-key span {
+  display: grid;
+  gap: 3px;
+}
+
+.dev-reuse-key strong {
+  color: var(--color-text-primary);
+  font-size: var(--text-sm);
+  font-weight: 500;
+}
+
+.dev-reuse-key small {
+  color: var(--color-text-secondary);
+  font-size: var(--text-xs);
+  line-height: 1.5;
 }
 
 .connector-actions {
@@ -1827,6 +1872,177 @@ code {
   margin: 11px 0 0;
   padding-left: 10px;
   border-left: 2px solid var(--color-text-accent);
+  color: var(--color-text-secondary);
+  font-size: var(--text-xs);
+  line-height: 1.5;
+}
+
+.dev-mcp-reference {
+  display: grid;
+  gap: 11px;
+  max-width: 680px;
+  margin-top: 18px;
+}
+
+.dev-mcp-transport {
+  display: flex;
+  width: min(100%, 680px);
+  min-height: 112px;
+  align-items: center;
+  justify-content: center;
+  gap: 13px;
+  align-self: center;
+  padding: 16px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background: var(--color-background-control);
+}
+
+.dev-mcp-transport > span {
+  min-width: 0;
+  padding: 10px 13px;
+  border: 1px solid var(--color-border-heavy);
+  border-radius: var(--radius-sm);
+  color: var(--color-text-primary);
+  font-size: var(--text-xs);
+  text-align: center;
+}
+
+.dev-mcp-transport > svg {
+  width: 15px;
+  height: 15px;
+  flex: none;
+  color: var(--color-text-accent);
+}
+
+@media (max-width: 560px) {
+  .dev-mcp-transport { gap: 5px; padding: 9px; }
+  .dev-mcp-transport > span { padding: 8px 5px; }
+}
+
+.dev-mcp-reference-window {
+  overflow: hidden;
+  border: 1px solid var(--color-border-heavy);
+  border-radius: var(--radius-md);
+  background: var(--color-background-control);
+}
+
+.dev-mcp-reference-bar {
+  display: flex;
+  min-height: 28px;
+  align-items: center;
+  gap: 12px;
+  padding: 0 11px;
+  border-bottom: 1px solid var(--color-border);
+  color: var(--color-text-tertiary);
+  font-family: var(--font-mono);
+  font-size: 10px;
+}
+
+.dev-mcp-reference-bar > span:last-child {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.dev-mcp-reference-dots {
+  display: flex;
+  flex: none;
+  gap: 4px;
+}
+
+.dev-mcp-reference-dots i {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--color-border-heavy);
+}
+
+.dev-mcp-reference-content {
+  display: grid;
+  gap: 11px;
+  padding: 15px;
+}
+
+.dev-mcp-reference-content > strong {
+  color: var(--color-text-primary);
+  font-size: var(--text-sm);
+  font-weight: 600;
+}
+
+.dev-mcp-reference-value {
+  display: grid;
+  gap: 4px;
+}
+
+.dev-mcp-reference-value > span {
+  color: var(--color-text-tertiary);
+  font-size: var(--text-xs);
+}
+
+.dev-mcp-reference-value > div {
+  display: flex;
+  min-width: 0;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.dev-mcp-reference-value code {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  color: var(--color-text-primary);
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  line-height: 1.5;
+}
+
+.dev-mcp-reference-value button {
+  flex: none;
+  padding: 2px 7px;
+  border: 1px solid var(--color-border-heavy);
+  border-radius: var(--radius-xs);
+  background: var(--color-background-surface);
+  color: var(--color-text-accent);
+  font-size: var(--text-xs);
+}
+
+.dev-mcp-reference-value button:hover {
+  background: var(--color-background-control-hover);
+}
+
+.dev-mcp-reference-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.dev-mcp-reference-tags span {
+  padding: 3px 7px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-xs);
+  color: var(--color-text-secondary);
+  font-size: var(--text-xs);
+}
+
+.dev-mcp-reference-check {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  color: var(--color-text-primary);
+  cursor: pointer;
+  font-size: var(--text-xs);
+  line-height: 1.5;
+}
+
+.dev-mcp-reference-check input {
+  flex: none;
+  margin: 2px 0 0;
+  accent-color: var(--color-text-accent);
+}
+
+.dev-mcp-reference > p {
+  margin: 0;
   color: var(--color-text-secondary);
   font-size: var(--text-xs);
   line-height: 1.5;

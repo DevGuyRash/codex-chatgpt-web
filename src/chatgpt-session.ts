@@ -67,6 +67,11 @@ async function visibleEffortSurface(
   page: Page,
   control: Locator,
 ): Promise<Omit<ChatGptEffortActivation, "method"> | undefined> {
+  // A closed picker's exit animation can leave its slider visible briefly. The control owns
+  // whether that surface is active; a departing slider cannot establish effort readiness.
+  const expanded = await control.getAttribute("aria-expanded").catch(() => null);
+  const state = await control.getAttribute("data-state").catch(() => null);
+  if (expanded === "false" || state === "closed") return undefined;
   const menu = await chatGptEffortMenuForControl(page, control);
   const surface = chatGptEffortSlider(page);
   if (await menu.isVisible().catch(() => false) || await surface.sliderContainer.isVisible().catch(() => false)) {

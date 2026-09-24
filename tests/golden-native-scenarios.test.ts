@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { randomUUID } from "node:crypto";
 import { ownedNativeActivity, runNativeScenario } from "../scripts/golden/native-scenarios";
-import { createWorkload } from "../scripts/golden/workloads";
+import { GOLDEN_UNICODE_WITNESS, createWorkload } from "../scripts/golden/workloads";
 import { CHATGPT_WEB_MODEL_ROUTES } from "../src/chatgpt-web-models";
 import { GoldenAppServer, initializeGoldenNativeHome } from "../scripts/golden/app-server";
 import { findNativeExecFailure, runNativeExec } from "../scripts/golden/exec";
@@ -17,6 +17,28 @@ import { retainLiveProviderAdmission } from "../scripts/golden/live-batch";
 import { ownsProcess, type OwnedProcess } from "../scripts/golden/workspace";
 import { goldenNativeEnvironment } from "../scripts/golden/runtime-config";
 import { bridgeToResponsesSSE } from "../src/bridge";
+
+test("Unicode scenario submits an exact witness requirement in one owned native turn", async () => {
+  const root = mkdtempSync(join(tmpdir(), "golden-unicode-scenario-")), peer = join(root, "peer"), promptPath = join(root, "prompt.txt");
+  mkdirSync(join(root, ".git"));
+  writeFileSync(peer, `#!${process.execPath}
+import {writeFileSync} from "node:fs";
+let prompt="";process.stdin.on("data",chunk=>prompt+=chunk);process.stdin.on("end",()=>{
+writeFileSync(${JSON.stringify(promptPath)},prompt);
+console.log(JSON.stringify({type:"thread.started",thread_id:"11111111-1111-7111-8111-111111111111"}));
+console.log(JSON.stringify({type:"turn.started"}));
+console.log(JSON.stringify({type:"turn.completed"}));
+});
+`, { mode: 0o700 });
+  try {
+    const result = await runNativeScenario({ executable: peer, cwd: root, env: {}, route: CHATGPT_WEB_MODEL_ROUTES[0]!, workload: createWorkload({ level: 1, seed: "unicode-lifecycle", batch: 0 }), variant: "unicode", signal: new AbortController().signal, timeoutMs: 2000,
+      onRecord: async () => {}, checkpoint: () => {} });
+    expect(result).toMatchObject({ status: "completed", variant: "unicode", threadId: "11111111-1111-7111-8111-111111111111" });
+    const prompt = readFileSync(promptPath, "utf8");
+    expect(prompt).toContain("output/unicode.txt");
+    expect(prompt).toContain(GOLDEN_UNICODE_WITNESS);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
 
 test("native progress and tool credit require the exact owned task and turn", () => {
   const owner = { threadId: "owned-thread", turnId: "owned-turn" };

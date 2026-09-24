@@ -7,6 +7,8 @@ import type { GoldenAttempt } from "./runner";
 import { goldenScenarioTerminations } from "./observations";
 import { GoldenAdmissionSuspended, nativeAdmissionObservation } from "./admission";
 import { nativePlanHashes } from "./app-server";
+import { GOLDEN_UNICODE_WITNESS } from "./workloads";
+import { createHash } from "node:crypto";
 import { DiagnosticError } from "../../src/diagnostics/problems";
 
 type LiveBatchResult = Awaited<ReturnType<typeof runLiveBatch>>;
@@ -33,6 +35,10 @@ function finiteCellOutcome(cell: GoldenCell, result: LiveCellResult, batch: Live
     || result.selections.observedModel !== cell.route.backendModel || result.selections.observedEffort !== cell.route.adapterEffort) throw new Error("A positive live result lacks required independent evidence");
   if (result.receipts.intentionalTerminations && !goldenScenarioTerminations(cell.variant.id, proof.terminal).length) throw new Error("Tool termination lacks matching native scenario evidence");
   if (cell.variant.id === "formats" && ["input/dispatch.pdf", "input/dispatch.docx", "input/dispatch.xlsx", "input/label.png", "output/attachments.json", "output/teams.csv"].some(path => !proof.oracle.artifacts.some(artifact => artifact.path === path && artifact.bytes > 0 && /^[a-f\d]{64}$/.test(artifact.sha256)))) throw new Error("Format coverage lacks validated document, image and output artifacts");
+  if (cell.variant.id === "unicode") {
+    const expectedSha256 = createHash("sha256").update(`${GOLDEN_UNICODE_WITNESS}\n`).digest("hex");
+    if (!proof.oracle.artifacts.some(artifact => artifact.path === "output/unicode.txt" && artifact.sha256 === expectedSha256)) throw new Error("Unicode coverage lacks its independently validated UTF-8 artifact");
+  }
   if (["resumed", "archived-history"].includes(cell.variant.id) && (!("preparation" in proof.terminal) || proof.terminal.preparation?.status !== "completed" || proof.terminal.preparation.threadId !== proof.terminal.threadId)) throw new Error("Resumed coverage requires completed preparation in the same native task");
   if (cell.variant.id === "archived-history" && (!("archive" in proof.terminal) || proof.terminal.archive?.threadId !== proof.terminal.threadId || !proof.terminal.archive.archived || !proof.terminal.archive.restored)) throw new Error("Archived coverage requires observed archive and restoration of the same native task");
   if (["continued", "plan-revise-execute", "plan-tui-execute"].includes(cell.variant.id) && (!("scenario" in proof.terminal) || proof.terminal.scenario?.turns.length !== finiteNativeScenarios[cell.variant.id as FiniteNativeScenario] || proof.terminal.scenario.turns.some(turn => turn.status !== "completed"))) throw new Error("Sequential scenario coverage requires every native turn to complete");

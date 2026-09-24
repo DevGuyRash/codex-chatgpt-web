@@ -1,4 +1,6 @@
 import { expect, test } from "bun:test";
+import { createHash } from "node:crypto";
+import { GOLDEN_UNICODE_WITNESS } from "../scripts/golden/workloads";
 import { buildGoldenMatrix } from "../scripts/golden/catalog";
 import { canExecuteLiveCell, liveBatchOutcomes, liveCampaignExecutor } from "../scripts/golden/live-campaign";
 import { nativePlanHashes } from "../scripts/golden/app-server";
@@ -122,6 +124,19 @@ test("a typed failed native terminal suspends admission even when capture is inc
   expect(failure).toMatchObject({ name: "GoldenAdmissionSuspended", observation: { code: "rate_limit_exceeded", evidence: batch.evidence, threadId: "limited-thread", turnId: "limited-turn" } });
   item.nativeFailure.turns[0].error = { codexErrorInfo: "other", message: "rateLimitExceeded" };
   expect(() => liveBatchOutcomes(cells, batch)).toThrow("Incomplete live batch");
+});
+
+test("Unicode campaign coverage requires the exact committed UTF-8 witness", () => {
+  const cell = { ...cells[0]!, variant: { id: "unicode", driver: "exec" as const } };
+  expect(canExecuteLiveCell(cell)).toBe(true);
+  const batch = completedBatch();
+  batch.cells = [batch.cells[0]!];
+  const item = batch.cells[0]!;
+  item.variant = "unicode";
+  item.result!.terminal.variant = "unicode";
+  expect(() => liveBatchOutcomes([cell], batch)).toThrow("Unicode coverage lacks its independently validated UTF-8 artifact");
+  item.result!.oracle.artifacts.push({ path: "output/unicode.txt", bytes: Buffer.byteLength(`${GOLDEN_UNICODE_WITNESS}\n`), sha256: createHash("sha256").update(`${GOLDEN_UNICODE_WITNESS}\n`).digest("hex") });
+  expect(liveBatchOutcomes([cell], batch).get(cell.id)?.status).toBe("passed");
 });
 
 test("verified provider admission survives incomplete exec evidence without inferring a limit from native prose", () => {

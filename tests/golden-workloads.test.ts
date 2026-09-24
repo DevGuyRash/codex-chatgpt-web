@@ -2,7 +2,7 @@ import { expect, test } from "bun:test";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { createWorkload, evaluateWorkload, materializeWorkload } from "../scripts/golden/workloads";
+import { GOLDEN_UNICODE_WITNESS, createWorkload, evaluateWorkload, materializeWorkload } from "../scripts/golden/workloads";
 
 test("shared workloads are deterministic, vary across batches, and preserve Unicode input", () => {
   for (const level of [1, 2, 3, 4, 5] as const) {
@@ -49,6 +49,13 @@ test.each([undefined, "all"] as const)("the independent artifact oracle rejects 
     }
     expect(evaluateWorkload(root, workload)).toMatchObject({ passed: true, failures: [] });
     expect(evaluateWorkload(root, workload, undefined, "formats").passed).toBe(formatCoverage === "all");
+    expect(evaluateWorkload(root, workload, undefined, "unicode").passed).toBe(false);
+    writeFileSync(join(root, "output/unicode.txt"), "Almost the same\n");
+    expect(evaluateWorkload(root, workload, undefined, "unicode").failures).toContain("Unicode witness differs from the required UTF-8 artifact");
+    writeFileSync(join(root, "output/unicode.txt"), `${GOLDEN_UNICODE_WITNESS}\n`);
+    const unicode = evaluateWorkload(root, workload, undefined, "unicode");
+    expect(unicode.passed).toBe(true);
+    expect(unicode.artifacts.map(artifact => artifact.path)).toContain("output/unicode.txt");
     expect(evaluateWorkload(root, workload, undefined, "steer-generation").passed).toBe(false);
     writeFileSync(join(root, "output/steering.txt"), "Acknowledged the correction.\n");
     expect(evaluateWorkload(root, workload, undefined, "steer-generation").passed).toBe(false);

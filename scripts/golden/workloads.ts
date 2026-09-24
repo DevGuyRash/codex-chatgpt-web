@@ -7,6 +7,7 @@ import type { WorkloadLevel } from "./catalog";
 import { createFormatFixtures } from "./formats";
 
 const sha256 = (value: string | Uint8Array) => createHash("sha256").update(value).digest("hex");
+export const GOLDEN_UNICODE_WITNESS = "東京 → café → Δοκιμή → مرحبا";
 const comparable = (value: unknown): unknown => Array.isArray(value) ? value.map(comparable) : value !== null && typeof value === "object" ? Object.fromEntries(Object.entries(value).sort(([a], [b]) => a.localeCompare(b)).map(([key, child]) => [key, comparable(child)])) : value;
 interface Order { id: string; team: string; label: string; units: number; unitPriceCents: number; discountBps: number }
 export interface GoldenWorkload {
@@ -48,7 +49,7 @@ export function createWorkload(input: { level: WorkloadLevel; seed: string; batc
   const adjustments = input.level >= 2 ? orders.filter((_, index) => index % 11 === 3).map(row => `${row.id},${1 + random(20)}`).join("\n") : "";
   const facts = input.level >= 3 ? {
     dispatchCode: `${["orchid", "cedar", "violet"][random(3)]}-${random(9999)}`,
-    unicodeWitness: "東京 → café → Δοκιμή → مرحبا",
+    unicodeWitness: GOLDEN_UNICODE_WITNESS,
     revisedPolicy: `Revision-${input.batch + 1}-${random(1000)}`,
   } : {};
   const files: Record<string, string> = {
@@ -152,6 +153,10 @@ export function evaluateWorkload(rootInput: string, workload: GoldenWorkload, pr
       if (projectExecution.validationWorkload.id === workload.id) failures.push("Project validation reused its original dataset");
       else checkResult(projectExecution.stdout, expectedResult(projectExecution.validationWorkload), "project");
     } else pendingChecks.push("Execute the generated project against an independent dataset in the native sandbox");
+  }
+  if (variant === "unicode") {
+    const witness = read("output/unicode.txt", 1024);
+    if (witness !== undefined && witness !== `${GOLDEN_UNICODE_WITNESS}\n`) failures.push("Unicode witness differs from the required UTF-8 artifact");
   }
   if (variant.startsWith("steer-")) {
     const witness = read("output/steering.txt", 1024);

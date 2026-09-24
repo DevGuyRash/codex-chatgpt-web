@@ -1,6 +1,7 @@
 const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
+const { createHash } = require("node:crypto");
 const { spawnSync } = require("node:child_process");
 const { validateRuntimeBundle } = require("../electron/runtime-install.cjs");
 
@@ -110,12 +111,15 @@ try {
   const assertMarker = (file, profile, desktopName) => {
     if (!fs.existsSync(file)) throw new Error(`Packaged ${profile} launcher did not write its readiness marker`);
     const marker = JSON.parse(fs.readFileSync(file, "utf8"));
+    const iconAsset = path.join(launcherRoot, "assets", profile === "development" ? "dev-icon.png" : "icon.png");
+    const expectedIconDigest = createHash("sha256").update(fs.readFileSync(iconAsset)).digest("hex");
     if (marker.ok !== true
       || marker.packaged !== true
       || marker.profile !== profile
       || marker.runtimeVerified !== true
       || marker.nativeRuntimeVerified !== true
       || marker.iconVerified !== true
+      || marker.iconDigest !== expectedIconDigest
       || marker.desktopName !== (process.platform === "linux" ? desktopName : null)
       || marker.diagnosticsVerified !== true
       || marker.version !== expectedVersion

@@ -4,10 +4,11 @@ const path = require("node:path");
 const NORMAL_DESKTOP_NAME = "codex-web-gpt.desktop";
 const DEVELOPMENT_DESKTOP_NAME = "codex-web-gpt-dev.desktop";
 
-function launcherIconPath(packaged, resourcesPath = process.resourcesPath) {
+function launcherIconPath({ packaged, isDevelopment = false, resourcesPath = process.resourcesPath }) {
+  const filename = isDevelopment ? "dev-icon.png" : "icon.png";
   const icon = packaged
-    ? path.join(resourcesPath, "app.asar.unpacked", "assets", "icon.png")
-    : path.join(__dirname, "..", "assets", "icon.png");
+    ? path.join(resourcesPath, "app.asar.unpacked", "assets", filename)
+    : path.join(__dirname, "..", "assets", filename);
   if (!fs.statSync(icon, { throwIfNoEntry: false })?.isFile()) {
     throw new Error("The launcher icon is missing from the reviewed runtime");
   }
@@ -18,8 +19,8 @@ let cachedWindowIcon;
 let cachedWindowIconPath;
 let cachedNativeImage;
 
-function launcherWindowIcon(nativeImage, packaged, resourcesPath) {
-  const iconPath = launcherIconPath(packaged, resourcesPath);
+function launcherWindowIcon(nativeImage, options) {
+  const iconPath = launcherIconPath(options);
   if (cachedWindowIcon && cachedWindowIconPath === iconPath && cachedNativeImage === nativeImage) return cachedWindowIcon;
   if (!nativeImage || typeof nativeImage.createFromPath !== "function") {
     throw new Error("The native launcher icon decoder is unavailable");

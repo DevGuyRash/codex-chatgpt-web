@@ -55,6 +55,7 @@
     "asar": true,
     "asarUnpack": [
       "assets/icon.png",
+      "assets/dev-icon.png",
       "assets/linux-appimage-runner.sh"
     ],
     "directories": {
@@ -65,6 +66,7 @@
       "electron/**",
       "build/webauthn-runtime.json",
       "assets/icon.png",
+      "assets/dev-icon.png",
       "assets/linux-appimage-runner.sh",
       "package.json"
     ],

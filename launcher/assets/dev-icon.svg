@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <image href="icon.png" xlink:href="icon.png" width="1024" height="1024"/>
+  <rect x="48" y="48" width="928" height="928" rx="218" fill="#0fa78d" fill-opacity="0.17"/>
+  <rect x="49" y="49" width="926" height="926" rx="217" fill="none" stroke="#59e3c8" stroke-opacity="0.9" stroke-width="18"/>
+  <rect x="608" y="758" width="320" height="160" rx="72" fill="#43dbba" stroke="#072d29" stroke-width="16"/>
+  <text x="768" y="867" text-anchor="middle" font-family="DejaVu Sans, Arial, sans-serif" font-size="94" font-weight="800" letter-spacing="2" fill="#07342f">DEV</text>
+</svg>

@@ -17,9 +17,10 @@ const HYBRID_STATES = new Set(["phone-connected", "bluetooth-seen", "ready"]);
 const MAX_REQUEST_LIFETIME_MS = 10 * 60_000;
 
 class WebAuthnPrompts {
-  constructor({ browserSession, parent, ownsWebContents, browserExtensions, logger, publishOperation }) {
+  constructor({ browserSession, parent, ownsWebContents, browserExtensions, logger, publishOperation, isDevelopment = false }) {
     this.browserSession = browserSession;
     this.parent = parent;
+    this.isDevelopment = isDevelopment;
     this.ownsWebContents = ownsWebContents;
     this.browserExtensions = browserExtensions;
     this.logger = logger;
@@ -307,7 +308,7 @@ class WebAuthnPrompts {
       this.window = new BrowserWindow({
         show: false, alwaysOnTop: true, skipTaskbar: false,
         width: 420, height: 500, minWidth: 360, minHeight: 390,
-        title: "Passkey authentication", icon: launcherWindowIcon(nativeImage, app?.isPackaged === true),
+        title: "Passkey authentication", icon: launcherWindowIcon(nativeImage, { packaged: app?.isPackaged === true, isDevelopment: this.isDevelopment }),
         autoHideMenuBar: true, backgroundColor: "#181818",
         webPreferences: {
           preload: path.join(__dirname, "generated", "webauthn-preload.cjs"),

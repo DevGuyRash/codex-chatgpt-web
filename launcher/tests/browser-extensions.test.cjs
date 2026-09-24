@@ -6,7 +6,7 @@ const fs = require("node:fs");
 const path = require("node:path");
 const vm = require("node:vm");
 
-function extensionFixture({ failLoad = false } = {}) {
+function extensionFixture({ failLoad = false, isDevelopment = false } = {}) {
   const filename = path.resolve(__dirname, "../electron/browser-extensions.cjs");
   const nativeRequire = createRequire(filename);
   const module = { exports: {} };
@@ -15,6 +15,7 @@ function extensionFixture({ failLoad = false } = {}) {
   class BrowserWindow extends EventEmitter {
     constructor(options) {
       super();
+      this.options = options;
       this.webContents = { session: options.webPreferences.session, isDestroyed: () => this.destroyed, setWindowOpenHandler() {} };
       this.destroyed = false;
       windows.push(this);
@@ -34,7 +35,7 @@ function extensionFixture({ failLoad = false } = {}) {
   }
   const browserSession = { getPreloadScripts: () => [], registerPreloadScript() {} };
   const fixtureRequire = name => {
-      if (name === "electron") return { BrowserWindow, nativeImage: { createFromPath: () => ({ isEmpty: () => false, resize: () => ({ isEmpty: () => false }) }) } };
+      if (name === "electron") return { BrowserWindow, nativeImage: { createFromPath: source => ({ isEmpty: () => false, resize: () => ({ isEmpty: () => false, source }) }) } };
       if (name === "electron-chrome-extensions") return { ElectronChromeExtensions: Adapter };
       if (name === "electron-chrome-web-store") return { downloadExtension() {} };
       if (name === "./window-placement.cjs") return { placeWindowNearLauncher() {} };
@@ -46,7 +47,7 @@ function extensionFixture({ failLoad = false } = {}) {
     module, URL, setInterval, clearInterval, setTimeout, clearTimeout,
   }, { filename });
   const extensions = new module.exports.BrowserExtensions({
-    browserSession, userData: "/tmp/extension-lifecycle-fixture", logger: { info() {}, warn() {} },
+    browserSession, userData: "/tmp/extension-lifecycle-fixture", logger: { info() {}, warn() {} }, isDevelopment,
   });
   return { extensions, tabs, windows };
 }
@@ -67,5 +68,12 @@ test("failed extension navigation cannot retain a window or tab", async () => {
   assert.equal(windows[0].isDestroyed(), true);
   assert.equal(tabs.size, 0);
   assert.equal(extensions.pages.size, 0);
+  extensions.destroy();
+});
+
+test("DEV extension windows use the distinct native icon", async () => {
+  const { extensions, windows } = extensionFixture({ isDevelopment: true });
+  await extensions.createWindow();
+  assert.match(windows[0].options.icon.source, /dev-icon\.png$/);
   extensions.destroy();
 });

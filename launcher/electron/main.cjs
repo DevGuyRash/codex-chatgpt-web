@@ -84,7 +84,7 @@ const KEYS_URL = "https://platform.openai.com/settings/organization/api-keys";
 const ALLOWED_EXTERNAL_URLS = new Set([GITHUB_URL, X_URL, CONNECTORS_URL, TUNNELS_URL, KEYS_URL,
   ...BROWSER_EXTENSION_CATALOG.map(provider => provider.storeUrl)]);
 const PACKAGED_RENDERER_URL = pathToFileURL(path.join(__dirname, "..", "dist", "index.html")).href;
-const APP_ICON_PATH = launcherIconPath(app.isPackaged);
+const APP_ICON_PATH = launcherIconPath({ packaged: app.isPackaged, isDevelopment: IS_DEV_PROFILE });
 
 process.env.CODEX_CHATGPT_WEB_HOME = CORE_HOME;
 process.env.CODEX_HOME = LAUNCHER_PROFILE.codexHome;
@@ -417,7 +417,7 @@ function createWindow({ logger, stateStore, windowStatePath, startHidden }) {
     minWidth: MIN_WINDOW_BOUNDS.width,
     minHeight: MIN_WINDOW_BOUNDS.height,
     title: LAUNCHER_PROFILE.displayName,
-    icon: launcherWindowIcon(nativeImage, app.isPackaged),
+    icon: launcherWindowIcon(nativeImage, { packaged: app.isPackaged, isDevelopment: IS_DEV_PROFILE }),
     show: false,
     backgroundColor: isMac ? "#00000000" : "#181818",
     titleBarStyle: isMac ? "hiddenInset" : "hidden",
@@ -685,7 +685,7 @@ function registerIpc({ logger, stateStore }) {
     writePrivateFileAtomic(DEVELOPMENT_SELECTION_PATH, `${JSON.stringify({ home })}\n`);
     let shortcut = "not-applicable";
     if (app.isPackaged && process.platform === "linux") {
-      try { shortcut = installLinuxDevelopmentShortcut({ home, executable: linuxExecutable(app) }); }
+      try { shortcut = installLinuxDevelopmentShortcut({ home, executable: linuxExecutable(app), iconSource: launcherIconPath({ packaged: app.isPackaged, isDevelopment: true }) }); }
       catch { shortcut = "failed"; }
     }
     const env = developmentLaunchEnvironment(process.env, home);
@@ -1232,6 +1232,7 @@ async function start() {
   app.commandLine.appendSwitch("remote-debugging-port", String(cdpPort));
 
   await app.whenReady();
+  if (process.platform === "darwin" && IS_DEV_PROFILE) app.dock?.setIcon(APP_ICON_PATH);
   nativeRuntimeIdentity = verifyNativeRuntimeIdentity();
   ElectronChromeExtensions.handleCRXProtocol(session.defaultSession);
   if (runtimeRegistry) runtimeRegistry.assertBaseOwner(LAUNCHER_PROFILE.integrationTarget);
@@ -1287,6 +1288,7 @@ async function start() {
     userData: LAUNCHER_PROFILE.userData,
     parent: mainWindow,
     logger,
+    isDevelopment: IS_DEV_PROFILE,
   });
   await browserExtensions.restore().catch(error => {
     logger.warn("browser.extension_restore_failed", { code: typeof error?.code === "string" ? error.code : "extension_restore_failed" });
@@ -1295,6 +1297,7 @@ async function start() {
     browserSession: session.fromPartition(LAUNCHER_PROFILE.browserPartition),
     parent: mainWindow,
     browserExtensions,
+    isDevelopment: IS_DEV_PROFILE,
     ownsWebContents: contents => browserHost?.ownsWebContents(contents) === true
       || browserExtensions?.ownsWebContents(contents) === true,
     logger,
@@ -1436,7 +1439,8 @@ async function start() {
       nativeRuntimeVerified: nativeRuntimeIdentity?.patched === true,
       runtimeVerified: true,
       diagnosticsVerified: true,
-      iconVerified: !launcherWindowIcon(nativeImage, app.isPackaged).isEmpty(),
+      iconVerified: !launcherWindowIcon(nativeImage, { packaged: app.isPackaged, isDevelopment: IS_DEV_PROFILE }).isEmpty(),
+      iconDigest: createHash("sha256").update(fs.readFileSync(APP_ICON_PATH)).digest("hex"),
       desktopName: process.platform === "linux" ? process.env.CHROME_DESKTOP : null,
     })}\n`);
     webAuthnPrompts.destroy();

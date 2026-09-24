@@ -35,19 +35,24 @@ test("Linux DEV shortcut is distinct and preserves a contributor-managed entry",
   try {
     const executable = path.join(root, "codex-web-gpt");
     fs.writeFileSync(executable, "binary", { mode: 0o700 });
-    fs.writeFileSync(path.join(root, "codex-web-gpt.png"), "icon");
+    const iconSource = path.join(root, "dev-icon.png");
+    fs.writeFileSync(iconSource, "dev-icon");
     const home = path.join(root, "dev profile");
     const target = path.join(root, "applications", "codex-web-gpt-dev.desktop");
-    assert.equal(installLinuxDevelopmentShortcut({ home, executable, dataHome: root }), "installed");
+    assert.equal(installLinuxDevelopmentShortcut({ home, executable, iconSource, dataHome: root }), "installed");
     const content = fs.readFileSync(target, "utf8");
-    assert.equal(content, developmentDesktopEntry(home, executable));
+    const installedIcon = path.join(root, "icons", "codex-web-gpt-dev.png");
+    assert.equal(fs.readFileSync(installedIcon, "utf8"), "dev-icon");
+    assert.equal(content, developmentDesktopEntry(home, executable, installedIcon));
     assert.match(content, /--dev-profile/);
     assert.match(content, /CODEX_WEB_GPT_DEV_HOME=/);
-    assert.ok(content.includes(`Icon=${path.join(root, "codex-web-gpt.png")}\n`));
-    assert.match(developmentDesktopEntry(home, path.join(root, "portable", "portable.AppImage")), /\nIcon=codex-web-gpt\n/);
-    assert.equal(installLinuxDevelopmentShortcut({ home, executable, dataHome: root }), "present");
+    assert.ok(content.includes(`Icon=${installedIcon}\n`));
+    assert.equal(installLinuxDevelopmentShortcut({ home, executable, iconSource, dataHome: root }), "present");
+    fs.writeFileSync(iconSource, "updated-dev-icon");
+    assert.equal(installLinuxDevelopmentShortcut({ home, executable, iconSource, dataHome: root }), "installed");
+    assert.equal(fs.readFileSync(installedIcon, "utf8"), "updated-dev-icon");
     fs.writeFileSync(target, "[Desktop Entry]\nName=Contributor DEV\n");
-    assert.equal(installLinuxDevelopmentShortcut({ home, executable, dataHome: root }), "existing-unmanaged");
+    assert.equal(installLinuxDevelopmentShortcut({ home, executable, iconSource, dataHome: root }), "existing-unmanaged");
     assert.equal(fs.readFileSync(target, "utf8"), "[Desktop Entry]\nName=Contributor DEV\n");
   } finally { fs.rmSync(root, { recursive: true, force: true }); }
 });

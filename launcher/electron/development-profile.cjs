@@ -48,14 +48,11 @@ function desktopArgument(value) {
   return `"${String(value).replaceAll("%", "%%").replace(/["`$\\]/g, "\\$&")}"`;
 }
 
-function developmentDesktopEntry(home, executable) {
-  const packagedIcon = path.join(path.dirname(executable), "codex-web-gpt.png");
-  const icon = fs.statSync(packagedIcon, { throwIfNoEntry: false })?.isFile()
-    ? packagedIcon : "codex-web-gpt";
+function developmentDesktopEntry(home, executable, icon) {
   return `[Desktop Entry]\nType=Application\nVersion=1.0\nName=Codex Web GPT DEV\nComment=Open the isolated development profile\nExec=/usr/bin/env ${desktopArgument(`CODEX_WEB_GPT_DEV_HOME=${home}`)} ${desktopArgument(executable)} --dev-profile\nTryExec=${desktopArgument(executable)}\nIcon=${icon}\nTerminal=false\nCategories=Development;\nStartupWMClass=codex-web-gpt-dev\n${MANAGED_MARKER}\n`;
 }
 
-function installLinuxDevelopmentShortcut({ home, executable, dataHome = process.env.XDG_DATA_HOME?.trim() || path.join(os.homedir(), ".local", "share") }) {
+function installLinuxDevelopmentShortcut({ home, executable, iconSource, dataHome = process.env.XDG_DATA_HOME?.trim() || path.join(os.homedir(), ".local", "share") }) {
   if (process.platform !== "linux") return "not-applicable";
   if (!path.isAbsolute(executable) || !fs.statSync(executable, { throwIfNoEntry: false })?.isFile()) return "unavailable";
   const target = path.join(dataHome, "applications", SHORTCUT_NAME);
@@ -63,8 +60,18 @@ function installLinuxDevelopmentShortcut({ home, executable, dataHome = process.
   try { current = fs.readFileSync(target, "utf8"); }
   catch (error) { if (error.code !== "ENOENT") throw error; }
   if (current && !current.includes(MANAGED_MARKER)) return "existing-unmanaged";
-  const desired = developmentDesktopEntry(home, executable);
-  if (current === desired) return "present";
+  if (!path.isAbsolute(iconSource || "") || !fs.statSync(iconSource, { throwIfNoEntry: false })?.isFile()) return "unavailable";
+  // An AppImage mount is temporary. Keep the reviewed DEV asset under the user's
+  // stable data home so a pinned shortcut never falls back to another app's icon.
+  const icon = path.join(dataHome, "icons", "codex-web-gpt-dev.png");
+  const image = fs.readFileSync(iconSource);
+  let previousImage;
+  try { previousImage = fs.readFileSync(icon); }
+  catch (error) { if (error.code !== "ENOENT") throw error; }
+  const iconChanged = !previousImage?.equals(image);
+  if (iconChanged) writePrivateFileAtomic(icon, image);
+  const desired = developmentDesktopEntry(home, executable, icon);
+  if (current === desired) return iconChanged ? "installed" : "present";
   writePrivateFileAtomic(target, desired);
   return "installed";
 }

@@ -36,9 +36,11 @@ test("launcher publishes native packages for all supported desktop operating sys
   assert.deepEqual(manifest.build.linux.target, ["AppImage"]);
   assert.equal(manifest.build.linux.syncDesktopName, true);
   assert.ok(manifest.build.files.includes("assets/icon.png"));
+  assert.ok(manifest.build.files.includes("assets/dev-icon.png"));
   assert.ok(manifest.build.files.includes("assets/linux-appimage-runner.sh"));
   assert.ok(manifest.build.asarUnpack.includes("assets/linux-appimage-runner.sh"));
   assert.ok(manifest.build.asarUnpack.includes("assets/icon.png"));
+  assert.ok(manifest.build.asarUnpack.includes("assets/dev-icon.png"));
   assert.equal(manifest.build.afterPack, undefined);
   assert.ok(fs.existsSync(path.join(launcherRoot, "assets", "icon.ico")));
   assert.equal(manifest.build.nsis.oneClick, false);

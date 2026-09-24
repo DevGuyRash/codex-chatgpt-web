@@ -40,9 +40,10 @@ function compareVersions(left, right) {
 }
 
 class BrowserExtensions {
-  constructor({ browserSession, userData, parent, logger }) {
+  constructor({ browserSession, userData, parent, logger, isDevelopment = false }) {
     this.browserSession = browserSession;
     this.parent = parent;
+    this.isDevelopment = isDevelopment;
     this.extensionsPath = path.join(userData, "browser-extensions");
     this.logger = logger;
     this.pages = new Set();
@@ -104,7 +105,7 @@ class BrowserExtensions {
     const destination = url ? this.extensionPageUrl(url) : null;
     const window = new BrowserWindow({
       width: 920, height: 720, minWidth: 520, minHeight: 420,
-      show: false, skipTaskbar: false, icon: launcherWindowIcon(nativeImage, app?.isPackaged === true),
+      show: false, skipTaskbar: false, icon: launcherWindowIcon(nativeImage, { packaged: app?.isPackaged === true, isDevelopment: this.isDevelopment }),
       title: destination?.startsWith("chrome-extension:")
         ? CATALOG_BY_ID.get(new URL(destination).hostname)?.name || "Browser extension"
         : "Browser extension", autoHideMenuBar: true,

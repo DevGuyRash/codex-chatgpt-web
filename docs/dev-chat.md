@@ -1,5 +1,7 @@
 # DEV chat harness
 
+For installation, launch modes, normal/DEV coexistence, and ChatGPT connector creation, start with [development launcher setup](dev-setup.md).
+
 The repository DEV chat exercises current source code without routing the native Codex app through
 that working tree. It is intended for browser, MCP, tool-round, retry, and compaction development
 while the normal launcher, its ChatGPT account, and the maintainer's active Codex session remain
@@ -10,13 +12,10 @@ usable.
 - Use the repository-pinned Bun version.
 - Build the WebAuthn-enabled Electron runtime in [native/electron](../native/electron/README.md) and select its packaged launcher; source `bun run dev` also requires that reviewed binary.
 - Install a launcher built from the same working tree.
-- Start the isolated launcher with `bun run dev:launcher`.
+- Start the isolated launcher with `CODEX_WEB_GPT_LAUNCHER_EXECUTABLE=/absolute/path/to/reviewed/launcher bun run dev:launcher`; later calls without the override reuse the running DEV owner. See [development launcher setup](dev-setup.md) for each platform's executable path.
 - It skips the normal marketing onboarding and opens the setup surface directly. Sign in inside the
   window labelled **DEV**. This may be a different ChatGPT account.
-- Run its browser smoke test and initialize the DEV profile. Complete MCP setup only when testing
-  simulated tool rounds; browser, effort, context-limit, and compaction work in browser-only mode.
-  The launcher stores any MCP credentials only in the DEV home and supervises only that isolated
-  tunnel. Create the ChatGPT connector as `Codex Native2 DEV`; keep `Codex Native2` unchanged.
+- Run its browser smoke test and initialize the DEV profile. Complete MCP setup only when testing simulated tool rounds; browser, effort, context-limit, and compaction work in browser-only mode. The launcher stores any MCP credentials only in the DEV home and supervises only that isolated tunnel. Full mode requires a Chat-compatible connector named `Codex Native2 DEV`; verify availability from ordinary Chat because current personal plugin creation may route to ChatGPT Work. Keep `Codex Native2` unchanged.
 
 Nothing is copied from the normal launcher. The DEV command fails closed if its own launcher,
 browser descriptor, credentials, or connector are not ready. It never falls back to the production
@@ -27,7 +26,7 @@ profile, another model, a fake browser, or a second connector.
 One browser-only message:
 
 ```bash
-bun run dev:launcher
+CODEX_WEB_GPT_LAUNCHER_EXECUTABLE=/absolute/path/to/reviewed/launcher bun run dev:launcher
 bun run src/cli.ts dev status
 bun run dev:chat smoke "Reply with exactly: DEV READY"
 ```
@@ -59,10 +58,19 @@ new Temporary Chat. The complete named history remains owned by the existing pro
 chats use the cheapest account-supported browser mode:
 Instant (`light`) when Sol is available, otherwise Luna. Override it with `--model` or `/model`.
 
+SIGINT or SIGTERM during a DEV message aborts its active Responses request, allowing the browser helper and broker to settle before the CLI exits. An interrupted message is not committed to the named chat history, and an uncertain external effect is never replayed automatically.
+
+When ChatGPT reports **Too many requests** before the model selector finishes, the browser returns a typed `rate_limit_before_send` cause. The DEV chat saves that exact unsent message and selected model in its private named-chat file without adding it to completed history. Stop sending requests while the account is limited. After capacity returns, run `bun run dev:chat NAME --retry-pending` or open the named chat and enter `/retry`; that retry is explicit and uses the same message and model. `/pending` shows only its state and timestamp, and `/discard yes` removes it without changing completed history. A retry is marked uncertain before it contacts ChatGPT; if it is interrupted or fails after submission might have occurred, another automatic or `/retry` replay is blocked until the user inspects the ChatGPT turn and discards or reconciles the pending record. No cooldown duration is guessed from the generic dialog.
+
+In a native Codex task, the same pre-Send cause is reported with a recovery instruction instead of starting another browser attempt. After account capacity returns, send a new instruction in that same task asking Codex to retry the previous unsent request. The task history supplies the prior request when it is still present; if compaction or history loss removed it, provide the request again. A rate limit after Send has a different outcome and must be inspected in the ChatGPT tab before any replay.
+
 Interactive commands:
 
 ```text
 /status
+/pending
+/retry
+/discard yes
 /fill 30000
 /send-fill 12000
 /compact

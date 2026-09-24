@@ -853,6 +853,23 @@ describe("ChatGPT outer-native harness v4", () => {
     expect(second.outstanding()).toEqual([{ callId: "call_1", wireName: "exec_command", freeform: false, arguments: { cmd: "pwd" } }]);
   });
 
+  test("releases settled native turn journals after idle TTL without another request", async () => {
+    const sessions = new ChatGptTurnSessions(20);
+    let cancellations = 0;
+    sessions.getOrCreate("settled", () => ({
+      mode: "read-only",
+      browser: Promise.resolve("done"),
+      physicalSettlement: Promise.resolve(),
+      trace: new ChatGptTraceFeed(),
+      text: new ChatGptTextFeed(),
+      cancel: () => { cancellations += 1; },
+    }));
+    await Bun.sleep(80);
+    expect(sessions.find("settled")).toBeUndefined();
+    expect(cancellations).toBe(1);
+    sessions.clear();
+  });
+
   test("waits for the previous browser owner without preempting it before another turn starts", async () => {
     const sessions = new ChatGptTurnSessions();
     let finishBrowser!: (answer: string) => void;
@@ -1098,6 +1115,64 @@ describe("ChatGPT outer-native harness v4", () => {
         });
       }
       expect(browserStarts).toBe(1);
+    } finally {
+      (worker as unknown as { run: (turn: BrowserTurn) => Promise<string> }).run = originalRun;
+    }
+  });
+
+  test("a pre-Send rate limit preserves the native task for an explicit later continuation", async () => {
+    const provider: CodexProviderConfig = {
+      adapter: "chatgpt-web",
+      baseUrl: `browser://chatgpt-native-rate-limit-${Date.now()}`,
+      chatgptWeb: { localToolsEnabled: false, solAvailable: true, proAvailable: true },
+    };
+    const worker = ChatGptBrowserWorker.forProvider(provider);
+    const originalRun = worker.run.bind(worker);
+    let browserStarts = 0;
+    (worker as unknown as { run: (turn: BrowserTurn) => Promise<string> }).run = async turn => {
+      browserStarts += 1;
+      if (browserStarts === 1) {
+        throw new ChatGptWebAdapterError("ChatGPT rate limit: too many requests. The pending message was not sent.", {
+          status: 429,
+          errorType: "rate_limit_error",
+          code: "rate_limit_before_send",
+          retryable: false,
+        });
+      }
+      const prepared = await turn.prepare();
+      expect(prepared.text).toContain("Inspect the project");
+      expect(prepared.text).toContain("Retry my previous unsent request");
+      turn.onTextDelta("Recovered in the same task");
+      return "Recovered in the same task";
+    };
+    try {
+      const original = rawWireRequest(environmentXml);
+      for (let attempt = 0; attempt < 2; attempt += 1) {
+        const events: AdapterEvent[] = [];
+        await createChatGptWebAdapter(provider).runTurn!(original, { headers: new Headers() }, event => events.push(event));
+        expect(events.at(-1)).toMatchObject({ type: "error", code: "rate_limit_before_send", retryable: false });
+        expect((events.at(-1) as Extract<AdapterEvent, { type: "error" }>).message).toContain("same Codex task");
+      }
+      expect(browserStarts).toBe(1);
+
+      const continuation = rawWireRequest(environmentXml);
+      const body = continuation._rawBody as {
+        client_metadata: Record<string, unknown>;
+        input: Array<Record<string, unknown>>;
+      };
+      body.client_metadata["x-codex-turn-metadata"] = JSON.stringify({ thread_id: "thread_test_123", turn_id: "turn_recovery_456" });
+      body.input[0]!.internal_chat_message_metadata_passthrough = { turn_id: "turn_recovery_456" };
+      body.input.push({
+        type: "message",
+        role: "user",
+        content: [{ type: "input_text", text: "Retry my previous unsent request" }],
+        internal_chat_message_metadata_passthrough: { turn_id: "turn_recovery_456" },
+      });
+      continuation.context.messages.push({ role: "user", content: "Retry my previous unsent request", timestamp: 3 });
+      const events: AdapterEvent[] = [];
+      await createChatGptWebAdapter(provider).runTurn!(continuation, { headers: new Headers() }, event => events.push(event));
+      expect(events.at(-1)).toMatchObject({ type: "done", endTurn: true });
+      expect(browserStarts).toBe(2);
     } finally {
       (worker as unknown as { run: (turn: BrowserTurn) => Promise<string> }).run = originalRun;
     }

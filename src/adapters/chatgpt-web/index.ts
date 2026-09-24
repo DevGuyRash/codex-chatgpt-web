@@ -1409,9 +1409,12 @@ export function createChatGptWebAdapter(
             void session.runtime.token.then(turnToken => broker.revoke(turnToken)).catch(() => {});
           }
           if (handledError instanceof ChatGptWebAdapterError) {
+            const message = handledError.code === "rate_limit_before_send"
+              ? `${handledError.message} Wait for account capacity, then send a new instruction in this same Codex task asking to retry the previous unsent request. The current turn will not be submitted again automatically; if its original instruction is missing from task history, provide it again.`
+              : handledError.message;
             emitRoundEvent({
               type: "error",
-              message: handledError.message,
+              message,
               status: handledError.status,
               errorType: handledError.errorType,
               code: handledError.code,

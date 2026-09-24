@@ -519,6 +519,7 @@ export class ChatGptTurnSessions {
   private readonly retirements = new Map<string, Promise<void>>();
   private readonly ownerRetirements = new Map<string, Promise<void>>();
   private readonly conversationRetirements = new Map<string, Promise<void>>();
+  private pruneTimer?: ReturnType<typeof setTimeout>;
 
   constructor(
     private readonly ttlMs = 30 * 60_000,
@@ -550,6 +551,7 @@ export class ChatGptTurnSessions {
     if (this.entries.size >= this.maxEntries) throw new Error(`ChatGPT web session registry is full (${this.maxEntries} entries)`);
     const session = new ChatGptTurnSession(start(), traceId, ownerKey, nativeTurnId, nativeThreadId, inputLineage);
     this.entries.set(key, session);
+    void session.browserOutcome.then(() => this.schedulePrune());
     const conversationKey = session.conversationKey();
     if (conversationKey) this.conversationHeads.set(conversationKey, session);
     return session;
@@ -765,6 +767,8 @@ export class ChatGptTurnSessions {
   }
 
   clear(): number {
+    if (this.pruneTimer) clearTimeout(this.pruneTimer);
+    this.pruneTimer = undefined;
     const cancelled = this.entries.size;
     for (const [key, session] of this.entries) this.beginRetirement(key, session);
     this.entries.clear();
@@ -837,6 +841,27 @@ export class ChatGptTurnSessions {
       this.entries.delete(key);
       this.forgetConversationHead(session);
     }
+    this.schedulePrune();
+  }
+
+  /** Settled turn journals otherwise stay resident forever when no later request arrives. */
+  private schedulePrune(): void {
+    if (this.pruneTimer) clearTimeout(this.pruneTimer);
+    this.pruneTimer = undefined;
+    let nextExpiry = Infinity;
+    for (const session of this.entries.values()) {
+      if (session.isActive()) continue;
+      nextExpiry = Math.min(nextExpiry, session.lastUsedAt() + this.ttlMs);
+    }
+    if (!Number.isFinite(nextExpiry)) return;
+    const registry = new WeakRef(this);
+    this.pruneTimer = setTimeout(() => {
+      const current = registry.deref();
+      if (!current) return;
+      current.pruneTimer = undefined;
+      current.prune();
+    }, Math.max(1, nextExpiry - Date.now()));
+    this.pruneTimer.unref?.();
   }
 
   private forgetConversationHead(session: ChatGptTurnSession): void {

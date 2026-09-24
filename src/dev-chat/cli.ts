@@ -38,16 +38,21 @@ Usage:
   codex-chatgpt-web dev status [--json]
   codex-chatgpt-web dev setup --browser-only [--automatic-browser-interaction]
   codex-chatgpt-web dev setup --full --tunnel-id ID --runtime-key-file PATH [--automatic-browser-interaction|--zero-risk-browser-interaction]
-  codex-chatgpt-web dev chat NAME [--model MODEL] [MESSAGE]
+  codex-chatgpt-web dev chat NAME [--model MODEL] [MESSAGE|--retry-pending]
   codex-chatgpt-web dev list
 
 Repository shortcut:
-  bun run dev:launcher
+  CODEX_WEB_GPT_LAUNCHER_EXECUTABLE=/absolute/reviewed/launcher bun run dev:launcher
   bun run dev:chat NAME "message"
   bun run dev:chat NAME
 
+An already-running DEV launcher is reused. Starting a stopped profile requires the explicit reviewed executable; the normal installed launcher is never selected automatically.
+
 Interactive commands:
   /status              Show estimated next-turn context occupancy
+  /pending             Show a saved pre-Send rate-limit message without displaying its content
+  /retry               Retry that exact unsent message after account capacity returns
+  /discard yes         Discard the pending message without changing completed history
   /fill TOKENS         Append deterministic inert context without opening ChatGPT
   /send-fill TOKENS    Send deterministic inert text through the live browser now
   /compact             Run the real browser compaction path now
@@ -180,15 +185,29 @@ async function assertLauncherReady(config: ReturnType<typeof loadConfig>): Promi
   }
 }
 
-async function executeMessage(driver: DevChatDriver, state: DevChatState, message: string): Promise<void> {
+async function executeMessage(driver: DevChatDriver, state: DevChatState, message: string, retryPending = false): Promise<void> {
   const renderer = new EventRenderer();
+  const controller = new AbortController();
+  const interrupt = () => {
+    process.exitCode = 130;
+    controller.abort(new DOMException("DEV chat interrupted", "AbortError"));
+  };
+  const terminate = () => {
+    process.exitCode = 143;
+    controller.abort(new DOMException("DEV chat terminated", "AbortError"));
+  };
+  process.once("SIGINT", interrupt);
+  process.once("SIGTERM", terminate);
   try {
-    const result = await driver.send(state, message, event => renderer.write(event));
+    const result = await driver.send(state, message, event => renderer.write(event), controller.signal, { retryPending });
     renderer.finish();
     stdout.write(`${dim(`usage ${result.usage.inputTokens.toLocaleString("en-US")} input + ${result.usage.outputTokens.toLocaleString("en-US")} output · context ${statusLine(result.status)}`)}\n`);
   } catch (error) {
     renderer.finish();
     throw error;
+  } finally {
+    process.off("SIGINT", interrupt);
+    process.off("SIGTERM", terminate);
   }
 }
 
@@ -216,6 +235,21 @@ async function interactive(driver: DevChatDriver, state: DevChatState): Promise<
         } else if (command === "status") {
           if (argument) throw new Error("Usage: /status");
           stdout.write(`context ${statusLine(driver.status(state))}\n`);
+        } else if (command === "pending") {
+          if (argument) throw new Error("Usage: /pending");
+          const pending = state.pendingSubmission;
+          stdout.write(pending
+            ? `pending ${pending.status} · ${pending.reason} · model ${pending.model} · observed ${pending.observedAt}\n`
+            : "No pending DEV message.\n");
+        } else if (command === "retry") {
+          if (argument) throw new Error("Usage: /retry");
+          const pending = state.pendingSubmission;
+          if (!pending) throw new Error("DEV chat has no pending message to retry");
+          await executeMessage(driver, state, pending.message, true);
+        } else if (command === "discard") {
+          if (argument !== "yes" || rest.length > 0) throw new Error("Usage: /discard yes");
+          driver.discardPending(state);
+          stdout.write("Pending DEV message discarded; completed history preserved.\n");
         } else if (command === "fill") {
           if (rest.length > 0) throw new Error("Usage: /fill TOKENS");
           const tokens = Number(argument);
@@ -287,7 +321,7 @@ export async function runDevCommand(args: string[]): Promise<void> {
     if (args.length > 0) throw new Error(`Unknown DEV launcher arguments: ${args.join(" ")}`);
     const launched = await launchDevProfile(paths);
     stdout.write(
-      `${launched.alreadyRunning ? "Opened" : "Started"} isolated DEV launcher`
+      `${launched.alreadyRunning ? "Already running" : "Started"} isolated DEV launcher`
       + ` (pid ${launched.descriptor.pid})\n`
       + `DEV home: ${paths.home}\n`
       + `ChatGPT session: ${paths.launcherUserData}\n`,
@@ -381,10 +415,12 @@ export async function runDevCommand(args: string[]): Promise<void> {
 
   activateDevProfileEnvironment(paths);
   const store = new DevChatStore(paths.chatsPath);
+  const retryPending = takeFlag(args, "--retry-pending");
   const requestedModel = modelFromCli(takeOption(args, "--model"));
   const name = args.shift();
   if (!name) throw new Error(`DEV chat name is required\n\n${DEV_HELP}`);
   const message = args.join(" ").trim();
+  if (retryPending && message) throw new Error("--retry-pending cannot be combined with a new message");
   if (!existsSync(paths.configPath)) {
     throw new Error(
       "DEV profile is not configured. In the window labelled DEV: sign in, run the browser smoke test,"
@@ -417,7 +453,15 @@ export async function runDevCommand(args: string[]): Promise<void> {
       driver.setModel(opened.state, requestedModel);
     }
     printHeader(opened.state, opened.created, driver.status(opened.state), runtimeConfig.mode, features.biggerContext);
-    if (message) await executeMessage(driver, opened.state, message);
+    if (opened.state.pendingSubmission) {
+      const pending = opened.state.pendingSubmission;
+      stdout.write(`${yellow(`Pending ${pending.status} DEV message from ${pending.observedAt}; ${pending.status === "unsent" ? "wait for capacity, then use /retry or --retry-pending" : "inspect ChatGPT before discarding; automatic replay is blocked"}.`)}\n`);
+    }
+    if (retryPending) {
+      const pending = opened.state.pendingSubmission;
+      if (!pending) throw new Error("DEV chat has no pending message to retry");
+      await executeMessage(driver, opened.state, pending.message, true);
+    } else if (message) await executeMessage(driver, opened.state, message);
     else await interactive(driver, opened.state);
   } finally {
     const results = await Promise.allSettled([

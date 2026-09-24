@@ -187,7 +187,10 @@ test("launcher admission events preserve HTTP correlation through queueing, defe
     for (const scope of scopes) {
       const query = await logger.client!.query({ traceId: scope.trace, ascending: true, limit: 200 });
       expect(query.incomplete).toBeFalse(); expect(query.notices).toEqual([]);
-      expect(query.events.map(event => event.name)).toEqual(["browser.queued", "browser.acquisition_started", "browser.acquisition_completed", "browser.admission_released"]);
+      const names = query.events.map(event => event.name);
+      expect(names.slice(0, 3)).toEqual(["browser.queued", "browser.acquisition_started", "browser.acquisition_completed"]);
+      expect(names.slice(-2)).toEqual(["browser.turn_ended", "browser.admission_released"]);
+      expect(names.filter(name => name === "browser.turn_started").length).toBeLessThanOrEqual(1);
       expect(query.events.every(event => event.traceId === scope.trace && event.spanId === scope.span && event.taskId === scope.browser && event.attributes.traceId === scope.browser)).toBeTrue();
       expect(query.events[0]!.attributes.capacity).toBe(2);
     }

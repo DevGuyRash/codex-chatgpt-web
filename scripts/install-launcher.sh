@@ -125,12 +125,14 @@ chmod 0755 "$TEMP_DIR/$ASSET"
   cd "$EXTRACT_DIR"
   "$TEMP_DIR/$ASSET" --appimage-extract >/dev/null
 )
-ICON_SOURCE="$(find "$EXTRACT_DIR/squashfs-root" -type f -path '*/512x512/*' -name '*.png' | sort | head -n 1)"
-if [ -z "$ICON_SOURCE" ]; then
-  ICON_SOURCE="$(find "$EXTRACT_DIR/squashfs-root" -type f -name '*.png' | sort | head -n 1)"
+# AppImages include dependency PNGs (including Playwright's logo); only the named
+# application icon may be installed into the desktop theme.
+ICON_SOURCE="$EXTRACT_DIR/squashfs-root/codex-web-gpt.png"
+if [ ! -f "$ICON_SOURCE" ]; then
+  ICON_SOURCE="$(find "$EXTRACT_DIR/squashfs-root/usr/share/icons/hicolor" -type f -path '*/apps/codex-web-gpt.png' -print -quit 2>/dev/null || true)"
 fi
-if [ -z "$ICON_SOURCE" ]; then
-  echo "Launcher AppImage does not contain a PNG application icon" >&2
+if [ -z "$ICON_SOURCE" ] || [ ! -f "$ICON_SOURCE" ]; then
+  echo "Launcher AppImage does not contain its named codex-web-gpt.png icon" >&2
   exit 1
 fi
 RUNNER_SOURCE="$(find "$EXTRACT_DIR/squashfs-root" -type f -path '*/app.asar.unpacked/assets/linux-appimage-runner.sh' -print -quit)"

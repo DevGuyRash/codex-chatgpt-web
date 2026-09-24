@@ -435,6 +435,7 @@ class BrowserHost {
       this.resumeListener = null;
     }
     this.boundsReady = false;
+    this.homeRendererRecoveryAttempted = false;
     this.bounds = { x: 0, y: 0, width: 1, height: 1 };
     this.state = {
       status: "idle",
@@ -1134,6 +1135,19 @@ class BrowserHost {
       this.clearHomeNavigationTimeout();
       this.logger.error("browser.renderer_gone", { reason: details.reason, exitCode: details.exitCode });
       this.setState({ status: "error", message: `Browser renderer stopped: ${details.reason}`, loading: false });
+      if (details.reason !== "crashed" || this.homeRendererRecoveryAttempted || contents.isDestroyed()) return;
+      this.homeRendererRecoveryAttempted = true;
+      this.logger.info("browser.renderer_recovery_started", { attempt: 1 });
+      this.setState({ status: "loading", message: "Recovering ChatGPT browser", authenticated: false, loading: true });
+      void loadCommittedBrowserSurface(contents, TEMPORARY_CHAT_URL, BROWSER_NAVIGATION_TIMEOUT_MS)
+        .then(() => this.logger.info("browser.renderer_recovery_completed", { attempt: 1 }))
+        .catch(error => {
+          this.logger.error("browser.renderer_recovery_failed", {
+            attempt: 1,
+            message: error instanceof Error ? error.message : String(error),
+          });
+          this.setState({ status: "error", message: "ChatGPT browser could not recover after its renderer stopped", loading: false });
+        });
     });
   }
 

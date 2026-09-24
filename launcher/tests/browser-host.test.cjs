@@ -21,6 +21,7 @@ const {
   isChatGptCloudflareChallengeResponse,
   isTemporaryChatUrl,
   loadCommittedBrowserSurface,
+  TEMPORARY_CHAT_URL,
   MANUAL_COMPACTION_SUBMIT_TIMEOUT_MS,
   MANUAL_SUBMIT_TIMEOUT_MS,
   navigationErrorForLog,
@@ -106,6 +107,42 @@ test("primary browser bootstrap fails closed on navigation, renderer, and timeou
   } finally {
     clearTimeout(keepTestAlive);
   }
+});
+
+test("a crashed home renderer gets one bounded reload without replaying a turn", async () => {
+  const contents = new EventEmitter();
+  const states = [];
+  const events = [];
+  const loads = [];
+  let currentUrl = "about:blank";
+  contents.setWindowOpenHandler = () => {};
+  contents.isDestroyed = () => false;
+  contents.getURL = () => currentUrl;
+  contents.stop = () => {};
+  contents.loadURL = async url => {
+    loads.push(url);
+    currentUrl = url;
+  };
+  const host = {
+    view: { webContents: contents },
+    homeRendererRecoveryAttempted: false,
+    clearHomeNavigationTimeout: () => {},
+    setState: state => states.push(state),
+    logger: {
+      error: (name) => events.push(name),
+      info: (name) => events.push(name),
+      warn: (name) => events.push(name),
+    },
+  };
+  BrowserHost.prototype.bindWebContents.call(host);
+  contents.emit("render-process-gone", {}, { reason: "crashed", exitCode: 139 });
+  await new Promise(resolve => setImmediate(resolve));
+  assert.deepEqual(loads, [TEMPORARY_CHAT_URL]);
+  assert.ok(states.some(state => state.status === "loading" && state.message === "Recovering ChatGPT browser"));
+  assert.ok(events.includes("browser.renderer_recovery_completed"));
+  contents.emit("render-process-gone", {}, { reason: "crashed", exitCode: 139 });
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(loads.length, 1);
 });
 
 function manualTabNavigationFixture(remoteError) {

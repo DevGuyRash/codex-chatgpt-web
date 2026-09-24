@@ -35,6 +35,7 @@ test("Linux DEV shortcut is distinct and preserves a contributor-managed entry",
   try {
     const executable = path.join(root, "codex-web-gpt");
     fs.writeFileSync(executable, "binary", { mode: 0o700 });
+    fs.writeFileSync(path.join(root, "codex-web-gpt.png"), "icon");
     const home = path.join(root, "dev profile");
     const target = path.join(root, "applications", "codex-web-gpt-dev.desktop");
     assert.equal(installLinuxDevelopmentShortcut({ home, executable, dataHome: root }), "installed");
@@ -42,6 +43,8 @@ test("Linux DEV shortcut is distinct and preserves a contributor-managed entry",
     assert.equal(content, developmentDesktopEntry(home, executable));
     assert.match(content, /--dev-profile/);
     assert.match(content, /CODEX_WEB_GPT_DEV_HOME=/);
+    assert.ok(content.includes(`Icon=${path.join(root, "codex-web-gpt.png")}\n`));
+    assert.match(developmentDesktopEntry(home, path.join(root, "portable", "portable.AppImage")), /\nIcon=codex-web-gpt\n/);
     assert.equal(installLinuxDevelopmentShortcut({ home, executable, dataHome: root }), "present");
     fs.writeFileSync(target, "[Desktop Entry]\nName=Contributor DEV\n");
     assert.equal(installLinuxDevelopmentShortcut({ home, executable, dataHome: root }), "existing-unmanaged");

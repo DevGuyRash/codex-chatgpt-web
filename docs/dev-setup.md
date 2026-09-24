@@ -49,13 +49,13 @@ Type=Application
 Name=Codex Web GPT DEV
 Exec=/usr/bin/env CODEX_WEB_GPT_DEV_HOME=/absolute/dev/home /absolute/reviewed/AppRun --dev-profile
 TryExec=/absolute/reviewed/AppRun
-Icon=codex-web-gpt
+Icon=/absolute/reviewed/codex-web-gpt.png
 Terminal=false
 Categories=Development;
 StartupWMClass=codex-web-gpt-dev
 ```
 
-The normal launcher's Settings action launches the DEV profile on Linux, macOS, and Windows. A packaged Linux launcher also creates a separate DEV desktop entry when no user-managed entry occupies that name; it leaves a user-managed entry unchanged. The same executable-and-profile rule applies on other platforms: a macOS shortcut or wrapper should launch the reviewed app bundle executable with `CODEX_WEB_GPT_DEV_HOME` and `--dev-profile`; a Windows shortcut or PowerShell wrapper should launch the reviewed packaged `.exe` with the same DEV home environment and `--dev-profile`. The normal desktop icon and a source-channel shortcut can target different binaries or profiles, so their titles alone are not proof that a DEV profile is running. Check the **DEV** badge and `bun run src/cli.ts dev status` after launch. Distinct macOS and Windows shortcut installers are not yet supplied by this repository.
+A fresh installation shows one normal **Codex Web GPT** launcher. Selecting **Settings → Development profile** creates the isolated DEV profile and, on packaged Linux, adds **Codex Web GPT DEV** as the second app-menu entry when no user-managed entry occupies that name. It does not create a Fork Preview or Local Development entry; those are maintainer-specific shortcuts, not distribution modes. The generated DEV entry uses the reviewed extracted package's adjacent icon when available, so it does not resolve an unrelated app's same-named theme icon. A portable AppImage falls back to the icon installed by the normal package installer. The normal launcher's Settings action launches the DEV profile on Linux, macOS, and Windows. A packaged Linux launcher leaves any existing user-managed DEV entry unchanged. The same executable-and-profile rule applies on other platforms: a macOS shortcut or wrapper should launch the reviewed app bundle executable with `CODEX_WEB_GPT_DEV_HOME` and `--dev-profile`; a Windows shortcut or PowerShell wrapper should launch the reviewed packaged `.exe` with the same DEV home environment and `--dev-profile`. The normal desktop icon and a source-channel shortcut can target different binaries or profiles, so their titles alone are not proof that a DEV profile is running. Check the **DEV** badge and `bun run src/cli.ts dev status` after launch. Distinct macOS and Windows shortcut installers are not yet supplied by this repository.
 
 Linux 1Password desktop integration has an additional packaging constraint: on the tested host, its native host trusted a stable root-owned extracted launcher tree under `/opt`, but rejected portable AppImage mounting and user-owned extraction. After package smoke passes, extract the reviewed AppImage as your normal user, compute the SHA-256 of its `resources/app.asar`, and run the repository installer in a visible terminal:
 

@@ -49,7 +49,10 @@ function desktopArgument(value) {
 }
 
 function developmentDesktopEntry(home, executable) {
-  return `[Desktop Entry]\nType=Application\nVersion=1.0\nName=Codex Web GPT DEV\nComment=Open the isolated development profile\nExec=/usr/bin/env ${desktopArgument(`CODEX_WEB_GPT_DEV_HOME=${home}`)} ${desktopArgument(executable)} --dev-profile\nTryExec=${desktopArgument(executable)}\nIcon=codex-web-gpt\nTerminal=false\nCategories=Development;\nStartupWMClass=codex-web-gpt-dev\n${MANAGED_MARKER}\n`;
+  const packagedIcon = path.join(path.dirname(executable), "codex-web-gpt.png");
+  const icon = fs.statSync(packagedIcon, { throwIfNoEntry: false })?.isFile()
+    ? packagedIcon : "codex-web-gpt";
+  return `[Desktop Entry]\nType=Application\nVersion=1.0\nName=Codex Web GPT DEV\nComment=Open the isolated development profile\nExec=/usr/bin/env ${desktopArgument(`CODEX_WEB_GPT_DEV_HOME=${home}`)} ${desktopArgument(executable)} --dev-profile\nTryExec=${desktopArgument(executable)}\nIcon=${icon}\nTerminal=false\nCategories=Development;\nStartupWMClass=codex-web-gpt-dev\n${MANAGED_MARKER}\n`;
 }
 
 function installLinuxDevelopmentShortcut({ home, executable, dataHome = process.env.XDG_DATA_HOME?.trim() || path.join(os.homedir(), ".local", "share") }) {

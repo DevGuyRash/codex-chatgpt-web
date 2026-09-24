@@ -102,7 +102,7 @@ export async function runLiveBatch(options: {
   mkdirSync(home, { recursive: true, mode: 0o700 });
   const nativeEnv = goldenNativeEnvironment(work, home, options.executable);
   const cells = requests.map(request => {
-    const task = join(work, "cells", request.id), workload = createWorkload({ level: request.workload, seed: `${request.id}:${randomUUID()}`, batch: 0, ...(request.variant === "formats" ? { formatCoverage: "all" as const } : {}) });
+    const task = join(work, "cells", request.id), workload = createWorkload({ level: request.workload, seed: `${request.id}:${randomUUID()}`, batch: 0, ...(["formats", "tool-image"].includes(request.variant) ? { formatCoverage: "all" as const } : {}) });
     materializeWorkload(task, workload);
     const git = (...args: string[]) => {
       const result = spawnSync("git", ["-C", task, ...args], { env: nativeEnv, encoding: "utf8", timeout: 15000 });
@@ -170,6 +170,7 @@ export async function runLiveBatch(options: {
             await evidence.capture(item.traceId, "oracle", JSON.stringify({ workload: cell.workload, baseline: cell.baseline, nativeCatalogSha256, cellId: cell.request.id }));
             const terminal = await cellOperation.run(() => runNativeScenario({ executable: options.executable, cwd: cell.task, env: nativeEnv, route: cell.request.route, modelProvider: "golden", workload: cell.workload, variant: cell.request.variant, signal: options.signal, timeoutMs: options.turnTimeoutMs,
               modelSwitch: switches.get(cell.request.id),
+              ...(cell.request.variant === "tool-image" ? { imagePath: join(cell.task, "input/label.png") } : {}),
               onRecord: (category, text, phase, receivedAtMs) => captureLane.record(category, text, phase, receivedAtMs),
               checkpoint: async identity => {
                 if (identity.threadId) nativeThreads.add(identity.threadId);

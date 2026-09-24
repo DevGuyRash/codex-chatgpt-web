@@ -39,6 +39,14 @@ function finiteCellOutcome(cell: GoldenCell, result: LiveCellResult, batch: Live
     const expectedSha256 = createHash("sha256").update(`${GOLDEN_UNICODE_WITNESS}\n`).digest("hex");
     if (!proof.oracle.artifacts.some(artifact => artifact.path === "output/unicode.txt" && artifact.sha256 === expectedSha256)) throw new Error("Unicode coverage lacks its independently validated UTF-8 artifact");
   }
+  if (cell.variant.id === "tool-image") {
+    const attachedSha256 = "attachedImageSha256" in proof.terminal ? proof.terminal.attachedImageSha256 : undefined;
+    if (typeof attachedSha256 !== "string" || !/^[a-f\d]{64}$/.test(attachedSha256)
+      || !proof.oracle.artifacts.some(artifact => artifact.path === "input/label.png" && artifact.sha256 === attachedSha256)
+      || !proof.oracle.artifacts.some(artifact => artifact.path === "output/attachments.json" && artifact.bytes > 0)) {
+      throw new Error("Native image coverage lacks its exact attached fixture and independently validated result");
+    }
+  }
   if (cell.variant.id === "large-history") {
     const expectedSha256 = "historyWitnessSha256" in proof.terminal ? proof.terminal.historyWitnessSha256 : undefined;
     if (typeof expectedSha256 !== "string" || !/^[a-f\d]{64}$/.test(expectedSha256)

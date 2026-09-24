@@ -156,6 +156,22 @@ test("large-history campaign coverage requires preparation and its retained-cont
   expect(liveBatchOutcomes([cell], batch).get(cell.id)?.status).toBe("passed");
 });
 
+test("native image campaign coverage requires the attached fixture and interpreted output", () => {
+  const cell = { ...cells[0]!, variant: { id: "tool-image", driver: "exec" as const } };
+  expect(canExecuteLiveCell(cell)).toBe(true);
+  const batch = completedBatch();
+  batch.cells = [batch.cells[0]!];
+  const item = batch.cells[0]!;
+  item.variant = "tool-image";
+  item.result!.terminal.variant = "tool-image";
+  expect(() => liveBatchOutcomes([cell], batch)).toThrow("Native image coverage lacks its exact attached fixture");
+  Object.assign(item.result!.terminal, { attachedImageSha256: "c".repeat(64) });
+  item.result!.oracle.artifacts.push({ path: "input/label.png", bytes: 100, sha256: "c".repeat(64) });
+  expect(() => liveBatchOutcomes([cell], batch)).toThrow("Native image coverage lacks its exact attached fixture");
+  item.result!.oracle.artifacts.push({ path: "output/attachments.json", bytes: 100, sha256: "d".repeat(64) });
+  expect(liveBatchOutcomes([cell], batch).get(cell.id)?.status).toBe("passed");
+});
+
 test("verified provider admission survives incomplete exec evidence without inferring a limit from native prose", () => {
   const batch = completedBatch(), item = batch.cells[0]!;
   batch.incomplete = true; item.passed = false; delete item.result;

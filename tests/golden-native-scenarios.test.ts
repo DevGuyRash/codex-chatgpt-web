@@ -2,9 +2,9 @@ import { expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { ownedNativeActivity, runNativeScenario } from "../scripts/golden/native-scenarios";
-import { GOLDEN_UNICODE_WITNESS, createWorkload, largeHistoryWitness } from "../scripts/golden/workloads";
+import { GOLDEN_UNICODE_WITNESS, createWorkload, largeHistoryWitness, materializeWorkload } from "../scripts/golden/workloads";
 import { CHATGPT_WEB_MODEL_ROUTES } from "../src/chatgpt-web-models";
 import { GoldenAppServer, initializeGoldenNativeHome } from "../scripts/golden/app-server";
 import { findNativeExecFailure, runNativeExec } from "../scripts/golden/exec";
@@ -69,6 +69,33 @@ console.log(JSON.stringify({type:"turn.completed"}));
     await expect(runNativeScenario({ executable: peer, cwd: root, env: { EARLY_WRITE: "1" }, route: CHATGPT_WEB_MODEL_ROUTES[0]!, workload, variant: "large-history", signal: new AbortController().signal, timeoutMs: 2000,
       onRecord: async () => {}, checkpoint: () => {} })).rejects.toThrow("Large-history preparation wrote its witness before the retained continuation");
     expect(readFileSync(log, "utf8").trim().split("\n")).toHaveLength(3);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("native image scenario attaches the exact generated PNG and retains its trusted digest", async () => {
+  const root = mkdtempSync(join(tmpdir(), "golden-native-image-")), peer = join(root, "peer"), log = join(root, "launch.json");
+  const workload = createWorkload({ level: 1, seed: "native-image", batch: 0, formatCoverage: "all" });
+  materializeWorkload(root, workload);
+  mkdirSync(join(root, ".git"));
+  writeFileSync(peer, `#!${process.execPath}
+import {writeFileSync} from "node:fs";
+let prompt="";process.stdin.on("data",chunk=>prompt+=chunk);process.stdin.on("end",()=>{
+writeFileSync(${JSON.stringify(log)},JSON.stringify({args:process.argv.slice(2),prompt}));
+console.log(JSON.stringify({type:"thread.started",thread_id:"11111111-1111-7111-8111-111111111111"}));
+console.log(JSON.stringify({type:"turn.started"}));
+console.log(JSON.stringify({type:"turn.completed"}));
+});
+`, { mode: 0o700 });
+  const imagePath = join(root, "input/label.png");
+  const options = { executable: peer, cwd: root, env: {}, route: CHATGPT_WEB_MODEL_ROUTES[0]!, workload, variant: "tool-image", signal: new AbortController().signal, timeoutMs: 2000,
+    onRecord: async () => {}, checkpoint: () => {} };
+  try {
+    await expect(runNativeScenario({ ...options, imagePath: join(root, "input/other.png") })).rejects.toThrow("exact materialized fixture");
+    const result = await runNativeScenario({ ...options, imagePath });
+    expect(result).toMatchObject({ status: "completed", variant: "tool-image", attachedImageSha256: createHash("sha256").update(readFileSync(imagePath)).digest("hex") });
+    const launched = JSON.parse(readFileSync(log, "utf8")) as { args: string[]; prompt: string };
+    expect(launched.args.slice(-3)).toEqual(["--image", imagePath, "-"]);
+    expect(launched.prompt).toContain("image attached to this native turn");
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 

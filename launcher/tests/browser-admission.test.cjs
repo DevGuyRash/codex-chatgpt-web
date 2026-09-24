@@ -96,9 +96,14 @@ test('queued and deferred admission events retain the originating diagnostic con
   request('first', 'first-context'); await tick();
   request('second', 'second-context');
   assert.throws(() => request('second', 'wrong-context'), { code: 'browser_admission_owner_mismatch' });
+  assert.equal(queue.reportOwned('first', 1, 'browser.turn_started', { traceId: 'first' }), true);
+  assert.equal(queue.reportOwned('first', 2, 'browser.turn_started', { traceId: 'first' }), false);
   active--; queue.release('first', 1); await tick();
+  assert.equal(queue.reportOwned('second', 1, 'browser.turn_ended', { traceId: 'second', status: 'completed' }), true);
   active--; queue.release('second', 1);
   assert.ok(seen.some(event => event.task === 'second' && event.name === 'browser.acquisition_completed'));
   assert.equal(seen.filter(event => event.name === 'browser.admission_released').length, 2);
+  assert.ok(seen.some(event => event.name === 'browser.turn_started' && event.context.traceId === 'first-context'));
+  assert.ok(seen.some(event => event.name === 'browser.turn_ended' && event.context.traceId === 'second-context'));
   assert.ok(seen.every(event => event.context.traceId === `${event.task}-context` && event.context.taskId === event.task));
 });

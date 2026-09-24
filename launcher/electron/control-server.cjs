@@ -377,7 +377,9 @@ class BrowserControlServer {
         }
         const lease = body.queueAware === true ? admission.request({ traceId: body.traceId, helperPid: body.helperPid, identity: JSON.stringify([body.conversationKey, body.connectorIdentity, body.requireRetainedConversation]), diagnosticContext: diagnosticParent ? { ...diagnosticParent, taskId: body.traceId } : undefined, start, abandon: () => host.endTurn(body.traceId, body.helperPid, "aborted", false) }) : await start();
         if (lease.queued) { writeJson(response, 202, { ok: true, ...lease }); return; }
-        this.logger.info("browser.turn_started", { traceId: body.traceId });
+        if (!admission.reportOwned(body.traceId, body.helperPid, "browser.turn_started", { traceId: body.traceId })) {
+          this.logger.info("browser.turn_started", { traceId: body.traceId });
+        }
         writeJson(response, 200, { ok: true, ...lease });
         return;
       } else if (request.url === "/v1/turn/park" || request.url === "/v1/turn/resume") {
@@ -413,8 +415,10 @@ class BrowserControlServer {
           body.retain === true,
           body.connectorBound === true,
         );
+        if (!admission?.reportOwned(body.traceId, body.helperPid, "browser.turn_ended", { traceId: body.traceId, status: body.status })) {
+          this.logger.info("browser.turn_ended", { traceId: body.traceId, status: body.status });
+        }
         admission?.release(body.traceId, body.helperPid);
-        this.logger.info("browser.turn_ended", { traceId: body.traceId, status: body.status });
         writeJson(response, 200, { ok: true, ...release });
         return;
       }

@@ -8,6 +8,12 @@ class BrowserAdmission {
   emit(name, data, entry = this.entries.get(data.traceId)) {
     this.report(name, data, entry?.diagnosticContext);
   }
+  reportOwned(traceId, helperPid, name, data) {
+    const entry = this.entries.get(traceId);
+    if (!entry || entry.helperPid !== helperPid) return false;
+    this.emit(name, data, entry);
+    return true;
+  }
   request({ traceId, helperPid, identity, diagnosticContext, start, abandon }) {
     this.sweep();
     let entry = this.entries.get(traceId);

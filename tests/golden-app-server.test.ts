@@ -9,7 +9,7 @@ function fixture() {
   const root = mkdtempSync(join(tmpdir(), "golden-app-server-")), peer = join(root, "peer.ts");
   writeFileSync(peer, `
 const send = message => process.stdout.write(JSON.stringify(message)+"\\n");
-let buffer="", n=0;
+let buffer="", n=0, compactMode="early";
 process.stdin.on("data", chunk => { buffer+=chunk.toString(); for (;;) {
  const i=buffer.indexOf("\\n"); if(i<0)break; const m=JSON.parse(buffer.slice(0,i)); buffer=buffer.slice(i+1);
  if(m.method==="initialize")send({id:m.id,result:{userAgent:"fixture"}});
@@ -17,6 +17,20 @@ process.stdin.on("data", chunk => { buffer+=chunk.toString(); for (;;) {
  if(m.method==="test/ancillary") {
   for(let i=0;i<140;i++)send({method:"turn/completed",params:{threadId:"thread-one",turn:{id:"background-"+i,status:"completed",items:[]}}});
   send({id:m.id,result:{observed:140}});
+ }
+ if(m.method==="test/compact-mode") { compactMode=m.params.mode; send({id:m.id,result:{}}); }
+ if(m.method==="thread/compact/start") {
+  const id="compact-"+(++n), item={id:"compact-item-"+n,type:"contextCompaction"};
+  const complete=()=>{
+   send({method:"turn/started",params:{threadId:"thread-one",turn:{id,status:"inProgress",items:[]}}});
+   send({method:"item/started",params:{threadId:"thread-one",turnId:id,item}});
+   if(compactMode!=="missing-item")send({method:"item/completed",params:{threadId:"thread-one",turnId:id,item}});
+   send({method:"turn/completed",params:{threadId:"thread-one",turn:{id,status:"completed",items:[item]}}});
+  };
+  if(compactMode==="foreign")send({method:"turn/completed",params:{threadId:"other",turn:{id:"unowned",status:"completed",items:[]}}});
+  if(compactMode==="early" || compactMode==="foreign" || compactMode==="missing-item")complete();
+  send({id:m.id,result:{}});
+  if(compactMode==="late")setTimeout(complete,5);
  }
  if(m.method==="turn/start") {
   const id="turn-"+(++n), text=m.params.input[0].text;
@@ -108,5 +122,58 @@ test("a turn route override preserves native ownership and never permits Pro swi
     const starts = f.frames.filter(frame => frame.direction === "sent" && frame.message.method === "turn/start").map(frame => frame.message.params as any);
     expect(starts).toHaveLength(2);
     expect(starts.map(params => [params.threadId, params.model, params.effort, params.collaborationMode.settings.model, params.collaborationMode.settings.reasoning_effort])).toEqual([alternate, CHATGPT_WEB_MODEL_ROUTES[0]!].map(route => ["thread-one", route.slug, route.codexEffort, route.slug, route.codexEffort]));
+  } finally { await f.close(); }
+});
+
+test("native compaction requires its exact item and terminal even when both precede acknowledgement", async () => {
+  const f = fixture();
+  try {
+    await f.app.initialize(); await f.app.openThread();
+    await f.app.rpc.request("test/compact-mode", { mode: "foreign" });
+    const compact = await f.app.compact();
+    expect(compact).toMatchObject({ threadId: "thread-one", turnId: "compact-1", itemId: "compact-item-1", turn: { id: "compact-1", status: "completed" } });
+    expect(f.app.state().compaction).toBe("idle");
+    const next = await f.app.startTurn({ text: "early" });
+    expect(await f.app.waitForCompletion(next.id)).toMatchObject({ status: "completed" });
+  } finally { await f.close(); }
+});
+
+test("native compaction accepts later terminal notifications but never an item-free acknowledgement", async () => {
+  const f = fixture();
+  try {
+    await f.app.initialize(); await f.app.openThread();
+    await f.app.rpc.request("test/compact-mode", { mode: "late" });
+    expect(await f.app.compact()).toMatchObject({ turnId: "compact-1", turn: { status: "completed" } });
+    await f.app.rpc.request("test/compact-mode", { mode: "missing-item" });
+    await expect(f.app.compact({ timeoutMs: 20 })).rejects.toMatchObject({ code: "native_event_timeout", uncertain: true });
+    await expect(f.app.startTurn({ text: "must not replay" })).rejects.toMatchObject({ code: "native_turn_unsettled" });
+  } finally { await f.close(); }
+});
+
+test("native compaction cancellation and close release observation without admitting another turn", async () => {
+  const f = fixture();
+  try {
+    await f.app.initialize(); await f.app.openThread();
+    await f.app.rpc.request("test/compact-mode", { mode: "silent" });
+    const abort = new AbortController();
+    const compact = f.app.compact({ signal: abort.signal, timeoutMs: 5000 });
+    await new Promise(resolve => setTimeout(resolve, 10));
+    abort.abort();
+    await expect(compact).rejects.toMatchObject({ code: "native_observation_cancelled", uncertain: true });
+    await expect(f.app.startTurn({ text: "must not replay" })).rejects.toMatchObject({ code: "native_turn_unsettled" });
+  } finally { await f.close(); }
+});
+
+test("closing the native owner releases an in-flight compact waiter and its bounded cache", async () => {
+  const f = fixture();
+  try {
+    await f.app.initialize(); await f.app.openThread();
+    await f.app.rpc.request("test/compact-mode", { mode: "silent" });
+    const compact = f.app.compact({ timeoutMs: 5000 });
+    void compact.catch(() => {});
+    await new Promise(resolve => setTimeout(resolve, 10));
+    await f.app.close(100);
+    await expect(compact).rejects.toMatchObject({ code: "native_process_closing" });
+    expect(f.app.state().compaction).toBe("idle");
   } finally { await f.close(); }
 });

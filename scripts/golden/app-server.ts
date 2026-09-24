@@ -9,6 +9,17 @@ const object = (value: unknown): value is ObjectValue => value !== null && typeo
 export interface NativeTurn { id: string; status: "inProgress" | "completed" | "interrupted" | "failed"; items: unknown[]; error?: unknown }
 export interface TurnInput { text: string; images?: readonly string[] }
 interface ActiveTurn { submission: "submitting" | "accepted" | "uncertain"; id?: string }
+interface CompactTurn { started: boolean; terminal?: NativeTurn }
+interface ActiveCompaction {
+  submission: "submitting" | "accepted" | "uncertain";
+  turns: Map<string, CompactTurn>;
+  turnId?: string;
+  itemId?: string;
+  itemCompleted: boolean;
+  resolve(value: NativeCompaction): void;
+  reject(error: Error): void;
+}
+export interface NativeCompaction { threadId: string; turnId: string; itemId: string; turn: NativeTurn }
 const invalid = (message: string) => new NativeRpcError(message, "native_protocol_invalid", true);
 export function readNativeTurn(value: unknown): NativeTurn {
   if (!object(value) || typeof value.id !== "string" || !value.id || !["inProgress", "completed", "interrupted", "failed"].includes(String(value.status)) || !Array.isArray(value.items)) throw invalid("Native turn response is missing its identity, status or items");
@@ -31,6 +42,7 @@ export class GoldenAppServer {
   private initialized = false;
   private threadId?: string;
   private active?: ActiveTurn;
+  private compacting?: ActiveCompaction;
   private readonly completed = new Map<string, NativeTurn>();
   constructor(private readonly options: {
     executable: string; args?: string[]; cwd: string; env: NodeJS.ProcessEnv; route: ChatGptWebModelRoute; modelProvider?: string; artifactRepository?: string;
@@ -45,6 +57,32 @@ export class GoldenAppServer {
       if (frame.direction !== "received" || !object(frame.message.params)) return;
       const params = frame.message.params;
       if (!this.threadId || params.threadId !== this.threadId) return;
+      const compaction = this.compacting;
+      const method = frame.message.method;
+      if (compaction && (method === "turn/started" || method === "turn/completed")) {
+        const turn = readNativeTurn(params.turn);
+        let observed = compaction.turns.get(turn.id);
+        if (!observed) {
+          if (compaction.turns.size >= 8) throw invalid("Native compaction produced too many unmatched turns");
+          observed = { started: false }; compaction.turns.set(turn.id, observed);
+        }
+        if (method === "turn/started") observed.started = true;
+        else {
+          if (turn.status === "inProgress") throw invalid("Native compaction completion is not terminal");
+          observed.terminal = turn;
+        }
+      }
+      if (compaction && (method === "item/started" || method === "item/completed") && object(params.item) && params.item.type === "contextCompaction") {
+        const turnId = params.turnId, itemId = params.item.id;
+        if (typeof turnId !== "string" || !turnId || typeof itemId !== "string" || !itemId) throw invalid("Native compaction item lacks its turn or item identity");
+        if (compaction.turnId && compaction.turnId !== turnId || compaction.itemId && compaction.itemId !== itemId) throw invalid("Native compaction changed its owned turn or item identity");
+        compaction.turnId = turnId; compaction.itemId = itemId;
+        if (method === "item/completed") compaction.itemCompleted = true;
+      }
+      if (compaction?.turnId && compaction.itemId && compaction.itemCompleted) {
+        const observed = compaction.turns.get(compaction.turnId);
+        if (observed?.started && observed.terminal) compaction.resolve({ threadId: this.threadId, turnId: compaction.turnId, itemId: compaction.itemId, turn: observed.terminal });
+      }
       if (frame.message.method === "turn/started" && this.active) {
         const turn = readNativeTurn(params.turn);
         if (this.active.id && this.active.id !== turn.id) throw invalid("Another native turn started before the owned turn settled");
@@ -60,7 +98,7 @@ export class GoldenAppServer {
       }
     } });
   }
-  state() { return { threadId: this.threadId, turnId: this.active?.id, submission: this.active?.submission ?? "idle" }; }
+  state() { return { threadId: this.threadId, turnId: this.active?.id, submission: this.active?.submission ?? "idle", compaction: this.compacting?.submission ?? "idle" }; }
   async initialize(options: { timeoutMs?: number } = {}): Promise<void> {
     if (this.initialized) throw new Error("Native client is already initialized");
     // Cold native startup has exceeded the ordinary acknowledgement budget before a
@@ -83,7 +121,7 @@ export class GoldenAppServer {
   }
   async startTurn(input: TurnInput & { mode?: "plan" | "default"; route?: ChatGptWebModelRoute; acknowledgementTimeoutMs?: number }): Promise<NativeTurn> {
     if (!this.threadId) throw new Error("Open an owned native thread first");
-    if (this.active) throw new NativeRpcError("The previous native submission has not settled", "native_turn_unsettled", true);
+    if (this.active || this.compacting) throw new NativeRpcError("The previous native submission has not settled", "native_turn_unsettled", true);
     const route = input.route ?? this.options.route;
     if (isProGeneration(route) || route.interactionMode !== "automatic") throw new Error("The automatic golden driver requires a permitted non-Pro automatic route");
     const parts = inputParts(input);
@@ -118,6 +156,39 @@ export class GoldenAppServer {
     this.requireTurn(turnId);
     await this.rpc.request("turn/interrupt", { threadId: this.threadId, turnId });
   }
+  /** RPC acknowledgement is only admission; the exact compaction item and terminal turn settle the operation. */
+  async compact(options: { acknowledgementTimeoutMs?: number; timeoutMs?: number; signal?: AbortSignal } = {}): Promise<NativeCompaction> {
+    if (!this.threadId) throw new Error("Open an owned native thread first");
+    if (this.active || this.compacting) throw new NativeRpcError("The previous native submission has not settled", "native_turn_unsettled", true);
+    options.signal?.throwIfAborted();
+    let resolve!: (value: NativeCompaction) => void, reject!: (error: Error) => void;
+    const terminal = new Promise<NativeCompaction>((settle, fail) => { resolve = settle; reject = fail; });
+    void terminal.catch(() => {});
+    const operation: ActiveCompaction = { submission: "submitting", turns: new Map(), itemCompleted: false, resolve, reject };
+    this.compacting = operation;
+    try {
+      const response = await this.rpc.request("thread/compact/start", { threadId: this.threadId }, { timeoutMs: options.acknowledgementTimeoutMs, signal: options.signal });
+      if (!object(response)) throw invalid("Native compact acknowledgement is not an object");
+      operation.submission = "accepted";
+      let timeout: ReturnType<typeof setTimeout> | undefined;
+      let rejectObservation!: (error: Error) => void;
+      const observation = new Promise<never>((_, reject) => { rejectObservation = reject; });
+      const aborted = () => rejectObservation(new NativeRpcError("Native compaction observation was cancelled", "native_observation_cancelled", true));
+      timeout = setTimeout(() => rejectObservation(new NativeRpcError("Native compaction terminal was not observed", "native_event_timeout", true)), options.timeoutMs ?? 30_000);
+      options.signal?.addEventListener("abort", aborted, { once: true });
+      if (options.signal?.aborted) aborted();
+      let result: NativeCompaction;
+      try { result = await Promise.race([terminal, observation]); }
+      finally { clearTimeout(timeout); options.signal?.removeEventListener("abort", aborted); }
+      if (this.compacting !== operation) throw invalid("Native compaction ownership changed while waiting");
+      this.compacting = undefined;
+      return result;
+    } catch (error) {
+      if (error instanceof NativeRpcError && error.code === "native_rpc_rejected" && !operation.turnId && !operation.turns.size) this.compacting = undefined;
+      else operation.submission = "uncertain";
+      throw error;
+    }
+  }
   async waitForCompletion(turnId: string, options: { timeoutMs?: number; signal?: AbortSignal } = {}): Promise<NativeTurn> {
     const active = this.requireTurn(turnId);
     let turn = this.completed.get(turnId);
@@ -130,7 +201,10 @@ export class GoldenAppServer {
     this.completed.delete(turnId); this.active = undefined;
     return turn;
   }
-  close(graceMs?: number): Promise<void> { return this.rpc.close(graceMs); }
+  close(graceMs?: number): Promise<void> {
+    this.compacting?.reject(new NativeRpcError("Native compaction owner is closing", "native_process_closing", true));
+    return this.rpc.close(graceMs).finally(() => { this.compacting = undefined; this.completed.clear(); });
+  }
 }
 
 /** Cold native SQLite initialization is serialized before concurrent consumers share this home. No thread or generation is created. */

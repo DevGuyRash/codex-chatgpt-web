@@ -913,6 +913,7 @@ function registerIpc({ logger, stateStore }) {
       tunnelId: typeof input?.tunnelId === "string" ? input.tunnelId.trim() : "",
       runtimeKey: typeof input?.runtimeKey === "string" ? input.runtimeKey : "",
       replace: input?.replace === true,
+      reuseSavedKey: IS_DEV_PROFILE && input?.reuseSavedKey === true,
       interactionMode,
     }, afterRuntimeReady);
     if (!interactionModeChange && interactionMode === "automatic") await browserHost.reveal();

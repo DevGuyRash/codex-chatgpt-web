@@ -431,6 +431,22 @@ test("DEV setup child environment removes launcher-rebound production aliases", 
   assert.deepEqual(runOptions.environment, { ISOLATED_DEV_ENV: "yes" });
 });
 
+test("DEV runtime spawn keeps its home distinct after the shared command environment is applied", async () => {
+  const fixture = devHostFor(null);
+  fixture.host.command = () => ({
+    executable: process.execPath,
+    args: ["-e", "process.stdout.write(JSON.stringify({dev:process.env.CODEX_WEB_GPT_DEV_HOME,production:process.env.CODEX_CHATGPT_WEB_HOME??null}))"],
+    cwd: process.cwd(),
+  });
+  const result = await fixture.host.runCommand("dev-environment-probe", ["unused"], {
+    environment: {
+      CODEX_WEB_GPT_DEV_HOME: "/dev",
+      CODEX_CHATGPT_WEB_HOME: "/production",
+    },
+  });
+  assert.deepEqual(JSON.parse(result.stdout), { dev: "/dev", production: null });
+});
+
 test("DEV MCP setup reuses only DEV-home credentials and targets its distinct connector", async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-web-gpt-dev-mcp-host-"));
   const runtimeKeyFile = path.join(root, "runtime.key");
@@ -461,6 +477,32 @@ test("DEV MCP setup reuses only DEV-home credentials and targets its distinct co
         "--acknowledge-unofficial",
       ],
     });
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("changing a DEV tunnel can retain its saved DEV key without another key file", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-web-gpt-dev-key-reuse-"));
+  const runtimeKeyFile = path.join(root, "runtime.key");
+  fs.writeFileSync(runtimeKeyFile, "private key\n", { mode: 0o600 });
+  const fixture = devHostFor({
+    purpose: "dev-harness",
+    mode: "full",
+    browserHost: "launcher",
+    appName: "Codex Native2 DEV",
+    tunnel: { tunnelId: "tunnel_0123456789abcdef0123456789abcdef", runtimeKeyFile },
+  });
+  try {
+    await fixture.host.setupDevMcp({
+      tunnelId: "tunnel_fedcba9876543210fedcba9876543210",
+      replace: true,
+      reuseSavedKey: true,
+    });
+    const invocation = fixture.invocation();
+    assert.equal(invocation.name, "dev-mcp-setup");
+    assert.deepEqual(invocation.args.slice(-2), ["--tunnel-id", "tunnel_fedcba9876543210fedcba9876543210"]);
+    assert.equal(invocation.args.includes("--runtime-key-file"), false);
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }

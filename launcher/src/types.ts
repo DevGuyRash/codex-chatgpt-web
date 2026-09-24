@@ -178,6 +178,7 @@ export interface LauncherApi {
     tunnelId?: string;
     runtimeKey?: string;
     replace?: boolean;
+    reuseSavedKey?: boolean;
     interactionMode?: BrowserInteractionMode;
   }): Promise<{ ok: boolean; stdout: string }>;
   setMcpStep(step: number): Promise<LauncherState>;

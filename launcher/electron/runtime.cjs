@@ -632,12 +632,14 @@ class RuntimeHost {
         const environment = options.environment
           ? { ...options.environment }
           : { ...process.env };
+        if (this.launcherProfile === "development") delete environment.CODEX_CHATGPT_WEB_HOME;
         Object.assign(environment, {
           CODEX_CHATGPT_WEB_STRUCTURED_ERRORS: "2",
           ...(this.logger.environment?.() || {}),
           CODEX_CHATGPT_WEB_BROWSER_HOST_DESCRIPTOR: this.browserDescriptorPath,
           ...(options.env || {}),
-          ...(this.coreHome ? { CODEX_CHATGPT_WEB_HOME: this.coreHome } : {}),
+          ...(this.coreHome && this.launcherProfile !== "development"
+            ? { CODEX_CHATGPT_WEB_HOME: this.coreHome } : {}),
           CODEX_HOME: this.codexHome,
         });
         const child = spawn(invocation.executable, invocation.args, {
@@ -1315,17 +1317,18 @@ class RuntimeHost {
     }).finally(() => fs.rmSync(keyPath, { force: true }));
   }
 
-  setupDevMcp({ tunnelId = "", runtimeKey = "", replace = false, interactionMode } = {}, afterRuntimeReady) {
+  setupDevMcp({ tunnelId = "", runtimeKey = "", replace = false, reuseSavedKey = false, interactionMode } = {}, afterRuntimeReady) {
     if (this.launcherProfile !== "development") {
       throw new Error("DEV MCP setup requires the isolated DEV launcher");
     }
     if (this.currentOperation()) throw new Error(`Another launcher operation is active: ${this.currentOperation()}`);
     const targetMode = interactionMode ?? this.browserInteractionMode();
     const reuseSavedCredentials = replace !== true && this.mcpCredentialsConfigured(targetMode);
+    const changeTunnelWithSavedKey = replace === true && reuseSavedKey === true && this.mcpCredentialsConfigured(targetMode);
     if (!reuseSavedCredentials && !/^tunnel_[a-f0-9]{32}$/.test(tunnelId)) {
       throw new Error("Tunnel ID must be tunnel_ followed by 32 lowercase hexadecimal characters");
     }
-    if (!reuseSavedCredentials && (typeof runtimeKey !== "string" || runtimeKey.trim().length < 20)) {
+    if (!reuseSavedCredentials && !changeTunnelWithSavedKey && (typeof runtimeKey !== "string" || runtimeKey.trim().length < 20)) {
       throw new Error("A Tunnels Read + Use runtime key is required");
     }
     const args = [
@@ -1342,6 +1345,15 @@ class RuntimeHost {
     if (reuseSavedCredentials) {
       return this.runDevSetup("dev-mcp-setup", args, {
         message: "Validating saved DEV tunnel credentials",
+        successMessage: "DEV Full harness is configured",
+        timeoutMs: MCP_SETUP_TIMEOUT_MS,
+        afterRuntimeReady,
+      });
+    }
+    if (changeTunnelWithSavedKey) {
+      args.push("--tunnel-id", tunnelId);
+      return this.runDevSetup("dev-mcp-setup", args, {
+        message: "Connecting the new DEV tunnel with the saved DEV runtime key",
         successMessage: "DEV Full harness is configured",
         timeoutMs: MCP_SETUP_TIMEOUT_MS,
         afterRuntimeReady,

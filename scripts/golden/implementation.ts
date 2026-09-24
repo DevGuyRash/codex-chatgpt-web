@@ -23,7 +23,7 @@ export function verifyGoldenBrowserHelper(repository: string, helperPath: string
 export function goldenImplementationIdentity(repository: string, runtimeArtifacts: readonly string[] = []) {
   const listed = spawnSync("git", ["-C", repository, "ls-files", "-z", "--cached", "--others", "--exclude-standard"], { encoding: "utf8", timeout: 15000, maxBuffer: 16 * 1024 * 1024 });
   if (listed.status !== 0) throw new Error("Golden implementation identity requires its source checkout");
-  const paths = [...new Set(listed.stdout.split("\0").filter(path => /^(?:src|scripts|launcher\/(?:electron|diagnostics|src))\/.+\.(?:ts|tsx|js|cjs|json)$/.test(path) || /^(?:launcher\/)?(?:package\.json|bun\.lock|tsconfig\.json)$/.test(path)))].sort();
+  const paths = [...new Set(listed.stdout.split("\0").filter(path => /^(?:src|scripts|launcher\/(?:electron|diagnostics|src|scripts))\/.+\.(?:ts|tsx|js|cjs|json)$/.test(path) || /^native\/electron\/.+\.(?:patch|json|h)$/.test(path) || /^(?:launcher\/)?(?:package\.json|bun\.lock|tsconfig\.json)$/.test(path)))].sort();
   if (!paths.some(path => path.startsWith("src/")) || !paths.some(path => path.startsWith("scripts/golden/"))) throw new Error("The source checkout lacks golden implementation inputs");
   const records = [...paths.map(path => ({ name: path, path: resolve(repository, path), mayBeDeleted: true })), ...runtimeArtifacts.map(path => ({ name: `runtime:${resolve(path)}`, path: resolve(path), mayBeDeleted: false }))].map(input => {
     let stat;

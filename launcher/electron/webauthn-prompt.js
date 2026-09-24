@@ -145,3 +145,7 @@ element("pin-methods").addEventListener("click", () => { void reply("choose-meth
 element("verification-phone").addEventListener("click", () => { void reply("use-phone"); });
 element("security-key-action").addEventListener("click", () => { void reply("use-security-key"); });
 element("qr-methods").addEventListener("click", () => { void reply("choose-method"); });
+element("cancel").addEventListener("click", () => {
+  if (!bridge || !current) { window.close(); return; }
+  void reply("cancel");
+});

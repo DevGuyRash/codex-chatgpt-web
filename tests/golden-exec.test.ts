@@ -44,6 +44,34 @@ process.stdin.on("end",()=>{
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
+test("buffered exec events share receipt time despite slow capture callbacks", async () => {
+  const root = mkdtempSync(join(tmpdir(), "golden-exec-receipt-")), executable = join(root, "peer");
+  writeFileSync(executable, `#!${process.execPath}
+process.stdin.on("end", () => process.stdout.write([
+  {type:"thread.started",thread_id:"11111111-1111-7111-8111-111111111111"},
+  {type:"turn.started"},
+  {type:"item.completed",item:{type:"command_execution",id:"one"}},
+  {type:"item.completed",item:{type:"command_execution",id:"two"}},
+  {type:"turn.completed"},
+].map(value => JSON.stringify(value)).join("\\n") + "\\n"));
+process.stdin.resume();
+`, { mode: 0o700 });
+  const times: number[] = [];
+  try {
+    const result = await runNativeExec({ executable, cwd: root, env: {}, route: CHATGPT_WEB_MODEL_ROUTES[0]!, prompt: "Inspect", timeoutMs: 2000,
+      onInput: () => {}, onLaunch: () => {}, onStderr: () => {},
+      onEvent: async (event, receivedAtMs) => {
+        if (event.type !== "item.completed") return;
+        times.push(receivedAtMs);
+        await Bun.sleep(30);
+      },
+    });
+    expect(result.status).toBe("completed");
+    expect(times).toHaveLength(2);
+    expect(times[1]).toBe(times[0]);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
 test("exec resume pins its captured thread, effort and sandbox without shell interpolation", () => {
   const route = CHATGPT_WEB_MODEL_ROUTES[0]!;
   const args = nativeExecArgs({ route, resumeId: "11111111-1111-7111-8111-111111111111", images: ["/scratch/image with space.png"] });

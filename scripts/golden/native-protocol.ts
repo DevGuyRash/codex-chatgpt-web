@@ -1,12 +1,14 @@
 import type { Readable } from "node:stream";
 import { StringDecoder } from "node:string_decoder";
+import { performance } from "node:perf_hooks";
 import { OwnedNativeProcess, NativeRpcError } from "./native-process";
 import { OwnedNativeSocket, type OwnedNativeSocketIdentity } from "./native-socket";
 export { NativeRpcError } from "./native-process";
 
 type ObjectValue = Record<string, unknown>;
 const object = (value: unknown): value is ObjectValue => value !== null && typeof value === "object" && !Array.isArray(value);
-type Frame = { direction: "sent" | "received"; message: ObjectValue };
+type Frame = { direction: "sent" | "received"; message: ObjectValue; receivedAtMs?: number };
+const receiptTimeMs = () => performance.timeOrigin + performance.now();
 interface Pending { resolve(value: unknown): void; reject(error: Error): void }
 interface Observer extends Pending { method: string; predicate(params: ObjectValue): boolean }
 
@@ -28,7 +30,7 @@ export class NativeRpc {
     maxFrameBytes?: number;
   } & ({ executable: string; args: string[]; cwd: string; env: NodeJS.ProcessEnv } | { socket: OwnedNativeSocketIdentity })) {
     if ("socket" in options) {
-      this.socket = new OwnedNativeSocket({ identity: options.socket, maxFrameBytes: options.maxFrameBytes, onMessage: text => this.receive(text), onFailure: error => this.fail(error) });
+      this.socket = new OwnedNativeSocket({ identity: options.socket, maxFrameBytes: options.maxFrameBytes, onMessage: text => this.receive(text, receiptTimeMs()), onFailure: error => this.fail(error) });
     } else {
       this.process = new OwnedNativeProcess({ ...options, stdout: stream => this.readStdout(stream), stderr: stream => this.readStderr(stream), onFailure: error => this.fail(error) });
       void this.process.result.then(exit => this.fail(new NativeRpcError("Native process exited before further protocol work could settle", "native_process_exited", this.pending.size > 0, undefined, exit)), error => this.fail(error));
@@ -59,24 +61,29 @@ export class NativeRpc {
     let text = "", bytes = 0;
     const max = this.options.maxFrameBytes ?? 16 * 1024 * 1024;
     for await (const chunk of stream) {
+      const receivedAtMs = receiptTimeMs();
       bytes += chunk.byteLength; text += decoder.write(Buffer.from(chunk));
+      const complete: string[] = [];
       let newline: number;
       while ((newline = text.indexOf("\n")) >= 0) {
         const line = text.slice(0, newline); text = text.slice(newline + 1);
         const size = Buffer.byteLength(line) + 1; bytes -= size;
         if (size > max) throw new NativeRpcError("Native protocol frame exceeded its declared limit", "native_protocol_too_large", true);
-        if (line.trim()) await this.receive(line);
+        if (line.trim()) complete.push(line);
       }
       if (bytes > max) throw new NativeRpcError("Native protocol frame exceeded its declared limit", "native_protocol_too_large", true);
+      // Capture a chunk's receipt before any asynchronous evidence write can delay later frames
+      // from that same chunk. Buffered frames share one time and cannot manufacture progress.
+      for (const line of complete) await this.receive(line, receivedAtMs);
     }
     text += decoder.end();
-    if (text.trim()) await this.receive(text);
+    if (text.trim()) await this.receive(text, receiptTimeMs());
   }
-  private async receive(line: string): Promise<void> {
+  private async receive(line: string, receivedAtMs: number): Promise<void> {
     let message: unknown;
     try { message = JSON.parse(line); } catch { throw new NativeRpcError("Native process emitted malformed JSON", "native_protocol_invalid", true); }
     if (!object(message)) throw new NativeRpcError("Native process emitted a non-object frame", "native_protocol_invalid", true);
-    await this.options.onFrame({ direction: "received", message });
+    await this.options.onFrame({ direction: "received", message, receivedAtMs });
     if (typeof message.method === "string") {
       const params = object(message.params) ? message.params : {};
       if (message.id !== undefined) {

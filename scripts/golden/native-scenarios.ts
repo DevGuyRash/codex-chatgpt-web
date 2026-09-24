@@ -22,7 +22,7 @@ export async function runNativeScenario(options: {
   executable: string; cwd: string; env: NodeJS.ProcessEnv; route: ChatGptWebModelRoute; workload: GoldenWorkload;
   variant: string; signal: AbortSignal; timeoutMs: number; modelProvider?: string; resumeId?: string; imagePath?: string;
   modelSwitch?: { from: ChatGptWebModelRoute; to: ChatGptWebModelRoute };
-  onRecord(category: "prompt" | "transport", text: string, progress?: ProgressPhase): Promise<unknown>;
+  onRecord(category: "prompt" | "transport", text: string, progress?: ProgressPhase, receivedAtMs?: number): Promise<unknown>;
   checkpoint(input: NativeScenarioCheckpoint): void | Promise<void>;
   observeQueue?: Parameters<typeof runStructuredScenario>[0]["observeQueue"];
 }) {
@@ -42,11 +42,11 @@ export async function runNativeScenario(options: {
       const outcome = await runNativeExec({ ...options, resumeId, artifactRepository: options.cwd, prompt,
       onInput: text => options.onRecord("prompt", text).then(() => {}),
       onLaunch: async identity => { native = identity; await checkpoint(); },
-      onEvent: async event => {
+      onEvent: async (event, receivedAtMs) => {
         const item = object(event.item) ? event.item : undefined;
         const tool = event.type === "item.completed" && item && ["command_execution", "file_change", "mcp_tool_call"].includes(String(item.type));
         if (tool) toolItems++;
-        await options.onRecord("transport", JSON.stringify(event), tool ? "tools" : undefined);
+        await options.onRecord("transport", JSON.stringify(event), tool ? "tools" : undefined, receivedAtMs);
         if (event.type === "thread.started" && typeof event.thread_id === "string") await checkpoint({ threadId: event.thread_id });
       },
       onStderr: text => options.onRecord("transport", text).then(() => {}),
@@ -103,7 +103,7 @@ export async function runNativeScenario(options: {
     const phase: ProgressPhase | undefined = tool || method === "item/commandExecution/outputDelta" && typeof params?.delta === "string" && params.delta.length > 0 ? "tools"
       : method === "item/reasoning/summaryTextDelta" && typeof params?.delta === "string" && params.delta.length > 0 ? "reasoning"
       : ["item/agentMessage/delta", "item/plan/delta"].includes(String(method)) && typeof params?.delta === "string" && params.delta.length > 0 ? "generation" : undefined;
-    await options.onRecord("transport", JSON.stringify(frame), phase);
+    await options.onRecord("transport", JSON.stringify(frame), phase, frame.receivedAtMs);
   }, onStderr: text => options.onRecord("transport", text).then(() => {}) });
   let failure: unknown;
   try {

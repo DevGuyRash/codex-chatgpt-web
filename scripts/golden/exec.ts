@@ -1,4 +1,5 @@
 import { StringDecoder } from "node:string_decoder";
+import { performance } from "node:perf_hooks";
 import { isProGeneration } from "../../src/campaign-policy";
 import type { ChatGptWebModelRoute } from "../../src/chatgpt-web-models";
 import { OwnedNativeProcess, NativeRpcError, findNativeFailure, type NativeExit } from "./native-process";
@@ -46,7 +47,7 @@ export async function runNativeExec(options: {
   timeoutMs: number; signal?: AbortSignal; maxFrameBytes?: number;
   onInput(prompt: string): void | Promise<void>;
   onLaunch(identity: OwnedProcess): void | Promise<void>;
-  onEvent(event: NativeExecEvent): void | Promise<void>;
+  onEvent(event: NativeExecEvent, receivedAtMs: number): void | Promise<void>;
   onStderr(text: string): void | Promise<void>;
 }): Promise<NativeExecOutcome> {
   options.signal?.throwIfAborted();
@@ -54,13 +55,13 @@ export async function runNativeExec(options: {
   const args = nativeExecArgs(options), max = options.maxFrameBytes ?? 16 * 1024 * 1024;
   await options.onInput(options.prompt); options.signal?.throwIfAborted();
   let threadId: string | undefined, started = false, terminal: NativeExecEvent | undefined, observedItems = 0;
-  const receive = async (line: string) => {
+  const receive = async (line: string, receivedAtMs: number) => {
     if (!line.trim()) return;
     if (Buffer.byteLength(line) > max) throw new NativeRpcError("Native exec frame exceeded its declared limit", "native_protocol_too_large", true);
     let event: NativeExecEvent;
     try { event = JSON.parse(line); } catch { throw new NativeRpcError("Native exec emitted malformed JSON", "native_protocol_invalid", true); }
     if (!event || typeof event !== "object" || Array.isArray(event) || typeof event.type !== "string") throw new NativeRpcError("Native exec emitted an untyped event", "native_protocol_invalid", true);
-    await options.onEvent(event);
+    await options.onEvent(event, receivedAtMs);
     if (event.type === "thread.started") {
       if (threadId || typeof event.thread_id !== "string" || !event.thread_id || (options.resumeId && options.resumeId !== event.thread_id)) throw new NativeRpcError("Native exec thread identity changed", "native_protocol_invalid", true);
       threadId = event.thread_id;
@@ -76,12 +77,15 @@ export async function runNativeExec(options: {
     stdout: async stream => {
       const decoder = new StringDecoder("utf8"); let text = "";
       for await (const chunk of stream) {
+        const receivedAtMs = performance.timeOrigin + performance.now();
         text += decoder.write(Buffer.from(chunk));
+        const complete: string[] = [];
         let newline: number;
-        while ((newline = text.indexOf("\n")) >= 0) { const line = text.slice(0, newline); text = text.slice(newline + 1); await receive(line); }
+        while ((newline = text.indexOf("\n")) >= 0) { const line = text.slice(0, newline); text = text.slice(newline + 1); complete.push(line); }
         if (Buffer.byteLength(text) > max) throw new NativeRpcError("Native exec frame exceeded its declared limit", "native_protocol_too_large", true);
+        for (const line of complete) await receive(line, receivedAtMs);
       }
-      text += decoder.end(); if (text.trim()) await receive(text);
+      text += decoder.end(); if (text.trim()) await receive(text, performance.timeOrigin + performance.now());
     },
     stderr: async stream => {
       const decoder = new StringDecoder("utf8");

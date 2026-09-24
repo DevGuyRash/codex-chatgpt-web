@@ -3,6 +3,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { NativeRpc, NativeRpcError } from "../scripts/golden/native-protocol";
+import { ActiveProgress } from "../scripts/golden/progress";
 import { problemFor } from "../src/diagnostics/problems";
 
 for (const termination of ["exit", "signal"] as const) test(`native protocol failure preserves observed ${termination} without copying stderr into its problem`, async () => {
@@ -51,6 +52,32 @@ process.stdin.on("data", chunk => { text += chunk.toString(); for (;;) { const i
     await expect(client.request("never-acknowledged", {}, { timeoutMs: 25 })).rejects.toMatchObject({ code: "native_acknowledgement_timeout", uncertain: true });
     expect(frames.length).toBeGreaterThan(4);
   } finally { await client.close(); rmSync(root, { recursive: true, force: true }); }
+});
+
+test("buffered native frames share receipt time despite slow evidence capture", async () => {
+  const script = `process.stdin.once('data', bytes => { const request = JSON.parse(bytes.toString()); process.stdout.write(
+    JSON.stringify({method:'item/agentMessage/delta',params:{delta:'one'}})+'\\n'+
+    JSON.stringify({method:'item/agentMessage/delta',params:{delta:'two'}})+'\\n'+
+    JSON.stringify({id:request.id,result:{ok:true}})+'\\n'); });`;
+  const clock = new ActiveProgress();
+  const times: number[] = [];
+  const client = new NativeRpc({ executable: process.execPath, args: ["-e", script], cwd: tmpdir(), env: {},
+    onFrame: async frame => {
+      if (frame.direction !== "received" || frame.message.method !== "item/agentMessage/delta") return;
+      times.push(frame.receivedAtMs!);
+      await Bun.sleep(30);
+      clock.observe(frame.receivedAtMs!, "generation", {
+        traceId: "a".repeat(32), kind: "attachment", id: `00000000-0000-4000-8000-${String(times.length).padStart(12, "0")}`,
+        sha256: "b".repeat(64),
+      });
+    },
+  });
+  try {
+    expect(await client.request("start")).toEqual({ ok: true });
+    expect(times).toHaveLength(2);
+    expect(times[1]).toBe(times[0]);
+    expect(clock.finishBatch(times[1]! + 100, true).creditedMs).toBe(0);
+  } finally { await client.close(100); }
 });
 
 test("a broken native transport settles waiters and cannot accept more commands", async () => {

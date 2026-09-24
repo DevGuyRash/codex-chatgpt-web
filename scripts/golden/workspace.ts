@@ -11,6 +11,9 @@ import { readLauncherBrowserHostDescriptor, readLauncherBrowserHostDescriptorFil
 
 const require = createRequire(import.meta.url);
 const repository = resolve(import.meta.dir, "../..");
+const { reviewedElectronBinary } = require(resolve(repository, "launcher/scripts/native-electron.cjs")) as {
+  reviewedElectronBinary(): { executable: string; recordPath: string };
+};
 export interface OwnedProcess { pid: number; start: string; group: number; executable: string }
 export interface GoldenWorkspace {
   version: 1; root: string; campaignId: string; display: string; viewerUrl: string;
@@ -65,6 +68,7 @@ function binary(name: string, explicit?: string): string {
 /** No host display, browser profile, configuration, or OS login item is used. */
 export async function startGoldenWorkspace(rootInput: string, toolsInput = join(repository, "context/tools")): Promise<GoldenWorkspace> {
   if (process.platform !== "linux") throw new Error("Hidden headed workspace is supported only on Linux; native platform acceptance remains separate");
+  const reviewedElectron = reviewedElectronBinary();
   const root = resolve(rootInput), tools = resolve(toolsInput), statePath = join(root, "workspace.json");
   mkdirSync(root, { recursive: true, mode: 0o700 });
   if (existsSync(statePath)) {
@@ -82,7 +86,6 @@ export async function startGoldenWorkspace(rootInput: string, toolsInput = join(
   if (!existsSync(join(novnc, "vnc.html"))) throw new Error("The isolated viewer requires a noVNC installation");
   const viewerWeb = join(root, "viewer-web");
   cpSync(novnc, viewerWeb, { recursive: true, force: false, errorOnExist: true });
-  const electron = require(resolve(repository, "launcher/node_modules/electron")) as string;
   const processes: Record<string, OwnedProcess> = {};
   const children: ChildProcess[] = [];
   const codexHome = join(root, "codex"), runtimeHome = join(root, "runtime"), launcherData = join(root, "launcher");
@@ -129,7 +132,7 @@ export async function startGoldenWorkspace(rootInput: string, toolsInput = join(
     finally { diagnostics.close(); }
     if (!existsSync(join(launcherData, "launcher-state.json"))) writeFileSync(join(launcherData, "launcher-state.json"), JSON.stringify({ version: 1, language: "en", onboardingComplete: true, autoStart: false, keepRunningOnClose: true, showBrowserDuringTurns: false }), { mode: 0o600 });
     const bun = process.execPath;
-    const launcher = await start("launcher", electron, [join(repository, "launcher"), "--codex-home", codexHome, "--ozone-platform=x11"], { ...env, CODEX_WEB_GPT_CAPTURE_CAMPAIGN_ID: campaignId, CODEX_CHATGPT_WEB_HOME: runtimeHome, CODEX_WEB_GPT_LAUNCHER_DATA_DIR: launcherData, CODEX_WEB_GPT_BUN: bun, CODEX_CHATGPT_WEB_BUN: bun });
+    const launcher = await start("launcher", reviewedElectron.executable, [join(repository, "launcher"), "--codex-home", codexHome, "--ozone-platform=x11"], { ...env, CODEX_WEB_GPT_CAPTURE_CAMPAIGN_ID: campaignId, CODEX_CHATGPT_WEB_HOME: runtimeHome, CODEX_WEB_GPT_LAUNCHER_DATA_DIR: launcherData, CODEX_WEB_GPT_ELECTRON_BUILD_RECORD: reviewedElectron.recordPath, CODEX_WEB_GPT_BUN: bun, CODEX_CHATGPT_WEB_BUN: bun });
     const descriptorPath = join(runtimeHome, "runtime/launcher-browser.json");
     await until(() => existsSync(descriptorPath), launcher);
     const state: GoldenWorkspace = { version: 1, root, campaignId, display, viewerUrl, signInUrl, codexHome, runtimeHome, launcherData, descriptorPath, processes };

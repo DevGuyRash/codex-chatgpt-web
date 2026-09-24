@@ -1,7 +1,25 @@
 import { expect, test } from "bun:test";
 import { spawn } from "node:child_process";
 import { once } from "node:events";
-import { ownedProcessIdentity, verifyStoppedGoldenLauncher } from "../scripts/golden/workspace";
+import { existsSync, mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { ownedProcessIdentity, startGoldenWorkspace, verifyStoppedGoldenLauncher } from "../scripts/golden/workspace";
+
+test.skipIf(process.platform !== "linux")("golden workspace rejects stock Electron before creating a hidden display", async () => {
+  const parent = mkdtempSync(join(tmpdir(), "codex-golden-reviewed-electron-"));
+  const root = join(parent, "workspace");
+  const previous = process.env.CODEX_WEB_GPT_ELECTRON_EXECUTABLE;
+  try {
+    delete process.env.CODEX_WEB_GPT_ELECTRON_EXECUTABLE;
+    await expect(startGoldenWorkspace(root)).rejects.toThrow("Set CODEX_WEB_GPT_ELECTRON_EXECUTABLE");
+    expect(existsSync(root)).toBe(false);
+  } finally {
+    if (previous === undefined) delete process.env.CODEX_WEB_GPT_ELECTRON_EXECUTABLE;
+    else process.env.CODEX_WEB_GPT_ELECTRON_EXECUTABLE = previous;
+    rmSync(parent, { recursive: true, force: true });
+  }
+});
 
 test.skipIf(process.platform !== "linux")("launcher recovery requires the recorded process and its whole group to have stopped", async () => {
   const child = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { detached: true, stdio: "ignore" });

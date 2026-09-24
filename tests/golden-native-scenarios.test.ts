@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { randomUUID } from "node:crypto";
 import { ownedNativeActivity, runNativeScenario } from "../scripts/golden/native-scenarios";
-import { GOLDEN_UNICODE_WITNESS, createWorkload } from "../scripts/golden/workloads";
+import { GOLDEN_UNICODE_WITNESS, createWorkload, largeHistoryWitness } from "../scripts/golden/workloads";
 import { CHATGPT_WEB_MODEL_ROUTES } from "../src/chatgpt-web-models";
 import { GoldenAppServer, initializeGoldenNativeHome } from "../scripts/golden/app-server";
 import { findNativeExecFailure, runNativeExec } from "../scripts/golden/exec";
@@ -37,6 +37,38 @@ console.log(JSON.stringify({type:"turn.completed"}));
     const prompt = readFileSync(promptPath, "utf8");
     expect(prompt).toContain("output/unicode.txt");
     expect(prompt).toContain(GOLDEN_UNICODE_WITNESS);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("large-history continuation retains an early fact without repeating it in the second prompt", async () => {
+  const root = mkdtempSync(join(tmpdir(), "golden-large-history-")), peer = join(root, "peer"), log = join(root, "prompts.jsonl");
+  mkdirSync(join(root, ".git"));
+  writeFileSync(peer, `#!${process.execPath}
+import {appendFileSync,mkdirSync,writeFileSync} from "node:fs";
+let prompt="";process.stdin.on("data",chunk=>prompt+=chunk);process.stdin.on("end",()=>{
+appendFileSync(${JSON.stringify(log)},JSON.stringify({resumed:process.argv.includes("resume"),prompt})+"\\n");
+if(process.env.EARLY_WRITE==="1"&&!process.argv.includes("resume")){mkdirSync(${JSON.stringify(join(root,"output"))},{recursive:true});writeFileSync(${JSON.stringify(join(root,"output/history-witness.txt"))},"premature\\n");}
+console.log(JSON.stringify({type:"thread.started",thread_id:"11111111-1111-7111-8111-111111111111"}));
+console.log(JSON.stringify({type:"turn.started"}));
+console.log(JSON.stringify({type:"turn.completed"}));
+});
+`, { mode: 0o700 });
+  const workload = createWorkload({ level: 1, seed: "large-history-lifecycle", batch: 0 });
+  try {
+    const result = await runNativeScenario({ executable: peer, cwd: root, env: {}, route: CHATGPT_WEB_MODEL_ROUTES[0]!, workload, variant: "large-history", signal: new AbortController().signal, timeoutMs: 2000,
+      onRecord: async () => {}, checkpoint: () => {} });
+    expect(result).toMatchObject({ status: "completed", variant: "large-history", threadId: "11111111-1111-7111-8111-111111111111", preparation: { status: "completed" } });
+    const prompts = readFileSync(log, "utf8").trim().split("\n").map(line => JSON.parse(line) as { resumed: boolean; prompt: string });
+    expect(prompts).toHaveLength(2);
+    expect(prompts[0]!.resumed).toBe(false);
+    expect(prompts[0]!.prompt.length).toBeGreaterThan(20_000);
+    expect(prompts[0]!.prompt).toContain(largeHistoryWitness(workload));
+    expect(prompts[1]!.resumed).toBe(true);
+    expect(prompts[1]!.prompt).toContain("output/history-witness.txt");
+    expect(prompts[1]!.prompt).not.toContain(largeHistoryWitness(workload));
+    await expect(runNativeScenario({ executable: peer, cwd: root, env: { EARLY_WRITE: "1" }, route: CHATGPT_WEB_MODEL_ROUTES[0]!, workload, variant: "large-history", signal: new AbortController().signal, timeoutMs: 2000,
+      onRecord: async () => {}, checkpoint: () => {} })).rejects.toThrow("Large-history preparation wrote its witness before the retained continuation");
+    expect(readFileSync(log, "utf8").trim().split("\n")).toHaveLength(3);
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 

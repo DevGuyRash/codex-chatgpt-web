@@ -8,6 +8,11 @@ import { createFormatFixtures } from "./formats";
 
 const sha256 = (value: string | Uint8Array) => createHash("sha256").update(value).digest("hex");
 export const GOLDEN_UNICODE_WITNESS = "東京 → café → Δοκιμή → مرحبا";
+export function largeHistoryWitness(workload: GoldenWorkload): string {
+  // The generated seed is runner-owned and absent from the disposable repository.
+  // A public dataset ID must not let the continuation recompute its witness.
+  return `history-${sha256(`golden-large-history:${workload.seed}:${workload.batch}`).slice(0, 32)}`;
+}
 const comparable = (value: unknown): unknown => Array.isArray(value) ? value.map(comparable) : value !== null && typeof value === "object" ? Object.fromEntries(Object.entries(value).sort(([a], [b]) => a.localeCompare(b)).map(([key, child]) => [key, comparable(child)])) : value;
 interface Order { id: string; team: string; label: string; units: number; unitPriceCents: number; discountBps: number }
 export interface GoldenWorkload {
@@ -153,6 +158,10 @@ export function evaluateWorkload(rootInput: string, workload: GoldenWorkload, pr
       if (projectExecution.validationWorkload.id === workload.id) failures.push("Project validation reused its original dataset");
       else checkResult(projectExecution.stdout, expectedResult(projectExecution.validationWorkload), "project");
     } else pendingChecks.push("Execute the generated project against an independent dataset in the native sandbox");
+  }
+  if (variant === "large-history") {
+    const witness = read("output/history-witness.txt", 1024);
+    if (witness !== undefined && witness !== `${largeHistoryWitness(workload)}\n`) failures.push("Large-history witness differs from the retained preparation fact");
   }
   if (variant === "unicode") {
     const witness = read("output/unicode.txt", 1024);

@@ -2,7 +2,7 @@ import { expect, test } from "bun:test";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { GOLDEN_UNICODE_WITNESS, createWorkload, evaluateWorkload, materializeWorkload } from "../scripts/golden/workloads";
+import { GOLDEN_UNICODE_WITNESS, createWorkload, evaluateWorkload, largeHistoryWitness, materializeWorkload } from "../scripts/golden/workloads";
 
 test("shared workloads are deterministic, vary across batches, and preserve Unicode input", () => {
   for (const level of [1, 2, 3, 4, 5] as const) {
@@ -56,6 +56,15 @@ test.each([undefined, "all"] as const)("the independent artifact oracle rejects 
     const unicode = evaluateWorkload(root, workload, undefined, "unicode");
     expect(unicode.passed).toBe(true);
     expect(unicode.artifacts.map(artifact => artifact.path)).toContain("output/unicode.txt");
+    expect(evaluateWorkload(root, workload, undefined, "large-history").passed).toBe(false);
+    expect(Object.values(workload.files).every(text => !text.includes(largeHistoryWitness(workload)))).toBe(true);
+    expect(workload.prompt).not.toContain(largeHistoryWitness(workload));
+    writeFileSync(join(root, "output/history-witness.txt"), "guessed-history\n");
+    expect(evaluateWorkload(root, workload, undefined, "large-history").failures).toContain("Large-history witness differs from the retained preparation fact");
+    writeFileSync(join(root, "output/history-witness.txt"), `${largeHistoryWitness(workload)}\n`);
+    const history = evaluateWorkload(root, workload, undefined, "large-history");
+    expect(history.passed).toBe(true);
+    expect(history.artifacts.map(artifact => artifact.path)).toContain("output/history-witness.txt");
     expect(evaluateWorkload(root, workload, undefined, "steer-generation").passed).toBe(false);
     writeFileSync(join(root, "output/steering.txt"), "Acknowledged the correction.\n");
     expect(evaluateWorkload(root, workload, undefined, "steer-generation").passed).toBe(false);

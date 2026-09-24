@@ -1,8 +1,11 @@
 import type { ChatGptWebModelRoute } from "../../src/chatgpt-web-models";
+import { existsSync } from "node:fs";
+import { join } from "node:path";
+import { createHash } from "node:crypto";
 import { GoldenAppServer } from "./app-server";
 import { NativeExecFailure, runNativeExec } from "./exec";
 import { runStructuredScenario } from "./structured-scenarios";
-import { GOLDEN_UNICODE_WITNESS, structuredScenarioPrompts, type GoldenWorkload } from "./workloads";
+import { GOLDEN_UNICODE_WITNESS, largeHistoryWitness, structuredScenarioPrompts, type GoldenWorkload } from "./workloads";
 import { ownedProcessIdentity, type OwnedProcess } from "./workspace";
 import type { ProgressPhase } from "./progress";
 import { runTuiScenario } from "./tui-scenarios";
@@ -25,7 +28,7 @@ export function ownedNativeActivity(frame: { direction: string; message: ObjectV
   return { tool, phase };
 }
 export const finiteNativeScenarios = {
-  fresh: 1, formats: 1, unicode: 1, continued: 2, resumed: 2, "archived-history": 2, "model-switch": 2, "plan-revise-execute": 3, "plan-stream-interrupt": 2, "plan-tui-execute": 2,
+  fresh: 1, formats: 1, unicode: 1, "large-history": 2, continued: 2, resumed: 2, "archived-history": 2, "model-switch": 2, "plan-revise-execute": 3, "plan-stream-interrupt": 2, "plan-tui-execute": 2,
   "steer-reasoning": 2, "steer-generation": 2, "steer-tools": 2,
   "stop-reasoning-continue": 2, "stop-generation-continue": 2, "stop-tools-continue": 2,
 } as const;
@@ -41,7 +44,7 @@ export async function runNativeScenario(options: {
   observeQueue?: Parameters<typeof runStructuredScenario>[0]["observeQueue"];
 }) {
   options.signal.throwIfAborted();
-  if (!["fresh", "formats", "unicode", "continued", "resumed", "archived-history", "model-switch", "plan-revise-execute", "plan-stream-interrupt", "plan-tui-execute"].includes(options.variant) && !/^(?:steer|stop)-(?:reasoning|generation|tools|queue)(?:-image|-continue)?$/.test(options.variant)) throw new Error(`No native scenario implementation for ${options.variant}`);
+  if (!["fresh", "formats", "unicode", "large-history", "continued", "resumed", "archived-history", "model-switch", "plan-revise-execute", "plan-stream-interrupt", "plan-tui-execute"].includes(options.variant) && !/^(?:steer|stop)-(?:reasoning|generation|tools|queue)(?:-image|-continue)?$/.test(options.variant)) throw new Error(`No native scenario implementation for ${options.variant}`);
   if (options.variant === "formats" && options.workload.formatCoverage !== "all") throw new Error("Format coverage requires the full shared fixture set at every workload level");
   if (options.resumeId && options.variant !== "resumed") throw new Error("Resume requires the exact prior native task and its declared scenario");
   if (options.variant === "model-switch" && (!options.modelSwitch || options.modelSwitch.to.slug !== options.route.slug)) throw new Error("Model-switch continuation must target the cell's requested route");
@@ -51,7 +54,7 @@ export async function runNativeScenario(options: {
     if (!native) throw new Error("Native scenario process ownership is unavailable");
     await options.checkpoint({ native, ...turn });
   };
-  if (options.variant === "fresh" || options.variant === "formats" || options.variant === "unicode" || options.variant === "resumed" || options.variant === "archived-history") {
+  if (options.variant === "fresh" || options.variant === "formats" || options.variant === "unicode" || options.variant === "large-history" || options.variant === "resumed" || options.variant === "archived-history") {
     const execute = async (prompt: string, resumeId?: string, phase: "preparation" | "execution" = "execution") => {
       const outcome = await runNativeExec({ ...options, resumeId, artifactRepository: options.cwd, prompt,
       onInput: text => options.onRecord("prompt", text).then(() => {}),
@@ -71,10 +74,19 @@ export async function runNativeScenario(options: {
     let preparation: Awaited<ReturnType<typeof execute>> | undefined;
     let resumeId = options.resumeId;
     const prompts = structuredScenarioPrompts(options.workload);
-    if (["resumed", "archived-history"].includes(options.variant) && !resumeId) {
-      preparation = await execute(prompts.prepare, undefined, "preparation");
+    if (["resumed", "archived-history", "large-history"].includes(options.variant) && !resumeId) {
+      const historyWitness = largeHistoryWitness(options.workload);
+      const historyNotes = Array.from({ length: 160 }, (_, index) =>
+        `Context note ${index + 1}: ${createHash("sha256").update(`${options.workload.id}:${index}`).digest("hex")} is background material for this same task; preserve the earlier witness without copying these notes into an artifact.`).join("\n");
+      const preparationPrompt = options.variant === "large-history"
+        ? `${prompts.prepare}\n\nRetain this exact private-to-the-turn fact for the continuation: ${historyWitness}. Do not write files or commit during preparation.\n${historyNotes}`
+        : prompts.prepare;
+      preparation = await execute(preparationPrompt, undefined, "preparation");
       resumeId = preparation.threadId;
       options.signal.throwIfAborted();
+      if (options.variant === "large-history" && existsSync(join(options.cwd, "output/history-witness.txt"))) {
+        throw new Error("Large-history preparation wrote its witness before the retained continuation");
+      }
     }
     let archive: { threadId: string; archived: true; restored: true } | undefined;
     if (options.variant === "archived-history") {
@@ -106,8 +118,14 @@ export async function runNativeScenario(options: {
       }
     }
     const unicodePrompt = `${options.workload.prompt}\nAlso write output/unicode.txt containing exactly ${GOLDEN_UNICODE_WITNESS} followed by a newline, and include it in the artifact commit.`;
-    const terminal = await execute(preparation ? prompts.continue : options.variant === "unicode" ? unicodePrompt : options.workload.prompt, resumeId);
-    return { ...terminal, variant: options.variant, toolItems, ...(preparation ? { preparation } : {}), ...(archive ? { archive } : {}) };
+    const continuationPrompt = options.variant === "large-history"
+      ? `${prompts.continue} Also write output/history-witness.txt with the exact fact from the preceding turn followed by a newline; do not guess it from repository files.`
+      : prompts.continue;
+    const terminal = await execute(preparation ? continuationPrompt : options.variant === "unicode" ? unicodePrompt : options.workload.prompt, resumeId);
+    const historyWitnessSha256 = options.variant === "large-history"
+      ? createHash("sha256").update(`${largeHistoryWitness(options.workload)}\n`).digest("hex") : undefined;
+    return { ...terminal, variant: options.variant, toolItems, ...(preparation ? { preparation } : {}), ...(archive ? { archive } : {}),
+      ...(historyWitnessSha256 ? { historyWitnessSha256 } : {}) };
   }
   let app!: GoldenAppServer;
   app = new GoldenAppServer({ ...options, artifactRepository: options.cwd, onFrame: async frame => {

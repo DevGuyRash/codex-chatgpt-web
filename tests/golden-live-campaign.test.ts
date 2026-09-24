@@ -139,6 +139,23 @@ test("Unicode campaign coverage requires the exact committed UTF-8 witness", () 
   expect(liveBatchOutcomes([cell], batch).get(cell.id)?.status).toBe("passed");
 });
 
+test("large-history campaign coverage requires preparation and its retained-context artifact", () => {
+  const cell = { ...cells[0]!, variant: { id: "large-history", driver: "exec" as const } };
+  expect(canExecuteLiveCell(cell)).toBe(true);
+  const batch = completedBatch();
+  batch.cells = [batch.cells[0]!];
+  const item = batch.cells[0]!;
+  item.variant = "large-history";
+  item.result!.terminal.variant = "large-history";
+  item.selections!.turns = 2;
+  expect(() => liveBatchOutcomes([cell], batch)).toThrow("Large-history coverage lacks its retained-context artifact");
+  Object.assign(item.result!.terminal, { historyWitnessSha256: "c".repeat(64) });
+  item.result!.oracle.artifacts.push({ path: "output/history-witness.txt", bytes: 41, sha256: "c".repeat(64) });
+  expect(() => liveBatchOutcomes([cell], batch)).toThrow("Resumed coverage requires completed preparation");
+  Object.assign(item.result!.terminal, { preparation: { status: "completed", threadId: item.result!.terminal.threadId, terminal: { type: "turn.completed" }, observedItems: 1, exit: { code: 0, signal: null } } });
+  expect(liveBatchOutcomes([cell], batch).get(cell.id)?.status).toBe("passed");
+});
+
 test("verified provider admission survives incomplete exec evidence without inferring a limit from native prose", () => {
   const batch = completedBatch(), item = batch.cells[0]!;
   batch.incomplete = true; item.passed = false; delete item.result;

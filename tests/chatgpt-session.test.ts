@@ -192,7 +192,7 @@ test("a transient effort control does not turn a Luna-only account into Sol", as
   expect(visibilityReads).toBe(2);
 });
 
-function reasoningPicker(options: { max?: string; delay?: number; missing?: boolean; visibleSemantic?: boolean; step?: number } = {}) {
+function reasoningPicker(options: { max?: string; delay?: number; missing?: boolean; visibleSemantic?: boolean; step?: number; initiallyOpen?: boolean; unrelatedMenuVisible?: boolean } = {}) {
   let value = 0;
   const keys: string[] = [];
   const hidden = {
@@ -221,18 +221,19 @@ function reasoningPicker(options: { max?: string; delay?: number; missing?: bool
       if (options.delay) await new Promise(resolve => setTimeout(resolve, options.delay));
     },
   };
-  let menuOpen = true;
+  let menuOpen = options.initiallyOpen !== false;
+  let activations = 0;
   const control = {
     last() { return this; }, first() { return this; }, filter() { return this; },
     count: async () => 1, waitFor: async () => {}, isVisible: async () => true,
-    click: async () => { menuOpen = true; },
+    click: async () => { activations++; menuOpen = true; },
     innerText: async () => "Pro",
     getAttribute: async (name: string) => name === "aria-expanded" ? String(menuOpen) : null,
   };
   const composer = { filter() { return this; }, last() { return this; },
     isEditable: async () => true, locator: () => ({ locator: () => control }) };
   const modelRows = { count: async () => 3, first() { return this; }, waitFor: async () => {}, nth: () => { throw new Error("Model rows are not effort choices"); } };
-  const menu = { filter() { return this; }, last() { return this; }, isVisible: async () => menuOpen, locator: () => modelRows };
+  const menu = { filter() { return this; }, last() { return this; }, isVisible: async () => menuOpen || options.unrelatedMenuVisible === true, locator: () => modelRows };
   const page = {
     url: () => "https://chatgpt.com/?temporary-chat=true",
     locator: (selector: string) => {
@@ -243,12 +244,18 @@ function reasoningPicker(options: { max?: string; delay?: number; missing?: bool
     },
     keyboard: { press: async (key: string) => { if (key === "Escape") menuOpen = false; } },
   };
-  return { page, composer, keys, value: () => value };
+  return { page, composer, keys, value: () => value, activations: () => activations };
 }
 
 test.each([0, 50])("capabilities wait for the visible container and read its hidden semantic input (delay=%s)", async delay => {
   const fixture = reasoningPicker({ delay });
   await expect(detectChatGptAccountCapabilities(fixture.page as never)).resolves.toEqual({ solAvailable: true, proAvailable: true });
+});
+
+test("an unrelated visible menu cannot substitute for the closed composer effort control", async () => {
+  const fixture = reasoningPicker({ initiallyOpen: false, unrelatedMenuVisible: true });
+  await expect(detectChatGptAccountCapabilities(fixture.page as never)).resolves.toEqual({ solAvailable: true, proAvailable: true });
+  expect(fixture.activations()).toBe(1);
 });
 
 test("the older visible semantic slider exposes the same authoritative range", async () => {

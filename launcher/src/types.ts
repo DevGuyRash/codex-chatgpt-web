@@ -98,6 +98,7 @@ export type UpdateState =
 
 export interface LauncherSnapshot {
   profile: LauncherProfile;
+  developmentProfile?: { home: string; initialized: boolean };
   integrationTarget?: import("../../src/contracts/codex-integration").IntegrationTarget;
   profilePaths: {
     coreHome: string;
@@ -144,6 +145,7 @@ export interface LauncherApi {
   openSocial(target: "github" | "x"): Promise<LauncherState>;
   completeOnboarding(language: Language, browserInteractionMode: BrowserInteractionMode): Promise<LauncherState>;
   openExternal(url: string): Promise<boolean>;
+  openDevelopmentProfile(chooseHome?: boolean): Promise<{ opened: boolean; home?: string; shortcut?: string }>;
   openGoldenViewer(): Promise<{ opened: boolean; display?: string }>;
   setBrowserBounds(bounds: { x: number; y: number; width: number; height: number }): Promise<boolean>;
   setBrowserSurfaceActive(active: boolean): Promise<BrowserState>;

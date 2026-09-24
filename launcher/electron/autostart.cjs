@@ -100,6 +100,7 @@ module.exports = {
   linuxAutostartMatches,
   linuxDesktopEntry,
   linuxDesktopPath,
+  linuxExecutable,
   requireAutostartState,
   setAutostart,
 };

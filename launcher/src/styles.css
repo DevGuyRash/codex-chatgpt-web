@@ -2209,6 +2209,21 @@ code {
   padding: 12px 0;
 }
 
+.dev-profile-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.dev-profile-actions small { flex-basis: 100%; color: var(--color-text-secondary); text-align: end; }
+
+@media (max-width: 720px) {
+  .setting-row:has(.dev-profile-actions) { grid-template-columns: minmax(0, 1fr); gap: 0; padding-bottom: 12px; }
+  .dev-profile-actions { justify-content: flex-start; }
+  .dev-profile-actions small { text-align: start; }
+}
+
 .extension-description {
   margin: 4px 0 14px;
   color: var(--color-text-secondary);

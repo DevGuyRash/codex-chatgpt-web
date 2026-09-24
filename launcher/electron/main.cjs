@@ -24,7 +24,9 @@ const { BROWSER_EXTENSION_CATALOG } = require("./browser-extension-catalog.cjs")
 const { ElectronChromeExtensions } = require("electron-chrome-extensions");
 const { WebAuthnPrompts } = require("./webauthn-prompts.cjs");
 const { BrowserControlServer } = require("./control-server.cjs");
-const { getAutostart, setAutostart } = require("./autostart.cjs");
+const { getAutostart, linuxExecutable, setAutostart } = require("./autostart.cjs");
+const { defaultDevelopmentHome, validateDevelopmentHome, developmentLaunchEnvironment, installLinuxDevelopmentShortcut } = require("./development-profile.cjs");
+const { writePrivateFileAtomic } = require("./atomic-file.cjs");
 const {
   createLogger,
   registerDiagnosticsIpc,
@@ -69,6 +71,7 @@ const IS_CODEX_PROFILE = LAUNCHER_PROFILE.integrationTarget?.kind === "profile";
 const IS_ISOLATED_CAMPAIGN = LAUNCHER_PROFILE.isolatedCampaign === true;
 const runtimeRegistry = IS_DEV_PROFILE ? null : new RuntimeRegistry({ runtimeRoot: LAUNCHER_PROFILE.runtimeRoot });
 const BROWSER_DESCRIPTOR_PATH = path.join(CORE_HOME, "runtime", "launcher-browser.json");
+const DEVELOPMENT_SELECTION_PATH = path.join(CORE_HOME, "development-profile-selection.json");
 const BROWSER_HELPER_PATH = app.isPackaged
   ? path.join(process.resourcesPath, "runtime", "app", "browser-helper.cjs")
   : path.join(SOURCE_ROOT, ".launcher-runtime", "browser-helper.cjs");
@@ -519,6 +522,14 @@ function smokePassedForCurrentVersion(state) {
   return state.browserSmokePassed === true && state.browserSmokeVersion === app.getVersion();
 }
 
+function protectedDevelopmentHomes() { return [CORE_HOME, LAUNCHER_PROFILE.codexHome, launcherUserData]; }
+function savedDevelopmentHome() {
+  try {
+    const selected = JSON.parse(fs.readFileSync(DEVELOPMENT_SELECTION_PATH, "utf8"));
+    return validateDevelopmentHome(selected.home, protectedDevelopmentHomes());
+  } catch { return validateDevelopmentHome(defaultDevelopmentHome(), protectedDevelopmentHomes()); }
+}
+
 function registerIpc({ logger, stateStore }) {
   const handle = (channel, handler) => registerLoggedIpc(ipcMain, logger, channel, async (...args) => {
     try { return await handler(...args); }
@@ -529,6 +540,10 @@ function registerIpc({ logger, stateStore }) {
   });
   handle("launcher:snapshot", async () => ({
     profile: LAUNCHER_PROFILE.kind,
+    ...(!IS_DEV_PROFILE && !IS_CODEX_PROFILE && !IS_ISOLATED_CAMPAIGN ? { developmentProfile: {
+      home: savedDevelopmentHome(),
+      initialized: fs.existsSync(path.join(savedDevelopmentHome(), "launcher", "launcher-state.json")),
+    } } : {}),
     integrationTarget: LAUNCHER_PROFILE.integrationTarget,
     profilePaths: {
       coreHome: CORE_HOME,
@@ -652,6 +667,50 @@ function registerIpc({ logger, stateStore }) {
     if (!ALLOWED_EXTERNAL_URLS.has(url)) throw new Error("External URL is not allowlisted");
     await openWebUrl(url);
     return true;
+  });
+  handle("launcher:development-profile-open", async (_event, chooseHome) => {
+    if (IS_DEV_PROFILE || IS_CODEX_PROFILE || IS_ISOLATED_CAMPAIGN) throw new Error("Open DEV from the normal launcher");
+    if (nativeRuntimeIdentity?.patched !== true) throw new Error("A reviewed WebAuthn-enabled launcher is required before opening DEV");
+    if (chooseHome !== undefined && typeof chooseHome !== "boolean") throw new Error("DEV folder choice is invalid");
+    let home = savedDevelopmentHome();
+    if (chooseHome === true) {
+      const choice = await dialog.showOpenDialog(mainWindow, { title: "Choose an existing or new DEV profile folder", defaultPath: home, properties: ["openDirectory", "createDirectory"] });
+      if (choice.canceled || choice.filePaths.length !== 1) return { opened: false };
+      home = validateDevelopmentHome(choice.filePaths[0], protectedDevelopmentHomes());
+    }
+    writePrivateFileAtomic(DEVELOPMENT_SELECTION_PATH, `${JSON.stringify({ home })}\n`);
+    let shortcut = "not-applicable";
+    if (app.isPackaged && process.platform === "linux") {
+      try { shortcut = installLinuxDevelopmentShortcut({ home, executable: linuxExecutable(app) }); }
+      catch { shortcut = "failed"; }
+    }
+    const env = developmentLaunchEnvironment(process.env, home);
+    const ozone = process.argv.find(argument => /^--ozone-platform=(?:x11|wayland)$/.test(argument));
+    const child = spawn(process.execPath, [...(app.isPackaged ? [] : [path.join(SOURCE_ROOT, "launcher")]), "--dev-profile", ...(ozone ? [ozone] : [])], { env, cwd: SOURCE_ROOT, detached: true, stdio: "ignore", windowsHide: false });
+    await new Promise((resolve, reject) => {
+      const onSpawn = () => { child.off("error", onError); resolve(); };
+      const onError = error => { child.off("spawn", onSpawn); reject(error); };
+      child.once("spawn", onSpawn);
+      child.once("error", onError);
+    });
+    child.unref();
+    const descriptorPath = path.join(home, "runtime", "launcher-browser.json");
+    const deadline = Date.now() + 45_000;
+    let ready = false;
+    while (Date.now() < deadline) {
+      try {
+        const descriptor = JSON.parse(fs.readFileSync(descriptorPath, "utf8"));
+        if (descriptor.version === 3 && descriptor.kind === "codex-web-gpt-launcher" && descriptor.profile === "development" && descriptor.partition === "persist:codex-web-gpt-dev-chatgpt" && Number.isSafeInteger(descriptor.pid) && descriptor.pid > 1) {
+          process.kill(descriptor.pid, 0);
+          ready = true;
+          break;
+        }
+      } catch { /* The DEV window is still starting. */ }
+      if (child.exitCode !== null && child.exitCode !== 0) break;
+      await new Promise(resolve => setTimeout(resolve, 200));
+    }
+    if (!ready) throw new Error("The DEV launcher did not reach its owned browser-ready state");
+    return { opened: true, home, shortcut };
   });
   handle("launcher:golden-viewer-open", async () => {
     if (!IS_DEV_PROFILE) throw new Error("Hidden test desktops are available only from the DEV launcher");

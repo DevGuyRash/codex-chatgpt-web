@@ -1812,6 +1812,21 @@ function SettingsSurface({
   const [busy, setBusy] = useState(false);
   const [turnsCancelled, setTurnsCancelled] = useState(false);
   const [integrationRemoved, setIntegrationRemoved] = useState(false);
+  const [developmentOpened, setDevelopmentOpened] = useState(snapshot.developmentProfile?.initialized === true);
+  const [developmentNote, setDevelopmentNote] = useState("");
+  const openDevelopment = async (chooseHome = false) => {
+    setBusy(true);
+    setError(null);
+    try {
+      const result = await api!.openDevelopmentProfile(chooseHome);
+      if (result.opened) {
+        setDevelopmentOpened(true);
+        setDevelopmentNote(result.shortcut === "failed" || result.shortcut === "unavailable" ? copy.devShortcutUnavailable
+          : result.shortcut === "existing-unmanaged" ? copy.devShortcutPreserved : "");
+      }
+    } catch (cause) { setError(messageOf(cause)); }
+    finally { setBusy(false); }
+  };
 
   const updateLanguage = async (next: Language) => {
     try {
@@ -1886,6 +1901,13 @@ function SettingsSurface({
     <ContentSurface narrow title={devProfile ? copy.devSettingsTitle : copy.settingsTitle}>
       <SectionHeading label={copy.general} />
       <div className="settings-list">
+        {!devProfile && snapshot.developmentProfile ? <SettingRow body={copy.devFromBaseBody} label={copy.devFromBaseTitle}>
+          <div className="dev-profile-actions">
+            <SecondaryButton disabled={busy} onClick={() => void openDevelopment()}>{developmentOpened ? copy.devFromBaseOpen : copy.devFromBaseInstall}</SecondaryButton>
+            <SecondaryButton disabled={busy} onClick={() => void openDevelopment(true)}>{copy.devFromBaseChoose}</SecondaryButton>
+            {developmentNote ? <small role="status">{developmentNote}</small> : null}
+          </div>
+        </SettingRow> : null}
         {devProfile ? <SettingRow body={copy.devHiddenDesktopBody} label={copy.devHiddenDesktop}>
           <SecondaryButton icon="external" onClick={() => void api!.openGoldenViewer().catch(cause => setError(messageOf(cause)))}>
             {copy.devOpenHiddenDesktop}

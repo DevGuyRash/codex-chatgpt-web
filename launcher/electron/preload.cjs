@@ -30,6 +30,7 @@ contextBridge.exposeInMainWorld("codexWebLauncher", {
     browserInteractionMode,
   ),
   openExternal: (url) => invoke("launcher:open-external", url),
+  openDevelopmentProfile: (chooseHome) => invoke("launcher:development-profile-open", chooseHome),
   openGoldenViewer: () => invoke("launcher:golden-viewer-open"),
   setBrowserBounds: (bounds) => invoke("launcher:browser-bounds", bounds),
   setBrowserSurfaceActive: (active) => invoke("launcher:browser-surface-active", active),

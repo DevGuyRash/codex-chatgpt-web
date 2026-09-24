@@ -209,6 +209,8 @@ diagnostics, broker, and tunnel profile. It can run beside the normal launcher a
 Responses daemon or changes Codex. Optional Full setup starts and supervises only its isolated MCP
 tunnel, using the distinct ChatGPT connector name `Codex Native2 DEV`.
 
+The normal launcher's **Settings → Development profile** can create or reopen this separate profile using its reviewed executable. It opens the DEV window's guided setup, and a packaged Linux build can add a separate DEV desktop entry without replacing an existing user-managed one. **Choose DEV folder** opens a previously created profile or selects another isolated home.
+
 Set `CODEX_WEB_GPT_LAUNCHER_EXECUTABLE` to the absolute path of a reviewed package when starting a stopped DEV profile. A later `dev:launcher` call reuses its active owner; it never falls back to the normal installed launcher, which may lack this fork's WebAuthn runtime record.
 
 `dev:chat` is a named, persistent synthetic outer-Codex harness. It executes the current working

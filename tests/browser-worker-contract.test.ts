@@ -2601,6 +2601,8 @@ function toolConfirmationPage(options: {
   disappearAfterReads?: number;
   surface?: "dialog" | "card";
   allowLabel?: "Allow once" | "Allow";
+  dismissDuringDenyWait?: boolean;
+  denyUnavailable?: boolean;
 } = {}): {
   page: Page;
   pressed: string[];
@@ -2616,6 +2618,8 @@ function toolConfirmationPage(options: {
     return {
       last: () => button(name),
       waitFor: async () => {
+        if (actualName === "Deny" && options.dismissDuringDenyWait) { visible = false; throw new Error("Deny disappeared with its card"); }
+        if (actualName === "Deny" && options.denyUnavailable) throw new Error("Deny is unavailable while approval remains visible");
         if (!actualName) throw new Error(`Approval button not found: ${String(name)}`);
       },
       press: async (key: string) => {
@@ -2672,6 +2676,17 @@ test("an unanswered ChatGPT connector approval is denied instead of aborting the
 
   expect(await resolveChatGptToolConfirmation(fixture.page, "Codex Native", false, undefined, 2)).toBeTrue();
   expect(fixture.pressed).toEqual(["Deny:Enter"]);
+});
+
+test("a connector card that disappears while locating Deny does not abort the browser turn", async () => {
+  const fixture = toolConfirmationPage({ surface: "card", dismissDuringDenyWait: true });
+  expect(await resolveChatGptToolConfirmation(fixture.page, "Codex Native", false, undefined, 2)).toBeTrue();
+  expect(fixture.pressed).toEqual([]);
+});
+
+test("a visible connector card with no Deny action retains its real interaction failure", async () => {
+  const fixture = toolConfirmationPage({ surface: "card", denyUnavailable: true });
+  await expect(resolveChatGptToolConfirmation(fixture.page, "Codex Native", false, undefined, 2)).rejects.toThrow("Deny is unavailable");
 });
 
 test("explicit connector auto-approval still selects Allow once", async () => {

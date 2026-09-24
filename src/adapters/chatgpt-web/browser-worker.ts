@@ -875,8 +875,18 @@ export async function resolveChatGptToolConfirmation(
 
   if (!await dialog.isVisible().catch(() => false)) return true;
   const deny = dialog.getByRole("button", { name: "Deny", exact: true }).last();
-  await deny.waitFor({ state: "visible", timeout: 5_000 });
-  await deny.press("Enter");
+  try { await deny.waitFor({ state: "visible", timeout: 5_000 }); }
+  catch (error) {
+    // The user or ChatGPT may settle the card between the visibility check and button lookup.
+    // A still-visible card with no Deny action remains a real interaction failure.
+    if (!await dialog.isVisible()) return true;
+    throw error;
+  }
+  try { await deny.press("Enter"); }
+  catch (error) {
+    if (!await dialog.isVisible()) return true;
+    throw error;
+  }
   await dialog.waitFor({ state: "hidden", timeout: 10_000 });
   return true;
 }

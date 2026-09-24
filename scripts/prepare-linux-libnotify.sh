@@ -34,10 +34,15 @@ meson setup "$TEMP_DIR/build" "$TEMP_DIR/libnotify-$VERSION" \
   -Dman=false \
   -Dgtk_doc=false \
   -Ddocbook_docs=disabled >/dev/null
-meson compile -C "$TEMP_DIR/build" >/dev/null
+if ! meson compile -C "$TEMP_DIR/build" >"$TEMP_DIR/compile.log" 2>&1; then
+  echo "libnotify build failed" >&2
+  tail -n 30 "$TEMP_DIR/compile.log" >&2
+  exit 1
+fi
 
-LIBRARY="$(find "$TEMP_DIR/build" -type f -name 'libnotify.so.4.*' -print -quit)"
-if [ -z "$LIBRARY" ]; then
+# Meson's SONAME link resolves to the built library; recursive matching can select .symbols metadata.
+LIBRARY="$TEMP_DIR/build/libnotify/libnotify.so.4"
+if [ ! -f "$LIBRARY" ]; then
   echo "libnotify build produced no libnotify.so.4" >&2
   exit 1
 fi

@@ -40,6 +40,8 @@ export function prepareGoldenRuntimeConfig(input: {
     ...defaultConfig("full", runtimeHome), ...input.capabilities,
     subagentProtocol: input.protocol, port: 0,
     brokerSocketPath,
+    // Synthetic tasks are confined to disposable native workspaces; approve only the current connector action.
+    autoApproveToolCalls: true,
     appName: connectorName, automaticAppName: connectorName,
     browserHost: "launcher", browserHostDescriptorPath: workspace.descriptorPath,
     runtimeCommand: [...runtimeCommand, "--home", runtimeHome],

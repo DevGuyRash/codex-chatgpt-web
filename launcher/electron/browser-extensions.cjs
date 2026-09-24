@@ -83,7 +83,7 @@ class BrowserExtensions {
   }
 
   unregister(contents) {
-    if (contents && !contents.isDestroyed()) this.api.removeTab(contents);
+    if (contents) this.api.removeTab(contents);
   }
 
   ownsWebContents(contents) {
@@ -112,8 +112,15 @@ class BrowserExtensions {
     window.show();
     window.focus();
     this.pages.add(window);
-    window.on("close", () => this.unregister(window.webContents));
-    window.once("closed", () => this.pages.delete(window));
+    const contents = window.webContents;
+    window.on("close", () => this.unregister(contents));
+    window.once("closed", () => {
+      // BrowserWindow.destroy() and renderer crashes can skip the cancelable close event.
+      // The adapter's removeTab is idempotent for windows already unregistered on close.
+      try { this.unregister(contents); }
+      catch (error) { this.logger.warn("browser.extension_tab_cleanup_failed", { errorType: error?.name || "Error" }); }
+      finally { this.pages.delete(window); }
+    });
     window.webContents.setWindowOpenHandler(({ url: opened }) => {
       void this.createTab({ url: opened })
         .catch(error => this.logger.warn("browser.extension_page_rejected", {
@@ -121,9 +128,13 @@ class BrowserExtensions {
         }));
       return { action: "deny" };
     });
-    this.register(window.webContents, window);
-    try { if (destination) await window.loadURL(destination); }
-    catch (error) { if (!window.isDestroyed()) window.close(); throw error; }
+    try {
+      this.register(contents, window);
+      if (destination) await window.loadURL(destination);
+    } catch (error) {
+      if (!window.isDestroyed()) window.destroy();
+      throw error;
+    }
     return window;
   }
 
@@ -156,6 +167,7 @@ class BrowserExtensions {
     this.initialCheckTimer = null;
     for (const window of [...this.pages]) {
       if (window.isDestroyed()) continue;
+      this.unregister(window.webContents);
       window.close();
       if (!window.isDestroyed()) window.destroy();
     }

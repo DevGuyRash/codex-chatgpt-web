@@ -31,7 +31,8 @@ test("target selection and native capability picker cross real preload/main IPC 
     });
     let api;
     vm.runInNewContext(fs.readFileSync(require.resolve("../electron/generated/preload.cjs"), "utf8"), {
-      require: () => ({ contextBridge: { exposeInMainWorld: (_name, value) => { api = value; } }, ipcRenderer: { invoke: (name, ...args) => handlers.get(name)({}, ...args) } }),
+      process: Object.assign(new EventEmitter(), { contextIsolated: true }),
+      require: () => ({ contextBridge: { exposeInMainWorld: (_name, value) => { api = value; }, executeInMainWorld() {} }, ipcRenderer: { invoke: (name, ...args) => handlers.get(name)({}, ...args), on() {} } }),
     });
     const opened = await api.openIntegrationTarget({ codexHome: selected.codexHome, profile: "compatibility" });
     assert.equal(opened.target.profile, "compatibility");

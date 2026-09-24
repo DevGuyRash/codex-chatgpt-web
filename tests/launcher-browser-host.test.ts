@@ -41,7 +41,7 @@ function descriptorFile(
   roots.push(root);
   const path = join(root, "launcher-browser.json");
   writeFileSync(path, `${JSON.stringify({
-    version: 2,
+    version: 3,
     kind: LAUNCHER_BROWSER_HOST_KIND,
     profile,
     pid: process.pid,
@@ -59,6 +59,7 @@ function descriptorFile(
       : "persist:codex-web-gpt-chatgpt",
     idleUrl: LAUNCHER_BROWSER_IDLE_URL,
     surfaceId: "launcher_surface_id_0123456789AB",
+    surfaceTargets: { launcher_surface_id_0123456789AB: "owned_native_target_0123456789abcdef" },
     createdAt: new Date().toISOString(),
   })}\n`, { mode: 0o600 });
   return path;
@@ -366,18 +367,21 @@ test("launcher profile checks reject cross-profile browser ownership", async () 
     .rejects.toThrow("belongs to development");
 });
 
-test("launcher page selection uses the owned surface marker instead of URL order", async () => {
+test("launcher page selection uses the owned native target instead of URL order", async () => {
   const descriptor = readLauncherBrowserHostDescriptor(descriptorFile());
   const hiddenPage = {
     url: () => "https://chatgpt.com/?temporary-chat=true",
-    evaluate: async () => "another_surface_id_0123456789ABC",
   } as unknown as Page;
   const ownedPage = {
     url: () => LAUNCHER_BROWSER_IDLE_URL,
-    evaluate: async () => descriptor.surfaceId,
   } as unknown as Page;
   const context = {
     pages: () => [hiddenPage, ownedPage],
+    newCDPSession: async (page: Page) => ({
+      send: async () => ({ targetInfo: { targetId: page === ownedPage
+        ? descriptor.surfaceTargets[descriptor.surfaceId] : "other_native_target" } }),
+      detach: async () => {},
+    }),
   } as unknown as BrowserContext;
   const browser = {
     contexts: () => [context],
@@ -389,13 +393,15 @@ test("launcher page selection uses the owned surface marker instead of URL order
   });
 });
 
-test("launcher page selection rejects duplicated ownership markers", async () => {
+test("launcher page selection rejects duplicated native target ownership", async () => {
   const descriptor = readLauncherBrowserHostDescriptor(descriptorFile());
-  const page = () => ({
-    evaluate: async () => descriptor.surfaceId,
-  }) as unknown as Page;
+  const page = () => ({}) as unknown as Page;
   const context = {
     pages: () => [page(), page()],
+    newCDPSession: async () => ({
+      send: async () => ({ targetInfo: { targetId: descriptor.surfaceTargets[descriptor.surfaceId] } }),
+      detach: async () => {},
+    }),
   } as unknown as BrowserContext;
   const browser = {
     contexts: () => [context],

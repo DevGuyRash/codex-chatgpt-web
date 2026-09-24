@@ -10,13 +10,17 @@ function visibleLocator(count: () => number, overrides: Record<string, unknown> 
   return locator;
 }
 
+function matchesPersonalized(name: string | RegExp): boolean {
+  return typeof name === "string" ? name === "Personalized" : name.test("Personalized");
+}
+
 for (const ariaHidden of [false, true]) test(`a visible Personalized control is a preflight no-op (aria-hidden=${ariaHidden})`, async () => {
   const diagnostics: string[] = [];
   const personalized = visibleLocator(() => 1);
   const unpersonalized = visibleLocator(() => 0);
   const page = {
-    getByRole: (_role: string, options: { name: string; includeHidden?: boolean }) => (
-      options.name === "Personalized" && (!ariaHidden || options.includeHidden) ? personalized : unpersonalized
+    getByRole: (_role: string, options: { name: string | RegExp; includeHidden?: boolean }) => (
+      matchesPersonalized(options.name) && (!ariaHidden || options.includeHidden) ? personalized : unpersonalized
     ),
   } as any;
 
@@ -92,8 +96,8 @@ test("an Unpersonalized Temporary Chat is switched through its owned radio menu 
     },
   };
   const page = {
-    getByRole: (_role: string, options: { name: string }) => (
-      options.name === "Personalized" ? personalized : unpersonalized
+    getByRole: (_role: string, options: { name: string | RegExp }) => (
+      matchesPersonalized(options.name) ? personalized : unpersonalized
     ),
     locator: (selector: string) => {
       expect(selector).toBe('[id="personalization-menu"]');
@@ -544,8 +548,8 @@ test("the labeled Unpersonalized path never hides an unclosed menu", async () =>
     getAttribute: async () => "labeled-cleanup-menu",
   });
   const page = {
-    getByRole: (_role: string, options: { name: string }) => (
-      options.name === "Personalized" ? personalized : unpersonalized
+    getByRole: (_role: string, options: { name: string | RegExp }) => (
+      matchesPersonalized(options.name) ? personalized : unpersonalized
     ),
     locator: (selector: string) => {
       if (selector === "body") return {

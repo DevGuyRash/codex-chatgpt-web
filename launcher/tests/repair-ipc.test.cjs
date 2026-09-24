@@ -2,6 +2,7 @@ const test = require("node:test");
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const vm = require("node:vm");
+const { EventEmitter } = require("node:events");
 const { registerLoggedIpc, registerDiagnosticsIpc } = require("../electron/logging.cjs");
 const { ConfigurationReview } = require("../electron/configuration-review.cjs");
 
@@ -22,7 +23,8 @@ test("profile migration uses the existing setup IPC owner and preserves its expl
   });
   let api;
   vm.runInNewContext(fs.readFileSync(require.resolve("../electron/generated/preload.cjs"), "utf8"), {
-    require: () => ({ contextBridge: { exposeInMainWorld: (_name, value) => { api = value; } }, ipcRenderer: { invoke: (name, ...args) => handlers.get(name)({}, ...args) } }),
+    process: Object.assign(new EventEmitter(), { contextIsolated: true }),
+    require: () => ({ contextBridge: { exposeInMainWorld: (_name, value) => { api = value; }, executeInMainWorld() {} }, ipcRenderer: { invoke: (name, ...args) => handlers.get(name)({}, ...args), on() {} } }),
   });
   await api.setupCore({ migrateBase: true });
   assert.deepEqual(calls, [{ migrateBase: true }]);
@@ -55,9 +57,10 @@ test("repair preload arguments reach the registered main handlers without the El
   vm.runInNewContext(`${registration}\nregisterIpc({ logger: { error() {} }, stateStore: { update() { return state; } } });`, { ...context, state });
   let api;
   vm.runInNewContext(fs.readFileSync(require.resolve("../electron/generated/preload.cjs"), "utf8"), {
+    process: Object.assign(new EventEmitter(), { contextIsolated: true }),
     require: name => { assert.equal(name, "electron"); return {
-      contextBridge: { exposeInMainWorld: (_name, value) => { api = value; } },
-      ipcRenderer: { invoke: (name, ...args) => handlers.get(name)({ sender: {} }, ...args) },
+      contextBridge: { exposeInMainWorld: (_name, value) => { api = value; }, executeInMainWorld() {} },
+      ipcRenderer: { invoke: (name, ...args) => handlers.get(name)({ sender: {} }, ...args), on() {} },
     }; },
   });
   assert.equal((await api.previewIntegrationRepair("native")).protocol, "native");

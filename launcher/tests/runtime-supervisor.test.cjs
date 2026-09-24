@@ -1335,19 +1335,21 @@ test("launcher supervisor requests exact browser trace cancellation", async () =
   supervisor.readConfig = () => ({ controlToken: "control", host: "127.0.0.1", port: 17841 });
   supervisor.daemon = { exitCode: null, signalCode: null };
   supervisor.control = async (_config, action, options) => {
-    assert.equal(action, "cancel-turn");
     assert.deepEqual(options.body, { traceId: "trace_exact" });
-    assert.equal(options.timeoutMs, 15_000);
+    assert.equal(options.timeoutMs, 5_000);
+    assert.ok(["cancel-turn", "cancel-status"].includes(action));
     return {
-      status: "ok",
+      status: action === "cancel-turn" ? "accepted" : "completed",
       trace_id: "trace_exact",
+      cancellation_id: "11111111-1111-4111-8111-111111111111",
       cancelled_browser_turns: 1,
       cancelled_broker_turns: 1,
     };
   };
 
   const result = await supervisor.cancelBrowserTurn("trace_exact");
-  assert.equal(result.trace_id, "trace_exact");
+  assert.equal(result.traceId, "trace_exact");
+  assert.equal((await result.settlement).status, "completed");
 });
 
 test("explicit launcher shutdown force-stops only its owned runtime when graceful shutdown fails", async () => {

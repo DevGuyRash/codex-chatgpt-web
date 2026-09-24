@@ -822,6 +822,8 @@ test("guest and incomplete server sessions do not prove launcher authentication"
 
 test("launcher authentication requires the Temporary Chat composer and complete server session", async () => {
   const fixture = {
+    getLocallySignedOut: () => false,
+    setLocallySignedOut() {},
     state: { authenticated: false },
     activeTraceId: null,
     manualOperation: null,
@@ -979,6 +981,10 @@ test("passkey login imports only validated state and re-proves the Launcher sess
     turnTabs: new Map(),
     view: { webContents: contents },
     state: { authenticated: false },
+    clearOwnedSessionForPasskey: async () => {
+      await contents.loadURL(IDLE_BROWSER_URL);
+      calls.push("clear");
+    },
     waitForAuthenticated: async () => {
       calls.push("prove-session");
       fixture.state.authenticated = true;
@@ -1097,10 +1103,8 @@ test("failed private-transfer cleanup also discards an otherwise imported passke
 
 test("launcher quit remains gated through an active embedded-browser operation", () => {
   const source = fs.readFileSync(require.resolve("../electron/main.cjs"), "utf8");
-  assert.match(
-    source,
-    /runtimeHost\?\.currentOperation\(\) \|\| browserHost\?\.currentOperation\(\)/,
-  );
+  assert.match(source, /const browserOperation = browserHost\?\.currentOperation\(\)/);
+  assert.match(source, /runtimeHost\?\.currentOperation\(\)\s*\|\| \(browserOperation === "ChatGPT login" \? null : browserOperation\)/);
 });
 
 test("logout clears only the owned ChatGPT session and returns to the sign-in surface", async () => {
@@ -1109,6 +1113,11 @@ test("logout clears only the owned ChatGPT session and returns to the sign-in su
   const authView = { webContents: { isDestroyed: () => false } };
   const fixture = {
     authView,
+    clearOwnedSessionForPasskey: async () => {
+      calls.push(["clearOwnedSessionForPasskey"]);
+      fixture.authView = null;
+    },
+    setLocallySignedOut: value => calls.push(["locallySignedOut", value]),
     state: { authenticated: true, status: "ready" },
     view: {
       webContents: {
@@ -1150,9 +1159,8 @@ test("logout clears only the owned ChatGPT session and returns to the sign-in su
   assert.equal(result.authenticated, false);
   assert.equal(result.status, "signed-out");
   assert.deepEqual(calls[0], ["manualOperation", "ChatGPT logout"]);
-  assert.deepEqual(calls[1], ["closeAuthView", authView, true, false]);
-  assert.deepEqual(calls[2], ["clearStorageData"]);
-  assert.deepEqual(calls[4], ["loadURL", "https://chatgpt.com/?temporary-chat=true"]);
+  assert.deepEqual(calls[1], ["clearOwnedSessionForPasskey"]);
+  assert.deepEqual(calls[2], ["locallySignedOut", true]);
   assert.ok(calls.some(([name]) => name === "activateHomeSurface"));
   assert.ok(calls.some(([name]) => name === "show"));
 });
@@ -1190,6 +1198,8 @@ test("OAuth completion is re-proved on the primary Temporary Chat surface before
     },
   };
   const fixture = {
+    getLocallySignedOut: () => false,
+    setLocallySignedOut() {},
     activeTraceId: null,
     manualOperation: "ChatGPT login",
     authView: completedAuthView,
@@ -1236,6 +1246,8 @@ test("a successful primary login redirect is re-proved on Temporary Chat before 
   let currentUrl = "https://chatgpt.com/";
   const loadedUrls = [];
   const fixture = {
+    getLocallySignedOut: () => false,
+    setLocallySignedOut() {},
     activeTraceId: null,
     manualOperation: "ChatGPT login",
     authView: null,
@@ -1283,6 +1295,8 @@ test("an authenticated primary surface closes a stale embedded auth popup", asyn
   };
   const closed = [];
   const fixture = {
+    getLocallySignedOut: () => false,
+    setLocallySignedOut() {},
     activeTraceId: null,
     manualOperation: "connector verification",
     authView: staleAuthView,
@@ -1863,6 +1877,7 @@ test("hard refresh timeout cannot become success when stopping emits did-stop-lo
 test("launcher session refresh resolves persisted authentication before setup actions", async () => {
   const calls = [];
   const fixture = {
+    getLocallySignedOut: () => false,
     state: { authenticated: false },
     snapshot: () => ({ authenticated: true }),
     setState: (patch) => calls.push(["state", patch]),
@@ -1878,6 +1893,7 @@ test("launcher session refresh resolves persisted authentication before setup ac
       webContents: {
         getURL: () => IDLE_BROWSER_URL,
         loadURL: async (url) => calls.push(["load", url]),
+        session: { cookies: { get: async () => [{ domain: ".chatgpt.com" }] } },
       },
     },
   };
@@ -1896,13 +1912,16 @@ test("launcher session refresh resolves persisted authentication before setup ac
 
 test("concurrent launcher session refresh requests share one browser operation", async () => {
   let finishProbe;
+  let probeStarted;
+  const enteredProbe = new Promise(resolve => { probeStarted = resolve; });
   let operations = 0;
   const fixture = {
+    getLocallySignedOut: () => false,
     sessionRefreshOperation: null,
     state: { authenticated: false },
     snapshot: () => ({ authenticated: true }),
     setState() {},
-    probeAuthentication: async () => await new Promise((resolve) => { finishProbe = resolve; }),
+    probeAuthentication: async () => await new Promise((resolve) => { finishProbe = resolve; probeStarted(); }),
     withManualOperation: async (_name, action) => {
       operations += 1;
       return await action();
@@ -1910,6 +1929,7 @@ test("concurrent launcher session refresh requests share one browser operation",
     view: { webContents: {
       getURL: () => "https://chatgpt.com/?temporary-chat=true",
       loadURL: async () => {},
+      session: { cookies: { get: async () => [{ domain: ".chatgpt.com" }] } },
     } },
   };
 
@@ -1917,6 +1937,7 @@ test("concurrent launcher session refresh requests share one browser operation",
   const second = BrowserHost.prototype.refreshAuthentication.call(fixture);
   assert.equal(first, second);
   assert.equal(operations, 1);
+  await enteredProbe;
   finishProbe({ authenticated: true });
   await first;
   assert.equal(fixture.sessionRefreshOperation, null);
@@ -2221,6 +2242,7 @@ test("a retained conversation is not reused for a different connector identity",
   };
   const created = { id: "fresh", surfaceId: "surface-fresh" };
   const fixture = Object.assign(Object.create(BrowserHost.prototype), {
+    writeDescriptor() {},
     manualOperation: null,
     turnTabs: new Map([[retained.id, retained]]),
     userCancelledTurnOwners: new Map(),
@@ -2264,6 +2286,7 @@ test("an Automatic turn never reuses a retained Zero Risk conversation", async (
     connectorBound: true,
   };
   const fixture = Object.assign(Object.create(BrowserHost.prototype), {
+    writeDescriptor() {},
     manualOperation: null,
     turnTabs: new Map([[retained.id, retained]]),
     userCancelledTurnOwners: new Map(),
@@ -2316,6 +2339,7 @@ test("a connector conversation is not reused until its connector was bound", asy
     interactionMode: "automatic",
   };
   const fixture = Object.assign(Object.create(BrowserHost.prototype), {
+    writeDescriptor() {},
     manualOperation: null,
     turnTabs: new Map([[retained.id, retained]]),
     userCancelledTurnOwners: new Map(),

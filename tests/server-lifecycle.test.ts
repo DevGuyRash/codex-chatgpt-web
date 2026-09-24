@@ -23,6 +23,21 @@ async function waitForTurnCount(turns: HttpTurnCounter, expected: number): Promi
   expect(turns.count()).toBe(expected);
 }
 
+async function waitForCancellationReceipt(port: number, token: string, traceId: string): Promise<Record<string, unknown>> {
+  const deadline = Date.now() + 1_000;
+  for (;;) {
+    const response = await fetch(`http://127.0.0.1:${port}/admin/cancel-status`, {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: `Bearer ${token}` },
+      body: JSON.stringify({ traceId }),
+    });
+    expect(response.status).toBe(200);
+    const receipt = await response.json() as Record<string, unknown>;
+    if (receipt.status !== "accepted" || Date.now() >= deadline) return receipt;
+    await Bun.sleep(5);
+  }
+}
+
 test("HTTP turn tracking follows the response stream instead of Bun's global request count", async () => {
   const turns = new HttpTurnCounter();
   let source!: ReadableStreamDefaultController<Uint8Array>;
@@ -763,12 +778,19 @@ test("authenticated targeted cancellation terminates one browser trace without r
       body: JSON.stringify({ traceId: "trace_target" }),
     });
     expect(response.status).toBe(200);
-    expect(await response.json()).toMatchObject({
-      status: "ok",
+    const accepted = await response.json() as Record<string, unknown>;
+    expect(accepted).toMatchObject({
       trace_id: "trace_target",
+      cancellation_id: expect.any(String),
+      cancelled_broker_turns: 0,
+    });
+    expect(["accepted", "completed"]).toContain(String(accepted.status));
+    expect(await waitForCancellationReceipt(server.port!, config.controlToken!, "trace_target")).toMatchObject({
+      status: "completed",
+      trace_id: "trace_target",
+      cancellation_id: accepted.cancellation_id,
       cancelled_browser_turns: 1,
       cancelled_broker_turns: 0,
-      active_browser_turns: 1,
     });
     expect(targetCancelled).toBe(1);
     expect(otherCancelled).toBe(0);
@@ -810,9 +832,16 @@ test("authenticated targeted cancellation aborts a shared structured compaction 
       body: JSON.stringify({ traceId }),
     });
     expect(response.status).toBe(200);
-    expect(await response.json()).toMatchObject({
-      status: "ok",
+    const accepted = await response.json() as Record<string, unknown>;
+    expect(accepted).toMatchObject({
       trace_id: traceId,
+      cancellation_id: expect.any(String),
+    });
+    expect(["accepted", "completed"]).toContain(String(accepted.status));
+    expect(await waitForCancellationReceipt(server.port!, config.controlToken!, traceId)).toMatchObject({
+      status: "completed",
+      trace_id: traceId,
+      cancellation_id: accepted.cancellation_id,
       cancelled_compaction_runs: 1,
     });
     await expect(run).rejects.toThrow("The ChatGPT browser tab was closed");

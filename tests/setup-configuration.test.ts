@@ -193,10 +193,12 @@ for (const existingRepair of [false, true]) for (const externalEdit of [false, t
   } });
   try {
     writeFileSync(options.browserHostDescriptorPath!, JSON.stringify({
-      version: 2, kind: "codex-web-gpt-launcher", profile: "production", pid: process.pid,
+      version: 3, kind: "codex-web-gpt-launcher", profile: "production", pid: process.pid,
       endpoint: "http://127.0.0.1:48121", control: { endpoint: `http://127.0.0.1:${control.port}`, token: "t".repeat(48) },
       helper: { executable: process.execPath, script: import.meta.path }, partition: "persist:codex-web-gpt-chatgpt",
-      idleUrl: LAUNCHER_BROWSER_IDLE_URL, surfaceId: "s".repeat(32), createdAt: new Date().toISOString(),
+      idleUrl: LAUNCHER_BROWSER_IDLE_URL, surfaceId: "s".repeat(32),
+      surfaceTargets: { ["s".repeat(32)]: "setup_native_target_0123456789abcdef" },
+      createdAt: new Date().toISOString(),
     }), { mode: 0o600 });
     const preview = previewSetupConfiguration(options);
     expect(preview.status).toBe("ready");

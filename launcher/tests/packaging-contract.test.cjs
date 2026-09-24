@@ -205,9 +205,11 @@ test("Linux packaging replaces libnotify in an owned AppImage toolset before ass
     path.join(repositoryRoot, "LICENSES", "libnotify-0.8.7-LGPL-2.1.md"),
     "utf8",
   );
-  for (const contract of [source, prepare, smoke]) {
+  for (const contract of [source, prepare]) {
     assert.match(contract, /notify_notification_get_activation_app_launch_context/);
   }
+  assert.match(smoke, /REQUIRED_SYMBOLS="notify_is_initted notify_init/);
+  assert.match(smoke, /Final AppImage libnotify is missing Electron's required symbol/);
   assert.match(prepare, /4be15202ec4184fce1ac15997ece5530d2be32fe9573875aeb10e3b573858748/);
   assert.match(source, /getAppImageTools\("0\.0\.0", Arch\.x64\)/);
   assert.match(source, /APPIMAGE_TOOLS_PATH/);

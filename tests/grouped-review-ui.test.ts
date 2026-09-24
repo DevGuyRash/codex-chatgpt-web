@@ -2,6 +2,7 @@ import { expect, test } from "bun:test";
 import { chromium } from "playwright-core";
 import { createRequire } from "node:module";
 import { runInNewContext } from "node:vm";
+import { EventEmitter } from "node:events";
 import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -43,8 +44,9 @@ test.skipIf(!process.env.CHATGPT_TEST_CHROME_EXECUTABLE)("grouped review sends s
     });
     let api: { decideConfiguration: (id: string, choice: unknown) => Promise<unknown> };
     runInNewContext(readFileSync(resolve("launcher/electron/generated/preload.cjs"), "utf8"), {
-      require: () => ({ contextBridge: { exposeInMainWorld: (_name: string, value: typeof api) => { api = value; } },
-        ipcRenderer: { invoke: (name: string, ...args: unknown[]) => handlers.get(name)!({}, ...args) } }),
+      process: Object.assign(new EventEmitter(), { contextIsolated: true }),
+      require: () => ({ contextBridge: { exposeInMainWorld: (_name: string, value: typeof api) => { api = value; }, executeInMainWorld() {} },
+        ipcRenderer: { invoke: (name: string, ...args: unknown[]) => handlers.get(name)!({}, ...args), on() {} } }),
     });
     let finishRefresh: (() => void) | undefined;
     let outcome = "";

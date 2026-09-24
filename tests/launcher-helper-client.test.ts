@@ -65,9 +65,12 @@ test("daemon streams browser lifecycle through the real helper process", async (
     ChatGptBrowserWorker.prototype.run = async turn => {
       await turn.onPreparedSelected(false);
       const prepared = await turn.prepare();
-      if (prepared.multipart.parts.length !== 3) throw new Error("Multipart context was lost");
+      if (prepared.multipart.parts.length !== 6) throw new Error("Multipart context was lost");
       await turn.onMultipartStageAcknowledged?.(1);
       await turn.onMultipartStageAcknowledged?.(2);
+      await turn.onMultipartStageAcknowledged?.(3);
+      await turn.onMultipartStageAcknowledged?.(4);
+      await turn.onMultipartStageAcknowledged?.(5);
       await turn.onSendActivated();
       turn.onSubmitted();
       turn.onReasoningSummary("Reading project");
@@ -92,7 +95,7 @@ test("daemon streams browser lifecycle through the real helper process", async (
   writeFileSync(descriptorHelper, "process.exit(99);\n", { mode: 0o700 });
   const descriptorPath = join(root, "launcher.json");
   writeFileSync(descriptorPath, `${JSON.stringify({
-    version: 2,
+    version: 3,
     kind: LAUNCHER_BROWSER_HOST_KIND,
     profile: "production",
     pid: process.pid,
@@ -105,6 +108,7 @@ test("daemon streams browser lifecycle through the real helper process", async (
     partition: "persist:codex-web-gpt-chatgpt",
     idleUrl: LAUNCHER_BROWSER_IDLE_URL,
     surfaceId: "launcher_surface_id_0123456789AB",
+    surfaceTargets: { launcher_surface_id_0123456789AB: "owned_native_target_0123456789abcdef" },
     createdAt: new Date().toISOString(),
   })}\n`, { mode: 0o600 });
   const config: ResolvedBrowserConfig = {
@@ -134,7 +138,7 @@ test("daemon streams browser lifecycle through the real helper process", async (
       capabilities: { localToolsEnabled: false, solAvailable: true, proAvailable: false },
       prepare: async () => ({
         text: "inspect", images: [],
-        multipart: { parts: ["part one", "part two", "part three"], commit: "inspect" },
+        multipart: { parts: ["part one", "part two", "part three", "part four", "part five", "part six"], commit: "inspect" },
         release: () => { released = true; },
       }),
       onMultipartStageAcknowledged: stage => { acknowledgedStages.push(stage); },
@@ -153,7 +157,7 @@ test("daemon streams browser lifecycle through the real helper process", async (
     expect(deltas).toEqual(["done"]);
     expect(sendActivated).toBe(true);
     expect(submitted).toBe(true);
-    expect(acknowledgedStages).toEqual([1, 2]);
+    expect(acknowledgedStages).toEqual([1, 2, 3, 4, 5]);
     expect(checkpoints).toEqual([{
       answerHash: "a".repeat(64),
       checkpoint: {
@@ -222,7 +226,7 @@ test("launcher helper protocol preserves multipart context and the compaction fl
     prepare: async () => ({
       text: "commit",
       images: [],
-      multipart: { parts: ["{\"part\":1}", "{\"part\":2}", "{\"part\":3}"], commit: "commit" },
+      multipart: { parts: ["{\"part\":1}", "{\"part\":2}"], commit: "commit" },
       trimmedCompactionMessages: 4,
       release() {},
     }),
@@ -239,7 +243,7 @@ test("launcher helper protocol preserves multipart context and the compaction fl
     type: "prepared_selected_ack",
     prepared: {
         text: "commit",
-        multipart: { parts: ["{\"part\":1}", "{\"part\":2}", "{\"part\":3}"], commit: "commit" },
+        multipart: { parts: ["{\"part\":1}", "{\"part\":2}"], commit: "commit" },
         trimmedCompactionMessages: 4,
     },
   });
@@ -371,7 +375,7 @@ for (const settlement of ["aborted", "cleanup-failed", "completed"] as const) te
     };
     await import(${JSON.stringify(new URL("../src/adapters/chatgpt-web/browser-helper-main.ts", import.meta.url).href)});
   `, { mode: 0o700 });
-  writeFileSync(descriptorPath, JSON.stringify({ version: 2, kind: LAUNCHER_BROWSER_HOST_KIND, profile: "production", pid: process.pid, endpoint: "http://127.0.0.1:39001", control: { endpoint: "http://127.0.0.1:39002", token: "launcher-control-token-0123456789abcdefghijklmnop" }, helper: { executable: process.execPath, script: helper }, partition: "persist:codex-web-gpt-chatgpt", idleUrl: LAUNCHER_BROWSER_IDLE_URL, surfaceId: "launcher_surface_id_0123456789AB", createdAt: new Date().toISOString() }), { mode: 0o600 });
+  writeFileSync(descriptorPath, JSON.stringify({ version: 3, kind: LAUNCHER_BROWSER_HOST_KIND, profile: "production", pid: process.pid, endpoint: "http://127.0.0.1:39001", control: { endpoint: "http://127.0.0.1:39002", token: "launcher-control-token-0123456789abcdefghijklmnop" }, helper: { executable: process.execPath, script: helper }, partition: "persist:codex-web-gpt-chatgpt", idleUrl: LAUNCHER_BROWSER_IDLE_URL, surfaceId: "launcher_surface_id_0123456789AB", surfaceTargets: { launcher_surface_id_0123456789AB: "owned_native_target_0123456789abcdef" }, createdAt: new Date().toISOString() }), { mode: 0o600 });
   const client = new LauncherBrowserHelperClient({ appName: "Codex Native2", browserHost: "launcher", browserHostDescriptorPath: descriptorPath, browserHelperScriptPath: helper, storageStatePath: join(root, "unused"), chromeExecutablePath: join(root, "unused-chrome"), turnTimeoutMs: 10000, headed: true, autoApproveToolCalls: false });
   const veto = new DOMException("Draft must remain unsent", "AbortError");
   let released = false, activated = 0, submitted = false, failure: unknown;

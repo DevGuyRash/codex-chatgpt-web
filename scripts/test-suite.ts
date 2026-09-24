@@ -7,5 +7,7 @@ const isUi = (name: string) => name.endsWith("-ui.test.ts") || name === "connect
 const files = readdirSync(resolve("tests")).filter(name => name.endsWith(".test.ts") && isUi(name) === (suite === "ui")).sort().map(name => `tests/${name}`);
 if (!files.length) throw new Error(`No ${suite} tests found`);
 if (suite === "ui" && (!process.env.CHATGPT_TEST_CHROME_EXECUTABLE || !existsSync(process.env.CHATGPT_TEST_CHROME_EXECUTABLE))) throw new Error("UI gate incomplete: set CHATGPT_TEST_CHROME_EXECUTABLE to an installed Chromium executable");
-const child = Bun.spawn([process.execPath, "test", ...files], { stdin: "inherit", stdout: "inherit", stderr: "inherit" });
+// Bun treats explicit file arguments as path patterns; without this guard the preserved
+// context/golden-dev checkout runs duplicate tests whose names end in the same path.
+const child = Bun.spawn([process.execPath, "test", "--path-ignore-patterns=**/context/**", ...files], { stdin: "inherit", stdout: "inherit", stderr: "inherit" });
 process.exitCode = await child.exited;

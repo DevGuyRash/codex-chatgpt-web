@@ -449,23 +449,30 @@ class WebAuthnPrompts {
     if (!this.pending.has(request.id)) return;
     this.pending.delete(request.id);
     request.detach?.();
-    const callback = request.callback;
+    const callbacks = request.methodChosen === "phone"
+      ? [[request.qrAction, "cancel"], [request.callback, undefined], [request.transportAction, "cancel"]]
+      : [[request.callback, undefined], [request.qrAction, "cancel"], [request.transportAction, "cancel"]];
     request.callback = null;
+    request.qrAction = null;
+    request.transportAction = null;
+    request.qrDataUrl = null;
     let callbackFailed = false;
-    try {
-      if (callback) callback();
-      else if (request.qrAction) request.qrAction("cancel");
-      else request.transportAction?.("cancel");
-    } catch (error) {
-      callbackFailed = true;
-      request.operation?.problem(new DiagnosticError({
-        code: "webauthn_cancel_callback_failed", message: "The native passkey cancellation callback failed",
-        origin: "browser.webauthn", stage: "authentication", actions: ["open-diagnostics"],
-        evidenceMissing: "The native request's terminal state could not be confirmed.",
-      }));
-      this.logger.warn("browser.webauthn_cancel_callback_failed", {
-        requestId: request.id, errorType: error?.name || "Error",
-      });
+    const invoked = new Set();
+    for (const [callback, action] of callbacks) {
+      if (typeof callback !== "function" || invoked.has(callback)) continue;
+      invoked.add(callback);
+      try { callback(action); }
+      catch (error) {
+        callbackFailed = true;
+        request.operation?.problem(new DiagnosticError({
+          code: "webauthn_cancel_callback_failed", message: "The native passkey cancellation callback failed",
+          origin: "browser.webauthn", stage: "authentication", actions: ["open-diagnostics"],
+          evidenceMissing: "The native request's terminal state could not be confirmed.",
+        }));
+        this.logger.warn("browser.webauthn_cancel_callback_failed", {
+          requestId: request.id, errorType: error?.name || "Error",
+        });
+      }
     }
     this.logger.info("browser.webauthn_cancelled", { method: request.kind, requestId: request.id, reason });
     request.operation?.end(callbackFailed ? "unknown" : "cancelled");

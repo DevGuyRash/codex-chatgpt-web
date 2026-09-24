@@ -21,7 +21,7 @@ export const BrowserAuthenticationPromptStateSchema = z.object({
   minPinLength: z.number().int().min(1).max(127).optional(),
   attempts: z.number().int().min(0).max(100).optional(),
   qrDataUrl: z.string().regex(/^data:image\/png;base64,[A-Za-z0-9+/=]+$/).max(2_000_000).nullable(),
-  bluetoothStatus: z.enum(["on", "off", "permission-denied", "permission-required", "unknown"]).optional(),
+  bluetoothStatus: z.enum(["on", "off", "permission-denied", "permission-required", "le-unavailable", "unknown"]).optional(),
   hybridProgress: z.enum(["phone-connected", "bluetooth-seen", "ready"]).optional(),
   canPowerOnBluetooth: z.boolean().optional(),
   securityKeyAvailable: z.boolean().optional(),

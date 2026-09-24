@@ -71,18 +71,24 @@ function render(state) {
     element("pin").focus();
   } else if (state.kind === "qr") {
     element("title").textContent = "Use a phone passkey";
-    element("help").textContent = "Scan this QR code with your phone, then follow its prompts.";
+    const status = state.bluetoothStatus;
+    const leUnavailable = status === "le-unavailable";
+    element("help").textContent = leUnavailable
+      ? "Choose another passkey method, or enable Bluetooth Low Energy and retry sign-in."
+      : "Scan this QR code with your phone, then follow its prompts.";
     element("qr").src = state.qrDataUrl || "";
-    element("qr").hidden = !state.qrDataUrl;
+    element("qr").hidden = !state.qrDataUrl || leUnavailable;
     element("security-key-action").hidden = !state.securityKeyAvailable;
     element("qr-methods").hidden = !(state.extensionProviders || []).length && !state.platformAvailable;
-    element("phone-progress").textContent = state.hybridProgress === "phone-connected"
+    element("phone-progress").textContent = leUnavailable
+      ? "Phone pairing cannot start on this computer. Enable Bluetooth Low Energy, then start a fresh passkey request."
+      : state.hybridProgress === "phone-connected"
       ? "Phone connected. Keep it nearby and confirm the passkey request."
       : state.hybridProgress === "bluetooth-seen" ? "Phone found over Bluetooth. Establishing a secure connection…"
       : state.hybridProgress === "ready" ? "Phone is ready. Confirm the passkey request on your phone."
       : state.qrDataUrl ? "Waiting for your phone to scan the QR code…" : "Preparing a fresh QR code…";
-    const status = state.bluetoothStatus;
     element("bluetooth-status").textContent = status === "on" ? "Bluetooth is ready."
+      : status === "le-unavailable" ? "Bluetooth Low Energy is disabled or unavailable in the system configuration."
       : status === "permission-required" ? "Bluetooth permission is needed to connect."
       : status === "permission-denied" ? "Bluetooth permission was denied."
       : "Bluetooth is off or unavailable.";

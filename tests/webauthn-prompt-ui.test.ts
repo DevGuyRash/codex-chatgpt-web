@@ -27,3 +27,20 @@ test.skipIf(!process.env.CHATGPT_TEST_CHROME_EXECUTABLE)("phone passkey Cancel r
     ]);
   } finally { await browser.close(); }
 });
+
+test.skipIf(!process.env.CHATGPT_TEST_CHROME_EXECUTABLE)("a known missing Bluetooth LE transport hides an unusable phone QR", async () => {
+  const browser = await chromium.launch({ executablePath: process.env.CHATGPT_TEST_CHROME_EXECUTABLE, headless: true });
+  try {
+    const page = await browser.newPage();
+    await page.addInitScript(() => {
+      (window as typeof window & { codexPasskeyPrompt: unknown }).codexPasskeyPrompt = {
+        current: async () => ({ id: "22222222-2222-4222-8222-222222222222", kind: "qr", origin: "https://example.com", relyingPartyId: "example.com", qrDataUrl: "data:image/png;base64,iVBORw0KGgo=", phoneAvailable: true, bluetoothStatus: "le-unavailable", extensionProviders: [] }),
+        onState() {}, onWaiting() {}, respond: async () => true,
+      };
+    });
+    await page.goto(pathToFileURL(resolve("launcher/electron/webauthn-prompt.html")).href);
+    expect(await page.locator("#qr").isVisible()).toBe(false);
+    expect(await page.locator("#bluetooth-status").innerText()).toContain("Bluetooth Low Energy");
+    expect(await page.locator("#phone-progress").innerText()).toContain("start a fresh passkey request");
+  } finally { await browser.close(); }
+});

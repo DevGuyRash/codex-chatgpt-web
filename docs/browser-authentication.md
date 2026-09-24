@@ -6,6 +6,8 @@ The method screen offers the transports Chromium reports for the current request
 
 The native patch set is pinned to Electron 44.4.4 and its Chromium revision in `native/electron/manifest.json`. Linux's BlueZ-specific patch retries scan start with weak callbacks and shares an `InProgress` scan only when the adapter confirms active discovery. Windows and macOS retain their native authenticator interfaces; each platform must build its own patched Electron artifact and verify real hardware, phone, and provider behavior locally. Package, development, startup, and smoke commands require the reviewed binary and reject a stock runtime.
 
+The phone prompt's Cancel button settles its current native request. On Linux, an optional read-only controller probe distinguishes a powered BR/EDR-only adapter from one with active Bluetooth LE. When LE is known disabled, the launcher hides the unusable QR and asks for a fresh passkey request after the system setting changes; a missing probe leaves Chromium's own status authoritative. This local diagnosis does not substitute for phone confirmation, and Windows/macOS continue to use their native transport status.
+
 Password-manager extensions are optional. The launcher installs only a provider the user selects from its official Chrome Web Store catalog, verifies the CRX identity, and checks declared permissions before native loading. A saved extension restores on restart. Automatic availability checks run after startup and every five hours; **Check for updates** runs on demand. Neither check installs an update. The user chooses **Update** for an available version, and the launcher keeps the prior package available for rollback if loading the new one fails.
 
 | Provider | Official Chrome Web Store ID | Notes |

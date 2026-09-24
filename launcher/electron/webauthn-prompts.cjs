@@ -3,6 +3,7 @@ const { pathToFileURL } = require("node:url");
 const { BrowserWindow, ipcMain, webContents } = require("electron");
 const QRCode = require("qrcode");
 const { DiagnosticError } = require("./logging.cjs");
+const { probeBluetoothLe } = require("./bluetooth-le.cjs");
 const { placeWindowNearLauncher } = require("./window-placement.cjs");
 const { BrowserAuthenticationPromptStateSchema, BrowserAuthenticationReplySchema } = require("./generated/webauthn-contract.cjs");
 
@@ -238,6 +239,12 @@ class WebAuthnPrompts {
     if (!this.pending.has(request.id) || !this.valid(request)) return;
     if (!["pin", "account", "method", "touch", "verification"].includes(request.kind)) request.kind = "qr";
     this.show();
+    void probeBluetoothLe().then(status => {
+      if (status !== "disabled" || !this.pending.has(request.id) || !this.valid(request)) return;
+      request.hostLeUnavailable = true;
+      this.logger.warn("browser.webauthn_le_unavailable", { requestId: request.id });
+      this.show();
+    }).catch(() => {});
   }
 
   bluetooth(details) {
@@ -276,7 +283,7 @@ class WebAuthnPrompts {
       minPinLength: request.minPinLength,
       attempts: request.attempts,
       qrDataUrl: request.qrDataUrl,
-      bluetoothStatus: request.bluetoothStatus,
+      bluetoothStatus: request.hostLeUnavailable ? "le-unavailable" : request.bluetoothStatus,
       hybridProgress: request.hybridProgress,
       canPowerOnBluetooth: request.canPowerOnBluetooth,
       securityKeyAvailable: request.securityKeyAvailable,

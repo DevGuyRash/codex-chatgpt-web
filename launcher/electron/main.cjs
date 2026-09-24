@@ -47,6 +47,7 @@ const { RuntimeRegistry } = require("./runtime-registry.cjs");
 const { resolveIntegrationTarget } = require("./integration-target.cjs");
 const { runtimeBundlePaths } = require("./runtime-command.cjs");
 const { createUpdateController } = require("./update.cjs");
+const { activeGoldenViewer } = require("./golden-viewer.cjs");
 const {
   createStateStore,
   nextSessionRefreshReminderAt,
@@ -651,6 +652,33 @@ function registerIpc({ logger, stateStore }) {
     if (!ALLOWED_EXTERNAL_URLS.has(url)) throw new Error("External URL is not allowlisted");
     await openWebUrl(url);
     return true;
+  });
+  handle("launcher:golden-viewer-open", async () => {
+    if (!IS_DEV_PROFILE) throw new Error("Hidden test desktops are available only from the DEV launcher");
+    const selectionPath = path.join(CORE_HOME, "golden-viewer-workspace.json");
+    const preferred = [];
+    if (process.env.CODEX_WEB_GPT_GOLDEN_WORKSPACE) preferred.push(process.env.CODEX_WEB_GPT_GOLDEN_WORKSPACE);
+    try { preferred.push(JSON.parse(fs.readFileSync(selectionPath, "utf8")).root); } catch { /* No saved selection. */ }
+    const sourceCampaigns = path.join(SOURCE_ROOT, "context", "golden");
+    const discovered = [];
+    if (fs.existsSync(sourceCampaigns)) for (const entry of fs.readdirSync(sourceCampaigns, { withFileTypes: true })) {
+      if (entry.isDirectory() && fs.existsSync(path.join(sourceCampaigns, entry.name, "workspace.json"))) {
+        try { discovered.push(activeGoldenViewer(path.join(sourceCampaigns, entry.name))); } catch { /* Not active. */ }
+      }
+    }
+    let viewer;
+    for (const root of preferred) {
+      try { viewer = activeGoldenViewer(root); break; } catch { /* Stale candidate; offer a folder picker. */ }
+    }
+    if (!viewer && discovered.length === 1) viewer = discovered[0];
+    if (!viewer) {
+      const chosen = await dialog.showOpenDialog(mainWindow, { title: "Choose an active hidden test workspace", defaultPath: fs.existsSync(sourceCampaigns) ? sourceCampaigns : undefined, properties: ["openDirectory"] });
+      if (chosen.canceled || !chosen.filePaths[0]) return { opened: false };
+      viewer = activeGoldenViewer(chosen.filePaths[0]);
+    }
+    fs.writeFileSync(selectionPath, JSON.stringify({ root: viewer.root }), { mode: 0o600 });
+    await shell.openExternal(viewer.url);
+    return { opened: true, display: viewer.display };
   });
 
   handle("launcher:browser-bounds", (event, bounds) => {

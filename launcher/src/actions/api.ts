@@ -7,7 +7,7 @@ import { unwrapActionResult } from "../../../src/diagnostics/action-error";
 // Every launcher API member has an explicit feedback policy. New controls cannot silently bypass it.
 export const launcherActionPolicy = {
   diagnostics: "owned", integrationTargets: "quiet", chooseCodexHome: "work", codexRestartAvailability: "quiet", restartCodex: "work", onCodexRestartRequired: "quiet",
-  openIntegrationTarget: "work", checkTargetCapabilities: "work", snapshot: "quiet", setLanguage: "work", openSocial: "work", completeOnboarding: "work", openExternal: "work",
+  openIntegrationTarget: "work", checkTargetCapabilities: "work", snapshot: "quiet", setLanguage: "work", openSocial: "work", completeOnboarding: "work", openExternal: "work", openGoldenViewer: "work",
   setBrowserBounds: "quiet", setBrowserSurfaceActive: "quiet", showBrowser: "quiet", hideBrowser: "quiet", navigateBrowser: "quiet", zoomBrowser: "quiet", selectBrowserTab: "quiet", closeBrowserTab: "quiet",
   copyManualPrompt: "work", confirmManualSent: "work", openLogin: "work", openPasskeyLogin: "work", installOnePassword: "work", installBrowserExtension: "work", openBrowserExtension: "quiet", checkBrowserExtensionUpdates: "quiet", updateBrowserExtension: "work", continuePasskeyLogin: "work", logoutChatGpt: "work", dismissSessionReminder: "quiet",
   smokeTest: "work", verifyMcp: "work", doctor: "work", decideConfiguration: "quiet", onConfigurationPreview: "quiet", previewIntegrationRepair: "work", applyIntegrationRepair: "work",
@@ -23,7 +23,7 @@ const operationMethods: Record<string, string> = { "core-setup": "setupCore", "m
 const ipcMethods: Record<string, string> = {
   "setup-core": "setupCore", "setup-mcp": "setupMcp", "repair-preview": "previewIntegrationRepair", "repair-apply": "applyIntegrationRepair", "mcp-verify": "verifyMcp",
   "codex-home-folder": "chooseCodexHome", "codex-restart-execute": "restartCodex", "target-open": "openIntegrationTarget", "target-check": "checkTargetCapabilities",
-  "set-language": "setLanguage", "open-social": "openSocial", "complete-onboarding": "completeOnboarding", "open-external": "openExternal",
+  "set-language": "setLanguage", "open-social": "openSocial", "complete-onboarding": "completeOnboarding", "open-external": "openExternal", "golden-viewer-open": "openGoldenViewer",
   "manual-prompt-copy": "copyManualPrompt", "manual-prompt-sent": "confirmManualSent", "browser-login": "openLogin", "browser-passkey-login": "openPasskeyLogin", "browser-install-onepassword": "installOnePassword", "browser-extension-install": "installBrowserExtension", "browser-extension-update": "updateBrowserExtension", "browser-passkey-login-continue": "continuePasskeyLogin", "browser-logout": "logoutChatGpt",
   "browser-tab-close": "closeBrowserTab",
   "cancel-turns": "cancelTurns", "uninstall-integration": "uninstallIntegration", autostart: "setAutostart", "set-preference": "setPreference", "export-logs": "exportLogs", "update-install": "installUpdate",
@@ -75,6 +75,7 @@ export function withActionFeedback(api: LauncherBridgeApi): LauncherApi {
       evidence: value => completionEvidence(property, value),
       classify: value => {
         if (property === "chooseCodexHome" || property === "exportLogs") return value === null ? "cancelled" : "succeeded";
+        if (property === "openGoldenViewer") return value?.opened === false ? "cancelled" : "succeeded";
         if (value === false) return "failed";
         if (property === "openIntegrationTarget" || property === "installUpdate") return "accepted";
         if (property === "restartCodex") return value?.status === "launched" ? "accepted" : "failed";

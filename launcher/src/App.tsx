@@ -1886,6 +1886,11 @@ function SettingsSurface({
     <ContentSurface narrow title={devProfile ? copy.devSettingsTitle : copy.settingsTitle}>
       <SectionHeading label={copy.general} />
       <div className="settings-list">
+        {devProfile ? <SettingRow body={copy.devHiddenDesktopBody} label={copy.devHiddenDesktop}>
+          <SecondaryButton icon="external" onClick={() => void api!.openGoldenViewer().catch(cause => setError(messageOf(cause)))}>
+            {copy.devOpenHiddenDesktop}
+          </SecondaryButton>
+        </SettingRow> : null}
         {!devProfile && snapshot.integrationTarget?.kind !== "profile" ? <SettingRow body={copy.launchAtLoginBody} flushAfter label={copy.launchAtLogin}>
           <Switch
             checked={snapshot.state.autoStart}

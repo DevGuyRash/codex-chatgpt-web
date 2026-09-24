@@ -144,6 +144,7 @@ export interface LauncherApi {
   openSocial(target: "github" | "x"): Promise<LauncherState>;
   completeOnboarding(language: Language, browserInteractionMode: BrowserInteractionMode): Promise<LauncherState>;
   openExternal(url: string): Promise<boolean>;
+  openGoldenViewer(): Promise<{ opened: boolean; display?: string }>;
   setBrowserBounds(bounds: { x: number; y: number; width: number; height: number }): Promise<boolean>;
   setBrowserSurfaceActive(active: boolean): Promise<BrowserState>;
   showBrowser(): Promise<BrowserState>;

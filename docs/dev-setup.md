@@ -2,6 +2,8 @@
 
 This guide runs the current checkout in an isolated **Codex Web GPT DEV** profile. The normal and DEV launchers can be open together. They may use the same reviewed launcher executable, but `--dev-profile` selects a separate home, Electron `userData`, persistent browser partition, ChatGPT login, diagnostics, tunnel profile, and chat history. DEV does not install a Codex route, start a Responses listener, or change the normal `~/.codex/config.toml`. There is no setting to enable DEV inside the normal launcher and no requirement to replace the normal installation. A second installer is not needed for two profiles; the existing installers use one product identity and may replace an installed binary when updating it. Keep a different development build at a separate executable path when both binary versions must coexist.
 
+The DEV launcher's Settings has **Open hidden desktop** for an active isolated golden workspace. It opens the private browser viewer after checking ownership; choose the workspace folder when prompted. From the checkout, `just golden-viewer-open /path/to/workspace` opens it directly, and `just golden-viewer-url /path/to/workspace` prints the private URL for a browser on the same machine. A hidden workspace is a separate Linux display, distinct from the normal DEV profile, and its launcher is visible inside noVNC after connecting. Do not share the private viewer URL or record authentication screens.
+
 ## Build and launch
 
 Use Bun 1.4.0 and install the repository's locked dependencies:

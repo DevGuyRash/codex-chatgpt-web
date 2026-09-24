@@ -1,12 +1,13 @@
 const path = require("node:path");
 const { randomUUID } = require("node:crypto");
 const { existsSync, readFileSync, readdirSync } = require("node:fs");
-const { BrowserWindow } = require("electron");
+const { app, BrowserWindow, nativeImage } = require("electron");
 const { ElectronChromeExtensions } = require("electron-chrome-extensions");
 const { downloadExtension } = require("electron-chrome-web-store");
 const { BROWSER_EXTENSION_CATALOG, REVIEWED_EXTENSION_PERMISSIONS } = require("./browser-extension-catalog.cjs");
 const { createNativeHostLifecycle } = require("./native-host-lifecycle.cjs");
 const { placeWindowNearLauncher } = require("./window-placement.cjs");
+const { launcherWindowIcon } = require("./desktop-identity.cjs");
 
 const ONE_PASSWORD_EXTENSION_ID = "aeblfdkhhhdcdjpifhhbdiojplfjncoa";
 const CATALOG_BY_ID = new Map(BROWSER_EXTENSION_CATALOG.map(provider => [provider.id, provider]));
@@ -103,7 +104,8 @@ class BrowserExtensions {
     const destination = url ? this.extensionPageUrl(url) : null;
     const window = new BrowserWindow({
       width: 920, height: 720, minWidth: 520, minHeight: 420,
-      show: false, skipTaskbar: false, title: destination?.startsWith("chrome-extension:")
+      show: false, skipTaskbar: false, icon: launcherWindowIcon(nativeImage, app?.isPackaged === true),
+      title: destination?.startsWith("chrome-extension:")
         ? CATALOG_BY_ID.get(new URL(destination).hostname)?.name || "Browser extension"
         : "Browser extension", autoHideMenuBar: true,
       webPreferences: { session: this.browserSession, sandbox: true, contextIsolation: true, nodeIntegration: false },

@@ -7,6 +7,7 @@
   "author": "miuuyy",
   "type": "module",
   "main": "electron/main.cjs",
+  "desktopName": "codex-web-gpt.desktop",
   "scripts": {
     "dev": "bun run scripts/dev.cjs",
     "audit": "bun audit",
@@ -53,6 +54,7 @@
     "artifactName": "codex-web-gpt-${version}-${os}-${arch}.${ext}",
     "asar": true,
     "asarUnpack": [
+      "assets/icon.png",
       "assets/linux-appimage-runner.sh"
     ],
     "directories": {
@@ -88,6 +90,7 @@
     },
     "linux": {
       "category": "Development",
+      "syncDesktopName": true,
       "icon": "assets/icon.png",
       "target": ["AppImage"]
     },

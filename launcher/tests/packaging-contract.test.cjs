@@ -24,6 +24,7 @@ test("the full verification gate audits launcher dependencies", () => {
 
 test("launcher publishes native packages for all supported desktop operating systems", () => {
   assert.equal(manifest.build.appId, "dev.codexwebgpt.launcher");
+  assert.equal(manifest.desktopName, "codex-web-gpt.desktop");
   assert.equal(manifest.build.artifactName, "codex-web-gpt-${version}-${os}-${arch}.${ext}");
   assert.deepEqual(manifest.build.mac.target, ["dmg", "zip"]);
   assert.deepEqual(
@@ -33,9 +34,11 @@ test("launcher publishes native packages for all supported desktop operating sys
   assert.deepEqual(manifest.build.win.target, ["nsis"]);
   assert.equal(manifest.build.win.icon, "assets/icon.ico");
   assert.deepEqual(manifest.build.linux.target, ["AppImage"]);
+  assert.equal(manifest.build.linux.syncDesktopName, true);
   assert.ok(manifest.build.files.includes("assets/icon.png"));
   assert.ok(manifest.build.files.includes("assets/linux-appimage-runner.sh"));
   assert.ok(manifest.build.asarUnpack.includes("assets/linux-appimage-runner.sh"));
+  assert.ok(manifest.build.asarUnpack.includes("assets/icon.png"));
   assert.equal(manifest.build.afterPack, undefined);
   assert.ok(fs.existsSync(path.join(launcherRoot, "assets", "icon.ico")));
   assert.equal(manifest.build.nsis.oneClick, false);

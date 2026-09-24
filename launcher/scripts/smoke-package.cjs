@@ -107,18 +107,32 @@ try {
   }
 
   if (!fs.existsSync(executable)) throw new Error(`Packaged launcher executable is missing: ${executable}`);
+  const assertMarker = (file, profile, desktopName) => {
+    if (!fs.existsSync(file)) throw new Error(`Packaged ${profile} launcher did not write its readiness marker`);
+    const marker = JSON.parse(fs.readFileSync(file, "utf8"));
+    if (marker.ok !== true
+      || marker.packaged !== true
+      || marker.profile !== profile
+      || marker.runtimeVerified !== true
+      || marker.nativeRuntimeVerified !== true
+      || marker.iconVerified !== true
+      || marker.desktopName !== (process.platform === "linux" ? desktopName : null)
+      || marker.diagnosticsVerified !== true
+      || marker.version !== expectedVersion
+      || marker.platform !== process.platform) {
+      throw new Error(`Unexpected packaged ${profile} launcher marker: ${JSON.stringify(marker)}`);
+    }
+  };
   run(command, args, { env });
-  if (!fs.existsSync(markerPath)) throw new Error("Packaged launcher did not write its readiness marker");
-  const marker = JSON.parse(fs.readFileSync(markerPath, "utf8"));
-  if (marker.ok !== true
-    || marker.packaged !== true
-    || marker.runtimeVerified !== true
-    || marker.nativeRuntimeVerified !== true
-    || marker.diagnosticsVerified !== true
-    || marker.version !== expectedVersion
-    || marker.platform !== process.platform) {
-    throw new Error(`Unexpected packaged launcher marker: ${JSON.stringify(marker)}`);
-  }
+  assertMarker(markerPath, "production", "codex-web-gpt.desktop");
+  const devHome = path.join(scratch, "dev-home");
+  const devMarkerPath = path.join(scratch, "dev-ready.json");
+  const smokeArgument = args.indexOf("--launcher-smoke-test");
+  if (smokeArgument < 0) throw new Error("The packaged smoke command has no launcher marker boundary");
+  const devArgs = [...args];
+  devArgs.splice(smokeArgument, 0, "--dev-profile");
+  run(command, devArgs, { env: { ...env, CODEX_WEB_GPT_DEV_HOME: devHome, CODEX_WEB_GPT_SMOKE_FILE: devMarkerPath } });
+  assertMarker(devMarkerPath, "development", "codex-web-gpt-dev.desktop");
   const installedRuntime = path.join(
     coreHome,
     "versions",

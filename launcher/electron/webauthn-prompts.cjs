@@ -1,10 +1,11 @@
 const path = require("node:path");
 const { pathToFileURL } = require("node:url");
-const { BrowserWindow, ipcMain, webContents } = require("electron");
+const { app, BrowserWindow, ipcMain, nativeImage, webContents } = require("electron");
 const QRCode = require("qrcode");
 const { DiagnosticError } = require("./logging.cjs");
 const { probeBluetoothLe } = require("./bluetooth-le.cjs");
 const { placeWindowNearLauncher } = require("./window-placement.cjs");
+const { launcherWindowIcon } = require("./desktop-identity.cjs");
 const { BrowserAuthenticationPromptStateSchema, BrowserAuthenticationReplySchema } = require("./generated/webauthn-contract.cjs");
 
 const PROMPT_FILE = path.join(__dirname, "webauthn-prompt.html");
@@ -306,7 +307,8 @@ class WebAuthnPrompts {
       this.window = new BrowserWindow({
         show: false, alwaysOnTop: true, skipTaskbar: false,
         width: 420, height: 500, minWidth: 360, minHeight: 390,
-        title: "Passkey authentication", autoHideMenuBar: true, backgroundColor: "#181818",
+        title: "Passkey authentication", icon: launcherWindowIcon(nativeImage, app?.isPackaged === true),
+        autoHideMenuBar: true, backgroundColor: "#181818",
         webPreferences: {
           preload: path.join(__dirname, "generated", "webauthn-preload.cjs"),
           contextIsolation: true, nodeIntegration: false, sandbox: true,

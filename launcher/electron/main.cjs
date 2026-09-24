@@ -50,6 +50,7 @@ const { resolveIntegrationTarget } = require("./integration-target.cjs");
 const { runtimeBundlePaths } = require("./runtime-command.cjs");
 const { createUpdateController } = require("./update.cjs");
 const { activeGoldenViewer } = require("./golden-viewer.cjs");
+const { launcherIconPath, launcherWindowIcon, desktopNameForProfile } = require("./desktop-identity.cjs");
 const {
   createStateStore,
   nextSessionRefreshReminderAt,
@@ -83,13 +84,14 @@ const KEYS_URL = "https://platform.openai.com/settings/organization/api-keys";
 const ALLOWED_EXTERNAL_URLS = new Set([GITHUB_URL, X_URL, CONNECTORS_URL, TUNNELS_URL, KEYS_URL,
   ...BROWSER_EXTENSION_CATALOG.map(provider => provider.storeUrl)]);
 const PACKAGED_RENDERER_URL = pathToFileURL(path.join(__dirname, "..", "dist", "index.html")).href;
-const APP_ICON_PATH = path.join(__dirname, "..", "assets", "icon.png");
+const APP_ICON_PATH = launcherIconPath(app.isPackaged);
 
 process.env.CODEX_CHATGPT_WEB_HOME = CORE_HOME;
 process.env.CODEX_HOME = LAUNCHER_PROFILE.codexHome;
 if (IS_DEV_PROFILE) process.env.CODEX_WEB_GPT_DEV_PROFILE = "1";
 else delete process.env.CODEX_WEB_GPT_DEV_PROFILE;
 app.setName(LAUNCHER_PROFILE.displayName);
+if (process.platform === "linux") app.setDesktopName(desktopNameForProfile(IS_DEV_PROFILE));
 if (process.platform === "win32") {
   app.setAppUserModelId(IS_DEV_PROFILE ? "dev.codexwebgpt.launcher.dev" : "dev.codexwebgpt.launcher");
 }
@@ -415,7 +417,7 @@ function createWindow({ logger, stateStore, windowStatePath, startHidden }) {
     minWidth: MIN_WINDOW_BOUNDS.width,
     minHeight: MIN_WINDOW_BOUNDS.height,
     title: LAUNCHER_PROFILE.displayName,
-    icon: APP_ICON_PATH,
+    icon: launcherWindowIcon(nativeImage, app.isPackaged),
     show: false,
     backgroundColor: isMac ? "#00000000" : "#181818",
     titleBarStyle: isMac ? "hiddenInset" : "hidden",
@@ -1430,9 +1432,12 @@ async function start() {
       version: app.getVersion(),
       platform: process.platform,
       packaged: app.isPackaged,
+      profile: IS_DEV_PROFILE ? "development" : "production",
       nativeRuntimeVerified: nativeRuntimeIdentity?.patched === true,
       runtimeVerified: true,
       diagnosticsVerified: true,
+      iconVerified: !launcherWindowIcon(nativeImage, app.isPackaged).isEmpty(),
+      desktopName: process.platform === "linux" ? process.env.CHROME_DESKTOP : null,
     })}\n`);
     webAuthnPrompts.destroy();
     browserHost.destroy();

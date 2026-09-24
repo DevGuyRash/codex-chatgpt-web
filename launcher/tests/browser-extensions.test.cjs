@@ -34,7 +34,7 @@ function extensionFixture({ failLoad = false } = {}) {
   }
   const browserSession = { getPreloadScripts: () => [], registerPreloadScript() {} };
   const fixtureRequire = name => {
-      if (name === "electron") return { BrowserWindow };
+      if (name === "electron") return { BrowserWindow, nativeImage: { createFromPath: () => ({ isEmpty: () => false, resize: () => ({ isEmpty: () => false }) }) } };
       if (name === "electron-chrome-extensions") return { ElectronChromeExtensions: Adapter };
       if (name === "electron-chrome-web-store") return { downloadExtension() {} };
       if (name === "./window-placement.cjs") return { placeWindowNearLauncher() {} };

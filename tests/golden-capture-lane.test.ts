@@ -29,6 +29,23 @@ test("a repeated native frame cannot earn time by changing only its receipt time
   expect(result.creditedMs).toBe(0);
 });
 
+test("renumbered native deltas cannot earn or bridge productive time", async () => {
+  let count = 0;
+  const lane = new GoldenCaptureLane(async () => receipt(++count));
+  const frame = (at: number, itemId: string, delta: string) => JSON.stringify({
+    direction: "received", receivedAtMs: at,
+    message: { method: "item/agentMessage/delta", params: { threadId: "owned-task", turnId: "owned-turn", itemId, delta } },
+  });
+  await lane.record("transport", frame(1000, "first", "same"), "generation", 1000);
+  await lane.record("transport", frame(2000, "renumbered", "same"), "generation", 2000);
+  await lane.record("transport", frame(3000, "next", "new"), "generation", 3000);
+  await lane.record("transport", frame(3500, "another", "more"), "generation", 3500);
+  const result = await lane.finishBatch(true);
+  expect(result.observedMs).toBe(500);
+  expect(result.creditedMs).toBe(500);
+  expect(result.segments).toHaveLength(1);
+});
+
 test("prompt capture fences submission and a saturated native backlog fails closed", async () => {
   let release!: () => void;
   const held = new Promise<void>(resolve => { release = resolve; });

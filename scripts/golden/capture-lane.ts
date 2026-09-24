@@ -6,13 +6,30 @@ const MAX_PENDING_RECORDS = 128;
 const MAX_PENDING_BYTES = 16 * 1024 * 1024;
 const MAX_UNIQUE_PROGRESS_PAYLOADS = 8192;
 const observedNow = () => performance.timeOrigin + performance.now();
+const NATIVE_DELTA_METHODS = new Set([
+  "item/reasoning/summaryTextDelta", "item/agentMessage/delta",
+  "item/plan/delta", "item/commandExecution/outputDelta",
+]);
 function progressPayload(text: string): string {
   try {
     const value: unknown = JSON.parse(text);
-    if (value && typeof value === "object" && !Array.isArray(value)
-      && "receivedAtMs" in value) {
-      const { receivedAtMs: _receipt, ...content } = value;
-      return JSON.stringify(content);
+    if (value && typeof value === "object" && !Array.isArray(value)) {
+      const frame = value as Record<string, unknown>;
+      const message = frame.message;
+      if (frame.direction === "received" && message && typeof message === "object" && !Array.isArray(message)) {
+        const native = message as Record<string, unknown>;
+        const params = native.params;
+        if (NATIVE_DELTA_METHODS.has(String(native.method)) && params && typeof params === "object" && !Array.isArray(params)) {
+          const content = params as Record<string, unknown>;
+          if (typeof content.threadId === "string" && typeof content.turnId === "string" && typeof content.delta === "string") {
+            return JSON.stringify({ method: native.method, threadId: content.threadId, turnId: content.turnId, delta: content.delta });
+          }
+        }
+      }
+      if ("receivedAtMs" in frame) {
+        const { receivedAtMs: _receipt, ...content } = frame;
+        return JSON.stringify(content);
+      }
     }
   } catch { /* A native text fragment is still an exact payload identity. */ }
   return text;
@@ -54,6 +71,9 @@ export class GoldenCaptureLane {
           }
           this.seenPayloads.add(payload);
           this.progress.observe(receivedAtMs, phase, receipt);
+        } else {
+          // A duplicate is not productive activity and cannot bridge a later gap.
+          this.progress.pause(receivedAtMs);
         }
       }
     }).catch(error => {

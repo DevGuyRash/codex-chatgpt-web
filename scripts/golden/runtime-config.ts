@@ -23,6 +23,8 @@ export function prepareGoldenRuntimeConfig(input: {
   const root = realpathSync(workspace.root), runtimeHome = realpathSync(workspace.runtimeHome);
   if (root !== workspace.root || runtimeHome !== workspace.runtimeHome || !containsPath(root, runtimeHome) || root === runtimeHome
     || resolve(getConfigDir()) !== runtimeHome) throw new Error("Golden runtime requires its own canonical home in this process");
+  const brokerSocketPath = join(root, "broker.sock");
+  if (Buffer.byteLength(brokerSocketPath) > 103 || (statSync(root).mode & 0o077) !== 0) throw new Error("Golden broker requires a short, private workspace socket path");
   if (process.env.CODEX_WEB_GPT_CAPTURE_CAMPAIGN_ID !== workspace.campaignId || !/^[a-f\d]{8}(?:-[a-f\d]{4}){3}-[a-f\d]{12}$/i.test(workspace.campaignId)) throw new Error("Golden runtime requires its exact active campaign identity");
   if (input.protocol !== "native" && input.protocol !== "compatibility-v1") throw new Error("Unknown golden protocol");
   for (const path of [workspace.descriptorPath, input.tunnelBinary, input.runtimeKeyFile]) {
@@ -37,6 +39,7 @@ export function prepareGoldenRuntimeConfig(input: {
   return {
     ...defaultConfig("full", runtimeHome), ...input.capabilities,
     subagentProtocol: input.protocol, port: 0,
+    brokerSocketPath,
     appName: connectorName, automaticAppName: connectorName,
     browserHost: "launcher", browserHostDescriptorPath: workspace.descriptorPath,
     runtimeCommand: [...runtimeCommand, "--home", runtimeHome],

@@ -35,7 +35,8 @@ test("full golden configuration and lifecycle retain isolated MCP authority and 
     saveConfig(config);
     const loaded = loadConfig(runtimeHome);
     expect(loaded).toMatchObject({ mode: "full", subagentProtocol: "native", appName: input.connectorName, browserHost: "launcher", port: 18765, zeroRiskProEnabled: false });
-    expect(loaded.brokerSocketPath.startsWith(runtimeHome)).toBe(true);
+    expect(loaded.brokerSocketPath).toBe(join(root, "broker.sock"));
+    expect(Buffer.byteLength(loaded.brokerSocketPath)).toBeLessThanOrEqual(103);
     expect(loaded.tunnel?.profileDir.startsWith(runtimeHome)).toBe(true);
     expect(loaded.tunnel?.alias).toMatch(/^golden-/);
     expect(mcpCommand(loaded)).toContain(`--home ${runtimeHome}`);

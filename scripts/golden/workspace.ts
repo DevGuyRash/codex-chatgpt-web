@@ -71,6 +71,7 @@ export async function startGoldenWorkspace(rootInput: string, toolsInput = join(
   if (process.platform !== "linux") throw new Error("Hidden headed workspace is supported only on Linux; native platform acceptance remains separate");
   const reviewedElectron = reviewedElectronBinary();
   const root = resolve(rootInput), tools = resolve(toolsInput), statePath = join(root, "workspace.json");
+  if (Buffer.byteLength(join(root, "broker.sock")) > 103) throw new Error("Choose a shorter workspace path for the private broker socket");
   mkdirSync(root, { recursive: true, mode: 0o700 });
   if (existsSync(statePath)) {
     const prior = JSON.parse(readFileSync(statePath, "utf8")) as GoldenWorkspace;

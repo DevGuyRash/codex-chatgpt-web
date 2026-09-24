@@ -10,6 +10,20 @@ import { runTuiScenario } from "./tui-scenarios";
 type ObjectValue = Record<string, unknown>;
 const object = (value: unknown): value is ObjectValue => value !== null && typeof value === "object" && !Array.isArray(value);
 export interface NativeScenarioCheckpoint { native: OwnedProcess; threadId?: string; turnId?: string }
+export function ownedNativeActivity(frame: { direction: string; message: ObjectValue }, owner: { threadId?: string; turnId?: string }) {
+  const params = object(frame.message.params) ? frame.message.params : undefined;
+  const item = params && object(params.item) ? params.item : undefined;
+  const method = frame.direction === "received" ? frame.message.method : undefined;
+  const owned = typeof params?.threadId === "string" && params.threadId === owner.threadId
+    && typeof params?.turnId === "string" && params.turnId === owner.turnId;
+  const tool = Boolean(owned && method === "item/completed" && item
+    && ["commandExecution", "fileChange", "mcpToolCall"].includes(String(item.type)));
+  const phase: ProgressPhase | undefined = !owned ? undefined
+    : tool || method === "item/commandExecution/outputDelta" && typeof params?.delta === "string" && params.delta.length > 0 ? "tools"
+    : method === "item/reasoning/summaryTextDelta" && typeof params?.delta === "string" && params.delta.length > 0 ? "reasoning"
+    : ["item/agentMessage/delta", "item/plan/delta"].includes(String(method)) && typeof params?.delta === "string" && params.delta.length > 0 ? "generation" : undefined;
+  return { tool, phase };
+}
 export const finiteNativeScenarios = {
   fresh: 1, formats: 1, continued: 2, resumed: 2, "archived-history": 2, "model-switch": 2, "plan-revise-execute": 3, "plan-stream-interrupt": 2, "plan-tui-execute": 2,
   "steer-reasoning": 2, "steer-generation": 2, "steer-tools": 2,
@@ -94,15 +108,10 @@ export async function runNativeScenario(options: {
     const terminal = await execute(preparation ? prompts.continue : options.workload.prompt, resumeId);
     return { ...terminal, variant: options.variant, toolItems, ...(preparation ? { preparation } : {}), ...(archive ? { archive } : {}) };
   }
-  const app = new GoldenAppServer({ ...options, artifactRepository: options.cwd, onFrame: async frame => {
-    const params = object(frame.message.params) ? frame.message.params : undefined;
-    const item = params && object(params.item) ? params.item : undefined;
-    const method = frame.direction === "received" ? frame.message.method : undefined;
-    const tool = method === "item/completed" && item && ["commandExecution", "fileChange", "mcpToolCall"].includes(String(item.type));
+  let app!: GoldenAppServer;
+  app = new GoldenAppServer({ ...options, artifactRepository: options.cwd, onFrame: async frame => {
+    const { tool, phase } = ownedNativeActivity(frame, app?.state() ?? {});
     if (tool) toolItems++;
-    const phase: ProgressPhase | undefined = tool || method === "item/commandExecution/outputDelta" && typeof params?.delta === "string" && params.delta.length > 0 ? "tools"
-      : method === "item/reasoning/summaryTextDelta" && typeof params?.delta === "string" && params.delta.length > 0 ? "reasoning"
-      : ["item/agentMessage/delta", "item/plan/delta"].includes(String(method)) && typeof params?.delta === "string" && params.delta.length > 0 ? "generation" : undefined;
     await options.onRecord("transport", JSON.stringify(frame), phase, frame.receivedAtMs);
   }, onStderr: text => options.onRecord("transport", text).then(() => {}) });
   let failure: unknown;

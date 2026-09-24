@@ -3,7 +3,7 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "nod
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { randomUUID } from "node:crypto";
-import { runNativeScenario } from "../scripts/golden/native-scenarios";
+import { ownedNativeActivity, runNativeScenario } from "../scripts/golden/native-scenarios";
 import { createWorkload } from "../scripts/golden/workloads";
 import { CHATGPT_WEB_MODEL_ROUTES } from "../src/chatgpt-web-models";
 import { GoldenAppServer, initializeGoldenNativeHome } from "../scripts/golden/app-server";
@@ -17,6 +17,17 @@ import { retainLiveProviderAdmission } from "../scripts/golden/live-batch";
 import { ownsProcess, type OwnedProcess } from "../scripts/golden/workspace";
 import { goldenNativeEnvironment } from "../scripts/golden/runtime-config";
 import { bridgeToResponsesSSE } from "../src/bridge";
+
+test("native progress and tool credit require the exact owned task and turn", () => {
+  const owner = { threadId: "owned-thread", turnId: "owned-turn" };
+  const frame = (threadId: string, turnId: string, method: string, extra: Record<string, unknown> = {}) => ({
+    direction: "received", message: { method, params: { threadId, turnId, ...extra } },
+  });
+  expect(ownedNativeActivity(frame("owned-thread", "owned-turn", "item/completed", { item: { type: "mcpToolCall" } }), owner)).toEqual({ tool: true, phase: "tools" });
+  expect(ownedNativeActivity(frame("foreign-thread", "owned-turn", "item/completed", { item: { type: "mcpToolCall" } }), owner)).toEqual({ tool: false, phase: undefined });
+  expect(ownedNativeActivity(frame("owned-thread", "foreign-turn", "item/reasoning/summaryTextDelta", { delta: "progress" }), owner)).toEqual({ tool: false, phase: undefined });
+  expect(ownedNativeActivity({ ...frame("owned-thread", "owned-turn", "item/completed", { item: { type: "mcpToolCall" } }), direction: "sent" }, owner)).toEqual({ tool: false, phase: undefined });
+});
 
 for (const outcome of ["completed", "failed", "missing"] as const) for (const variant of outcome === "completed" ? ["resumed"] : ["resumed", "archived-history"]) test(`${variant} scenario requires settled preparation before reopening its exact task: ${outcome}`, async () => {
   const root = mkdtempSync(join(tmpdir(), "golden-resume-scenario-")), peer = join(root, "peer"), log = join(root, "launches.jsonl");

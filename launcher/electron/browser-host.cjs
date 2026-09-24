@@ -435,6 +435,9 @@ class BrowserHost {
       this.resumeListener = null;
     }
     this.boundsReady = false;
+    this.primaryRendererReady = false;
+    this.primaryDeviceEmulationViewport = null;
+    this.primaryDeviceEmulationDirty = true;
     this.homeRendererRecoveryAttempted = false;
     this.bounds = { x: 0, y: 0, width: 1, height: 1 };
     this.state = {
@@ -1056,6 +1059,7 @@ class BrowserHost {
         this.setState({ url });
         return;
       }
+      this.primaryDeviceEmulationDirty = true;
       this.armHomeNavigationTimeout(contents, url);
       if (this.manualOperation === "ChatGPT login") {
         this.logger.info("browser.auth_navigation_started", {
@@ -1069,6 +1073,8 @@ class BrowserHost {
     });
     contents.on("did-finish-load", () => {
       this.clearHomeNavigationTimeout();
+      this.primaryRendererReady = true;
+      this.syncViewVisibility();
       if (this.manualOperation === "ChatGPT login") {
         this.logger.info("browser.auth_navigation_completed", {
           surface: "primary",
@@ -1133,6 +1139,9 @@ class BrowserHost {
     });
     contents.on("render-process-gone", (_event, details) => {
       this.clearHomeNavigationTimeout();
+      this.primaryRendererReady = false;
+      this.primaryDeviceEmulationViewport = null;
+      this.primaryDeviceEmulationDirty = true;
       this.logger.error("browser.renderer_gone", { reason: details.reason, exitCode: details.exitCode });
       this.setState({ status: "error", message: `Browser renderer stopped: ${details.reason}`, loading: false });
       if (details.reason !== "crashed" || this.homeRendererRecoveryAttempted || contents.isDestroyed()) return;
@@ -1240,6 +1249,10 @@ class BrowserHost {
       await this.view.webContents.loadURL(TEMPORARY_CHAT_URL);
     }
     await this.waitForAuthenticated(60_000);
+    // A full ChatGPT reload can discard Chromium's hidden-view emulation after did-finish-load.
+    // Reassert the bounded viewport before the helper opens the model or connector controls.
+    this.primaryDeviceEmulationDirty = true;
+    this.syncViewVisibility();
   }
 
   bindChatGptBackendRecovery() {
@@ -1557,7 +1570,26 @@ class BrowserHost {
     // the native View can make Windows drop it from the remote-debugging target set, leaving a
     // live descriptor whose ownership id cannot be leased. Keep the View attached and drawable
     // offscreen; only its placement, never its ownership lifetime, follows the launcher UI.
-    this.view.setBounds(visible ? this.bounds : this.hiddenTurnBounds());
+    if (visible) {
+      this.view.setBounds(this.bounds);
+      if (this.primaryRendererReady && this.primaryDeviceEmulationViewport) {
+        this.view.webContents.disableDeviceEmulation();
+        this.primaryDeviceEmulationViewport = null;
+      }
+      if (this.primaryRendererReady) this.primaryDeviceEmulationDirty = false;
+    } else {
+      const bounds = this.hiddenTurnBounds();
+      // Session inspection still uses this home view when the launcher shell is hidden.
+      if (this.primaryRendererReady
+        && (this.primaryDeviceEmulationDirty
+          || this.primaryDeviceEmulationViewport?.width !== bounds.width
+          || this.primaryDeviceEmulationViewport?.height !== bounds.height)) {
+        this.enableHiddenTurnViewport(this.view.webContents, bounds);
+        this.primaryDeviceEmulationViewport = { width: bounds.width, height: bounds.height };
+        this.primaryDeviceEmulationDirty = false;
+      }
+      this.view.setBounds(bounds);
+    }
     this.view.setVisible(true);
   }
 
@@ -3019,6 +3051,10 @@ class BrowserHost {
   }
 
   destroy() {
+    if (this.primaryDeviceEmulationViewport && !this.view.webContents.isDestroyed()) {
+      try { this.view.webContents.disableDeviceEmulation(); } catch {}
+      this.primaryDeviceEmulationViewport = null;
+    }
     try {
       const current = JSON.parse(fs.readFileSync(this.descriptorPath, "utf8"));
       if (current.pid === process.pid) fs.rmSync(this.descriptorPath, { force: true });

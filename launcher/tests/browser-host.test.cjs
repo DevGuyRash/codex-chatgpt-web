@@ -510,6 +510,22 @@ test("session inspection fails closed on incomplete shared-helper capability evi
   );
 });
 
+test("home reload reapplies its hidden viewport before capability inspection", async () => {
+  const calls = [];
+  const fixture = {
+    primaryDeviceEmulationDirty: false,
+    view: { webContents: { getURL: () => TEMPORARY_CHAT_URL } },
+    hardRefreshHome: async () => calls.push("reload"),
+    waitForAuthenticated: async () => calls.push("authenticated"),
+    syncViewVisibility() {
+      calls.push(["viewport", this.primaryDeviceEmulationDirty]);
+      this.primaryDeviceEmulationDirty = false;
+    },
+  };
+  await BrowserHost.prototype.refreshChatGptHomeDocument.call(fixture);
+  assert.deepEqual(calls, ["reload", "authenticated", ["viewport", true]]);
+});
+
 test("browser surface reactivation preserves its last measured bounds", () => {
   const visibility = [];
   const fixture = {
@@ -588,6 +604,40 @@ test("hidden turn tabs receive an explicit renderer viewport before moving offsc
   ]);
   assert.deepEqual(tab.deviceEmulationViewport, { width: 1120, height: 720 });
   assert.equal(tab.deviceEmulationDirty, false);
+});
+
+test("hidden home inspection keeps one renderer viewport and releases it when shown", () => {
+  const events = [];
+  const fixture = Object.assign(Object.create(BrowserHost.prototype), {
+    visible: false,
+    surfaceActive: false,
+    boundsReady: true,
+    bounds: { x: 280, y: 64, width: 840, height: 656 },
+    selectedTabId: "home",
+    turnTabs: new Map(),
+    authView: null,
+    primaryRendererReady: true,
+    primaryDeviceEmulationViewport: null,
+    primaryDeviceEmulationDirty: true,
+    window: { getContentSize: () => [1120, 720], isMinimized: () => false, isVisible: () => true },
+    view: {
+      setBounds: bounds => events.push(["bounds", bounds]),
+      setVisible: visible => events.push(["visible", visible]),
+      webContents: {
+        enableDeviceEmulation: options => events.push(["emulate", options]),
+        disableDeviceEmulation: () => events.push(["disable"]),
+      },
+    },
+  });
+  BrowserHost.prototype.syncViewVisibility.call(fixture);
+  assert.deepEqual(fixture.primaryDeviceEmulationViewport, { width: 1120, height: 720 });
+  assert.equal(events.filter(([kind]) => kind === "emulate").length, 1);
+  fixture.visible = true;
+  fixture.surfaceActive = true;
+  BrowserHost.prototype.syncViewVisibility.call(fixture);
+  BrowserHost.prototype.syncViewVisibility.call(fixture);
+  assert.equal(fixture.primaryDeviceEmulationViewport, null);
+  assert.equal(events.filter(([kind]) => kind === "disable").length, 1);
 });
 
 test("turn tabs use the hidden viewport when the launcher window is hidden", () => {

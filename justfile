@@ -46,3 +46,11 @@ native-smoke:
 
 # Run local CI and then build and smoke-test this operating system's launcher package
 ci-native: ci native-package native-smoke
+
+# Print the private browser URL for an owned Linux golden workspace
+golden-viewer-url workspace:
+    {{ quote(bun) }} scripts/golden/viewer.ts url {{ quote(workspace) }}
+
+# Open an owned Linux golden workspace in the default browser
+golden-viewer-open workspace:
+    {{ quote(bun) }} scripts/golden/viewer.ts open {{ quote(workspace) }}

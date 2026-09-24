@@ -2,7 +2,7 @@ import { spawn, type ChildProcess } from "node:child_process";
 import { randomBytes, randomUUID } from "node:crypto";
 import { closeSync, cpSync, existsSync, mkdirSync, openSync, readFileSync, realpathSync, statfsSync, writeFileSync } from "node:fs";
 import { createServer } from "node:net";
-import { join, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { setTimeout as wait } from "node:timers/promises";
 import { createRequire } from "node:module";
 import { DiagnosticStore } from "../../src/diagnostics/store";
@@ -12,13 +12,14 @@ import { readLauncherBrowserHostDescriptor, readLauncherBrowserHostDescriptorFil
 const require = createRequire(import.meta.url);
 const repository = resolve(import.meta.dir, "../..");
 const { reviewedElectronBinary } = require(resolve(repository, "launcher/scripts/native-electron.cjs")) as {
-  reviewedElectronBinary(): { executable: string; recordPath: string };
+  reviewedElectronBinary(selection?: { executable?: string; recordPath?: string }): { executable: string; recordPath: string };
 };
 export interface OwnedProcess { pid: number; start: string; group: number; executable: string }
 export interface GoldenWorkspace {
   version: 1; root: string; campaignId: string; display: string; viewerUrl: string;
   codexHome: string; runtimeHome: string; launcherData: string; descriptorPath: string;
   processes: Record<string, OwnedProcess>;
+  nativeRuntime?: { executable: string; recordPath: string };
   signInUrl?: string;
 }
 function identity(pid: number): OwnedProcess | undefined {
@@ -135,7 +136,7 @@ export async function startGoldenWorkspace(rootInput: string, toolsInput = join(
     const launcher = await start("launcher", reviewedElectron.executable, [join(repository, "launcher"), "--codex-home", codexHome, "--ozone-platform=x11"], { ...env, CODEX_WEB_GPT_CAPTURE_CAMPAIGN_ID: campaignId, CODEX_CHATGPT_WEB_HOME: runtimeHome, CODEX_WEB_GPT_LAUNCHER_DATA_DIR: launcherData, CODEX_WEB_GPT_ELECTRON_BUILD_RECORD: reviewedElectron.recordPath, CODEX_WEB_GPT_BUN: bun, CODEX_CHATGPT_WEB_BUN: bun });
     const descriptorPath = join(runtimeHome, "runtime/launcher-browser.json");
     await until(() => existsSync(descriptorPath), launcher);
-    const state: GoldenWorkspace = { version: 1, root, campaignId, display, viewerUrl, signInUrl, codexHome, runtimeHome, launcherData, descriptorPath, processes };
+    const state: GoldenWorkspace = { version: 1, root, campaignId, display, viewerUrl, signInUrl, codexHome, runtimeHome, launcherData, descriptorPath, processes, nativeRuntime: reviewedElectron };
     writeFileSync(statePath, JSON.stringify(state, null, 2), { mode: 0o600 });
     return state;
   } catch (error) {
@@ -152,6 +153,9 @@ export async function restartGoldenLauncher(rootInput: string): Promise<GoldenWo
   if (state.version !== 1 || state.root !== root || realpathSync(root) !== root || state.codexHome !== join(root, "codex") || state.runtimeHome !== join(root, "runtime") || state.launcherData !== join(root, "launcher") || state.descriptorPath !== join(root, "runtime/runtime/launcher-browser.json")) throw new Error("Isolated launcher paths do not match the workspace");
   const prior = state.processes.launcher;
   if (!prior || !state.processes.display || !owns(state.processes.display)) throw new Error("The isolated launcher record and live owned display are required before restart");
+  const selectedRuntime = state.nativeRuntime ?? { executable: prior.executable, recordPath: join(dirname(prior.executable), "codex-web-gpt-webauthn-build.json") };
+  if (selectedRuntime.executable !== prior.executable) throw new Error("The selected native runtime differs from the owned launcher executable");
+  const reviewedElectron = reviewedElectronBinary(selectedRuntime);
   const descriptor = existsSync(state.descriptorPath) ? readLauncherBrowserHostDescriptorFile(state.descriptorPath) : undefined;
   if (descriptor && descriptor.pid !== prior.pid) throw new Error("The browser descriptor belongs to another launcher");
   if (owns(prior)) {
@@ -162,14 +166,14 @@ export async function restartGoldenLauncher(rootInput: string): Promise<GoldenWo
   } else verifyStoppedGoldenLauncher(prior);
   const env: NodeJS.ProcessEnv = { ...process.env, DISPLAY: state.display, XAUTHORITY: join(root, "xauthority"), XDG_SESSION_TYPE: "x11" };
   for (const key of Object.keys(env)) if (/^(?:CODEX_|OPENAI_|CHATGPT_|ELECTRON_RUN_AS_NODE$|VITE_DEV_SERVER_URL$|WAYLAND_DISPLAY$)/.test(key)) delete env[key];
-  Object.assign(env, { CODEX_WEB_GPT_CAPTURE_CAMPAIGN_ID: state.campaignId, CODEX_CHATGPT_WEB_HOME: state.runtimeHome, CODEX_WEB_GPT_LAUNCHER_DATA_DIR: state.launcherData, CODEX_WEB_GPT_BUN: process.execPath, CODEX_CHATGPT_WEB_BUN: process.execPath });
-  const electron = require(resolve(repository, "launcher/node_modules/electron")) as string;
+  Object.assign(env, { CODEX_WEB_GPT_CAPTURE_CAMPAIGN_ID: state.campaignId, CODEX_CHATGPT_WEB_HOME: state.runtimeHome, CODEX_WEB_GPT_LAUNCHER_DATA_DIR: state.launcherData, CODEX_WEB_GPT_ELECTRON_BUILD_RECORD: reviewedElectron.recordPath, CODEX_WEB_GPT_BUN: process.execPath, CODEX_CHATGPT_WEB_BUN: process.execPath });
   const log = openSync(join(root, "logs/launcher.log"), "a", 0o600);
-  const child = spawn(electron, [join(repository, "launcher"), "--codex-home", state.codexHome, "--ozone-platform=x11"], { cwd: repository, env, detached: true, stdio: ["ignore", log, log] });
+  const child = spawn(reviewedElectron.executable, [join(repository, "launcher"), "--codex-home", state.codexHome, "--ozone-platform=x11"], { cwd: repository, env, detached: true, stdio: ["ignore", log, log] });
   closeSync(log);
   await new Promise<void>((resolve, reject) => { child.once("spawn", resolve); child.once("error", reject); });
   await until(() => Boolean(child.pid && identity(child.pid)), child);
   state.processes.launcher = identity(child.pid!)!;
+  state.nativeRuntime = reviewedElectron;
   writeFileSync(statePath, JSON.stringify(state, null, 2), { mode: 0o600 });
   child.unref();
   await until(() => { try { return readLauncherBrowserHostDescriptor(state.descriptorPath).pid === child.pid; } catch { return false; } }, child);

@@ -16,13 +16,13 @@ function fileSha256(file) {
   return hash.digest("hex");
 }
 
-function reviewedElectronBinary() {
-  const executable = process.env.CODEX_WEB_GPT_ELECTRON_EXECUTABLE;
+function reviewedElectronBinary(selection = {}) {
+  const executable = selection.executable || process.env.CODEX_WEB_GPT_ELECTRON_EXECUTABLE;
   if (!executable || !path.isAbsolute(executable)
     || !fs.statSync(executable, { throwIfNoEntry: false })?.isFile()) {
     throw new Error("Set CODEX_WEB_GPT_ELECTRON_EXECUTABLE to the compiled WebAuthn-enabled Electron binary");
   }
-  const recordPath = process.env.CODEX_WEB_GPT_ELECTRON_BUILD_RECORD
+  const recordPath = selection.recordPath || process.env.CODEX_WEB_GPT_ELECTRON_BUILD_RECORD
     || path.join(path.dirname(executable), "codex-web-gpt-webauthn-build.json");
   if (!path.isAbsolute(recordPath)
     || !fs.statSync(recordPath, { throwIfNoEntry: false })?.isFile()) {

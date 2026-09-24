@@ -23,7 +23,7 @@ index 84ad350..1105d47 100644
        .SetMethod("getCacheSize", &Session::GetCacheSize)
        .SetMethod("clearCache", &Session::ClearCache)
 diff --git a/shell/browser/webauthn/electron_authenticator_request_client_delegate.cc b/shell/browser/webauthn/electron_authenticator_request_client_delegate.cc
-index 90510c0..c7a74e3 100644
+index 90510c0..54908a6 100644
 --- a/shell/browser/webauthn/electron_authenticator_request_client_delegate.cc
 +++ b/shell/browser/webauthn/electron_authenticator_request_client_delegate.cc
 @@ -4,15 +4,25 @@
@@ -165,7 +165,7 @@ index 90510c0..c7a74e3 100644
    request_handler_observation_.Reset();
  }
  
-@@ -83,6 +185,380 @@ void ElectronAuthenticatorRequestClientDelegate::RegisterActionCallbacks(
+@@ -83,6 +185,396 @@ void ElectronAuthenticatorRequestClientDelegate::RegisterActionCallbacks(
          void(device::FidoRequestHandlerBase::BlePermissionCallback)>
          request_ble_permission_callback) {
    cancel_callback_ = std::move(cancel_callback);
@@ -451,6 +451,21 @@ index 90510c0..c7a74e3 100644
 +    device::FidoRequestType request_type,
 +    device::AuthenticatorType authenticator_type) {
 +  request_succeeded_ = true;
++  switch (authenticator_type) {
++    case device::AuthenticatorType::kPhone:
++      authenticator_category_ = "phone";
++      break;
++    case device::AuthenticatorType::kWinNative:
++    case device::AuthenticatorType::kTouchID:
++    case device::AuthenticatorType::kChromeOS:
++    case device::AuthenticatorType::kICloudKeychain:
++    case device::AuthenticatorType::kEnclave:
++      authenticator_category_ = "platform";
++      break;
++    case device::AuthenticatorType::kOther:
++      authenticator_category_ = "other";
++      break;
++  }
 +  EmitRequestClosed();
 +}
 +
@@ -533,6 +548,7 @@ index 90510c0..c7a74e3 100644
 +          .Set("requestId", request_id_)
 +          .Set("outcome",
 +               std::string(request_succeeded_ ? "succeeded" : "unknown"))
++          .Set("authenticatorCategory", authenticator_category_)
 +          .Build();
 +  v8::Local<v8::Object> wrapper;
 +  if (!session->Get()->GetWrapper(isolate).ToLocal(&wrapper))
@@ -546,7 +562,7 @@ index 90510c0..c7a74e3 100644
  }
  
  void ElectronAuthenticatorRequestClientDelegate::SelectAccount(
-@@ -133,6 +609,7 @@ void ElectronAuthenticatorRequestClientDelegate::SelectAccount(
+@@ -133,6 +625,7 @@ void ElectronAuthenticatorRequestClientDelegate::SelectAccount(
    }
  
    v8::Local<v8::Object> details = gin::DataObjectBuilder(isolate)
@@ -555,7 +571,7 @@ index 90510c0..c7a74e3 100644
                                        .Set("accounts", accounts)
                                        .Set("frame", rfh)
 diff --git a/shell/browser/webauthn/electron_authenticator_request_client_delegate.h b/shell/browser/webauthn/electron_authenticator_request_client_delegate.h
-index f500296..ac02fed 100644
+index f500296..282e0f4 100644
 --- a/shell/browser/webauthn/electron_authenticator_request_client_delegate.h
 +++ b/shell/browser/webauthn/electron_authenticator_request_client_delegate.h
 @@ -5,12 +5,15 @@
@@ -574,7 +590,7 @@ index f500296..ac02fed 100644
  
  namespace content {
  class RenderFrameHost;
-@@ -55,14 +58,54 @@ class ElectronAuthenticatorRequestClientDelegate
+@@ -55,14 +58,55 @@ class ElectronAuthenticatorRequestClientDelegate
        std::vector<device::AuthenticatorGetAssertionResponse> responses,
        base::OnceCallback<void(device::AuthenticatorGetAssertionResponse)>
            callback) override;
@@ -626,6 +642,7 @@ index f500296..ac02fed 100644
 +  std::string hybrid_qr_;
 +  bool request_closed_emitted_ = false;
 +  bool request_succeeded_ = false;
++  std::string authenticator_category_ = "unknown";
  
    base::ScopedObservation<device::FidoRequestHandlerBase,
                            device::FidoRequestHandlerBase::Observer>

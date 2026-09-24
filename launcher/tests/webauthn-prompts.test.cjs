@@ -48,8 +48,20 @@ test("WebAuthn settlement records a UI choice without claiming the winning authe
     logger: { info: (name, fields) => events.push([name, fields]) }, next() {} };
   WebAuthnPrompts.prototype.closeRequest.call(controller, request.id, "succeeded");
   assert.deepEqual(events, [
-    ["browser.webauthn_settled", { promptKind: "qr", selectedMethod: "phone", requestId: request.id, outcome: "succeeded" }],
+    ["browser.webauthn_settled", { promptKind: "qr", selectedMethod: "phone", requestId: request.id, outcome: "succeeded", authenticatorCategory: "unknown" }],
     ["operation", "succeeded"],
   ]);
+  assert.equal(controller.pending.size, 0);
+});
+
+test("native phone attribution is recorded only from a successful allowlisted authenticator category", () => {
+  const settled = [];
+  const controller = { pending: new Map(), batchCancelling: false,
+    logger: { info: (_name, fields) => settled.push(fields) }, next() {} };
+  for (const [id, outcome, category] of [["a", "succeeded", "phone"], ["b", "succeeded", "private-device"], ["c", "unknown", "phone"]]) {
+    controller.pending.set(id, { id, kind: "qr", methodChosen: "phone", detach() {}, operation: { end() {} } });
+    WebAuthnPrompts.prototype.closeRequest.call(controller, id, outcome, category);
+  }
+  assert.deepEqual(settled.map(item => item.authenticatorCategory), ["phone", "unknown", "unknown"]);
   assert.equal(controller.pending.size, 0);
 });

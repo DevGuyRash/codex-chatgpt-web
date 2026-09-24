@@ -38,7 +38,7 @@ class WebAuthnPrompts {
     this.onHybridProgress = (_event, details) => this.hybridProgress(details);
     this.onVerification = (_event, details) => this.verification(details);
     this.onFailure = (_event, details) => this.failure(details);
-    this.onClosed = (_event, details) => this.closeRequest(details?.requestId, details?.outcome);
+    this.onClosed = (_event, details) => this.closeRequest(details?.requestId, details?.outcome, details?.authenticatorCategory);
     browserSession.on("webauthn-pin-request", this.onPIN);
     browserSession.on("select-webauthn-account", this.onAccount);
     browserSession.on("webauthn-hybrid-qr", this.onQR);
@@ -488,7 +488,7 @@ class WebAuthnPrompts {
     finally { this.batchCancelling = false; this.next(); }
   }
 
-  closeRequest(id, outcome) {
+  closeRequest(id, outcome, authenticatorCategory) {
     const request = this.pending.get(id);
     if (!request) return;
     this.pending.delete(id);
@@ -500,6 +500,8 @@ class WebAuthnPrompts {
     this.logger.info("browser.webauthn_settled", {
       promptKind: request.kind, selectedMethod: request.methodChosen || null,
       requestId: request.id, outcome: outcome === "succeeded" ? "succeeded" : "unknown",
+      authenticatorCategory: outcome === "succeeded" && ["phone", "platform", "other"].includes(authenticatorCategory)
+        ? authenticatorCategory : "unknown",
     });
     request.operation?.end(outcome === "succeeded" ? "succeeded" : "unknown");
     if (!this.batchCancelling) this.next();

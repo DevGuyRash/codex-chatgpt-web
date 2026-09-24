@@ -727,6 +727,14 @@ export async function throwIfChatGptRateLimitDialog(page: Page): Promise<void> {
   );
 }
 
+export function classifyChatGptRateLimitBeforeSend(error: unknown, sendActivated: boolean): unknown {
+  if (sendActivated || !(error instanceof ChatGptWebAdapterError) || error.code !== "rate_limit_exceeded") return error;
+  return new ChatGptWebAdapterError(
+    `${error.message} The pending message was not sent.`,
+    { status: 429, errorType: "rate_limit_error", code: "rate_limit_before_send", retryable: false, cause: error },
+  );
+}
+
 const chatGptTemporaryChatOnboardingDialog = (page: Page): Locator => page
   .locator('[role="dialog"]')
   .filter({ hasText: "Not in history" })
@@ -2831,8 +2839,8 @@ export class ChatGptBrowserWorker {
 
   private selectedConnectorControl(composer: Locator): Locator {
     return composer
-      .locator('[data-id^="plugin:"][data-keyword]')
-      .filter({ hasText: this.config.appName, visible: true });
+      .locator(`[data-id^="plugin:"][data-keyword=${JSON.stringify(this.config.appName)}]`)
+      .filter({ visible: true });
   }
 
   private async connectorIsSelected(composer: Locator, abortSignal?: AbortSignal): Promise<boolean> {
@@ -4007,6 +4015,11 @@ export class ChatGptBrowserWorker {
         return {
           textChars: (root.innerText ?? root.textContent ?? "").trim().length,
           htmlChars: root.innerHTML.length,
+          completedActionCount: root.querySelectorAll('button[data-testid="copy-turn-action-button"]').length,
+          copyLabeledButtonCount: [...root.querySelectorAll<HTMLButtonElement>("button")]
+            .filter(button => /\bcopy\b/i.test(button.getAttribute("aria-label") ?? "")).length,
+          busyElementCount: root.querySelectorAll('[aria-busy="true"]').length,
+          streamingStatusCount: root.querySelectorAll("[data-streaming-response-status]").length,
           descriptors,
         };
       })
@@ -4158,6 +4171,7 @@ export class ChatGptBrowserWorker {
     let turnConnection: Browser | undefined;
     let managedPage: Page | undefined;
     let diagnosticPage: Page | undefined;
+    let browserSendActivated = false;
     const submissionRejection = new ChatGptSubmissionRejectionObserver();
     try {
       if (turn.abortSignal?.aborted) throw new DOMException("ChatGPT web turn aborted", "AbortError");
@@ -4420,6 +4434,7 @@ export class ChatGptBrowserWorker {
               { onSendActivated: async () => {
                 await this.assertSelectedEffort(page, mode);
                 submissionRejection.begin(page);
+                browserSendActivated = true;
               } },
               undefined,
               launcherObservationRecovery
@@ -4574,6 +4589,7 @@ export class ChatGptBrowserWorker {
           { ...turn, onSendActivated: async () => {
             await this.assertSelectedEffort(page, mode);
             submissionRejection.begin(page);
+            browserSendActivated = true;
             await turn.onSendActivated?.();
           } },
           completionTracker,
@@ -4844,8 +4860,15 @@ export class ChatGptBrowserWorker {
             const diagnostic = await this.stalledTurnDiagnostic(page, responseTurn.locator).catch(error => JSON.stringify({
               diagnosticError: error instanceof Error ? error.message : String(error),
             }));
+            const progress = externalProgressSnapshot
+              ? { revision: externalProgressSnapshot.revision,
+                activeToolCalls: externalProgressSnapshot.activeToolCalls,
+                lastToolBatchRevision: externalProgressSnapshot.lastToolBatchRevision,
+                lastProgressAgeMs: externalProgressSnapshot.lastProgressAt === undefined
+                  ? null : Math.max(0, Date.now() - externalProgressSnapshot.lastProgressAt) }
+              : null;
             console.warn(
-              `[chatgpt-web] waiting for completed-turn evidence (running=${running}, sawRunning=${sawRunning}, textChars=${snapshot.visibleText.length}, completionActionVisible=${snapshot.completionActionVisible}, ui=${diagnostic})`,
+              `[chatgpt-web] waiting for completed-turn evidence (running=${running}, sawRunning=${sawRunning}, textChars=${snapshot.visibleText.length}, completionActionVisible=${snapshot.completionActionVisible}, progress=${JSON.stringify(progress)}, ui=${diagnostic})`,
             );
           }
         } else {
@@ -4901,6 +4924,7 @@ export class ChatGptBrowserWorker {
         && !(error instanceof ChatGptWebAdapterError && error.code === "client_cancelled")) {
         error = await submissionRejection.failure() ?? error;
       }
+      error = classifyChatGptRateLimitBeforeSend(error, browserSendActivated);
       console.error(
         `[chatgpt-web] browser turn ${turn.traceId} failed:`
         + ` ${redactChatGptUiDiagnostic(error instanceof Error ? error.message : String(error))}`,

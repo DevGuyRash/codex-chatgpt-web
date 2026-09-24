@@ -6,7 +6,7 @@ import { mkdtempSync, readFileSync, readdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Page } from "playwright-core";
-import { CHATGPT_BROWSER_OBSERVATION_PROBE_TIMEOUT_MS, CHATGPT_COMPLETION_SETTLE_MS, CHATGPT_EXTERNAL_PROGRESS_CLOCK_SKEW_MS, CHATGPT_EXTERNAL_PROGRESS_STALL_CEILING_MS, ChatGptCompletionTracker, chatGptExternalProgressSuppressesDomHealth, CHATGPT_RESPONSE_DOM_GRACE_MS, MAX_CHATGPT_INTERNAL_OBSERVATION_FAULTS, CHATGPT_COMPOSER_DOCUMENT_END_KEY, CHATGPT_COMPOSER_SELECT_ALL_KEY, CHATGPT_STOPPED_THINKING_GRACE_MS, ChatGptBrowserObservationTimeoutError, ChatGptBrowserWorker, ChatGptPromptAttachmentIntegrityError, ChatGptStoppedThinkingTracker, ChatGptTurnDomHealthTracker, ChatGptVisibleTraceTracker, MAX_CHATGPT_BROWSER_PAGE_REBINDS, MAX_CHATGPT_BROWSER_TABS, MAX_CHATGPT_CONNECTOR_TRIGGER_ATTEMPTS, assertChatGptWebInputWithinLimits, assertChatGptWebMultipartInputWithinLimits, browserDiagnosticCheckpoint, chatGptConnectorAttachmentMode, chatGptNewTurnIdentity, chatGptReboundTurnIdentity, chatGptSubmissionEvidence, connectAfterClosingBrowserConnection, dismissChatGptTemporaryChatOnboarding, isChatGptTraceControl, redactChatGptUiDiagnostic, resolveBrowserConfig, resolveChatGptToolConfirmation, resolveChatGptWebMultipartStagingMode, sanitizeChatGptBrowserDiagnosticState, setChatGptThinkMode, stripChatGptTraceControlSuffix, throwIfChatGptRateLimitDialog, throwIfChatGptSessionFailureAlert, throwIfChatGptTerminalErrorAlert, withChatGptBrowserObservationTimeout, CHATGPT_MULTIPART_RESPONSE_DOM_GRACE_MS, browserStageTimeouts, ChatGptSuspensionClock, remainingStageBudgetMs } from "../src/adapters/chatgpt-web/browser-worker";
+import { CHATGPT_BROWSER_OBSERVATION_PROBE_TIMEOUT_MS, CHATGPT_COMPLETION_SETTLE_MS, CHATGPT_EXTERNAL_PROGRESS_CLOCK_SKEW_MS, CHATGPT_EXTERNAL_PROGRESS_STALL_CEILING_MS, ChatGptCompletionTracker, chatGptExternalProgressSuppressesDomHealth, CHATGPT_RESPONSE_DOM_GRACE_MS, MAX_CHATGPT_INTERNAL_OBSERVATION_FAULTS, CHATGPT_COMPOSER_DOCUMENT_END_KEY, CHATGPT_COMPOSER_SELECT_ALL_KEY, CHATGPT_STOPPED_THINKING_GRACE_MS, ChatGptBrowserObservationTimeoutError, ChatGptBrowserWorker, ChatGptPromptAttachmentIntegrityError, ChatGptStoppedThinkingTracker, ChatGptTurnDomHealthTracker, ChatGptVisibleTraceTracker, MAX_CHATGPT_BROWSER_PAGE_REBINDS, MAX_CHATGPT_BROWSER_TABS, MAX_CHATGPT_CONNECTOR_TRIGGER_ATTEMPTS, assertChatGptWebInputWithinLimits, assertChatGptWebMultipartInputWithinLimits, browserDiagnosticCheckpoint, chatGptConnectorAttachmentMode, chatGptNewTurnIdentity, chatGptReboundTurnIdentity, chatGptSubmissionEvidence, classifyChatGptRateLimitBeforeSend, connectAfterClosingBrowserConnection, dismissChatGptTemporaryChatOnboarding, isChatGptTraceControl, redactChatGptUiDiagnostic, resolveBrowserConfig, resolveChatGptToolConfirmation, resolveChatGptWebMultipartStagingMode, sanitizeChatGptBrowserDiagnosticState, setChatGptThinkMode, stripChatGptTraceControlSuffix, throwIfChatGptRateLimitDialog, throwIfChatGptSessionFailureAlert, throwIfChatGptTerminalErrorAlert, withChatGptBrowserObservationTimeout, CHATGPT_MULTIPART_RESPONSE_DOM_GRACE_MS, browserStageTimeouts, ChatGptSuspensionClock, remainingStageBudgetMs } from "../src/adapters/chatgpt-web/browser-worker";
 import { ensureChatGptPersonalizedConnectorAccess } from "../src/adapters/chatgpt-web/browser-worker";
 import { chatGptStoppedThinkingError } from "../src/adapters/chatgpt-web/adapter-error";
 import { CHATGPT_WEB_MODEL_ID } from "../src/adapters/chatgpt-web/model";
@@ -21,7 +21,8 @@ function personalizedTemporaryChatRole(
 ) {
   const locator = {
     filter: (_filter: { visible: boolean }) => ({
-      count: async () => options.name === "Personalized" ? 1 : 0,
+      count: async () => (typeof options.name === "string"
+        ? options.name === "Personalized" : options.name.test("Personalized")) ? 1 : 0,
     }),
   };
   return locator;
@@ -273,8 +274,9 @@ test("a mutating stage timeout preserves a failed cleanup integrity error", asyn
     },
   };
   const page = {
-    getByRole: (_role: string, options: { name: string }) => (
-      options.name === "Personalized" ? personalized : unpersonalized
+    getByRole: (_role: string, options: { name: string | RegExp }) => (
+      (typeof options.name === "string" ? options.name === "Personalized" : options.name.test("Personalized"))
+        ? personalized : unpersonalized
     ),
     locator: (selector: string) => selector === "body"
       ? { press: async () => { throw new Error("menu cleanup failed"); } }
@@ -1120,7 +1122,9 @@ test("connector selection re-resolves the active composer after ChatGPT replaces
     fill: async (value: string) => { calls.push(["fill", value]); },
     focus: async () => { calls.push(["focus"]); },
     pressSequentially: async (value: string, options: { delay: number; signal?: AbortSignal; timeout: number }) => {
-      expect(options).toEqual({ delay: 25, signal: undefined, timeout: 10_000 });
+      expect(options.delay).toBe(25);
+      if (options.signal) expect(options.signal).toBeInstanceOf(AbortSignal);
+      expect(options.timeout).toBe(10_000);
       calls.push(["pressSequentially", value]);
     },
     press: async (key: string) => {
@@ -1156,6 +1160,7 @@ test("connector selection re-resolves the active composer after ChatGPT replaces
   let activeComposerCalls = 0;
   const resolved = await selectConnector.call({
     config: { appName: "Codex Native2" },
+    clearChatGptComposerState: async () => { await initialComposer.fill(""); },
     connectorIsSelected: async () => connectorSelected,
     selectedConnectorControl: () => selectedConnector,
     activeComposer: async () => {
@@ -1216,6 +1221,7 @@ test("connector selection moves highlight to the exact hidden-viewport row befor
 
   await expect(selectConnector.call({
     config: { appName: "Codex Native2 DEV" },
+    clearChatGptComposerState: async () => {},
     connectorIsSelected: async () => selected,
     selectedConnectorControl: () => selectedConnector,
     activeComposer: async () => selected ? selectedComposer : initialComposer,
@@ -1301,6 +1307,7 @@ test("connector selection retriggers the complete mention after a fresh-page hyd
   let activeComposerCalls = 0;
   await selectConnector.call({
     config: { appName: "Codex Native2" },
+    clearChatGptComposerState: async () => { calls.push("clear"); },
     connectorIsSelected: async () => selected,
     connectorMentionRowTitles: async () => [],
     selectedConnectorControl: () => selectedConnector,
@@ -1684,6 +1691,7 @@ test("tool-capable prompts use the shared Playwright connector selection before 
     config: { appName: "Codex Native2" },
     selectConnector,
     insertPromptText,
+    clearChatGptComposerState: async () => { await initialComposer.fill("", { signal: controller.signal }); },
     connectorIsSelected: async () => selected,
     selectedConnectorControl: () => selectedConnector,
     activeComposer: async () => {
@@ -2271,10 +2279,28 @@ test("the known ChatGPT rate-limit dialog is acknowledged and returns a structur
     status: 429,
     errorType: "rate_limit_error",
     code: "rate_limit_exceeded",
-    retryable: true,
+    retryable: false,
     message: "ChatGPT rate limit: too many requests. Try again in a few minutes.",
   });
   expect(fixture.pressed).toEqual(["Enter"]);
+});
+
+test("a rate limit is recoverable only before the first inline or multipart Send activation", async () => {
+  const runStage = (ChatGptBrowserWorker.prototype as unknown as {
+    runStage<T>(traceId: string, stage: string, timeoutMs: number, action: () => Promise<T>): Promise<T>;
+  }).runStage;
+  const beforeSend = dialogPage("Too many requests. You're making requests too quickly.");
+  const original = await runStage.call({}, "pre-send-rate-limit", "prompt_attachment", 1_000, () => (
+    throwIfChatGptRateLimitDialog(beforeSend.page)
+  )).catch(error => error);
+  expect(original).toMatchObject({ code: "rate_limit_exceeded" });
+  expect(classifyChatGptRateLimitBeforeSend(original, false)).toMatchObject({
+    status: 429,
+    errorType: "rate_limit_error",
+    code: "rate_limit_before_send",
+    retryable: false,
+  });
+  expect(classifyChatGptRateLimitBeforeSend(original, true)).toBe(original);
 });
 
 test("submission acceptance reports a rate-limit dialog that appears after Enter", async () => {
@@ -2292,7 +2318,7 @@ test("submission acceptance reports a rate-limit dialog that appears after Enter
     status: 429,
     errorType: "rate_limit_error",
     code: "rate_limit_exceeded",
-    retryable: true,
+    retryable: false,
   });
   expect(fixture.pressed).toEqual(["Enter"]);
 });
@@ -2305,7 +2331,7 @@ test("the Traditional Chinese ChatGPT rate-limit dialog is acknowledged and retu
     status: 429,
     errorType: "rate_limit_error",
     code: "rate_limit_exceeded",
-    retryable: true,
+    retryable: false,
   });
   expect(fixture.pressed).toEqual(["Enter"]);
 });
@@ -2318,7 +2344,7 @@ test("the Simplified Chinese ChatGPT rate-limit dialog is acknowledged and retur
     status: 429,
     errorType: "rate_limit_error",
     code: "rate_limit_exceeded",
-    retryable: true,
+    retryable: false,
   });
   expect(fixture.pressed).toEqual(["Enter"]);
 });
@@ -2334,7 +2360,7 @@ test("the Japanese ChatGPT rate-limit dialog is acknowledged and returns a struc
     status: 429,
     errorType: "rate_limit_error",
     code: "rate_limit_exceeded",
-    retryable: true,
+    retryable: false,
   });
   expect(fixture.pressed).toEqual(["Enter"]);
 });
@@ -2489,6 +2515,7 @@ test("effort menu waiting stops when ChatGPT reports an expired session", async 
   const selection = selectModelAndEffort.call({
     activeComposer: async () => composer,
   }, {
+    url: () => "https://chatgpt.com/?temporary-chat=true",
     locator: (selector: string) => {
       if (selector.includes('[role="alert"]')) return sessionAlert;
       if (selector.includes('[role="menu"]') || selector.includes("composer-intelligence-picker-content")) return effortMenu;
@@ -2744,7 +2771,7 @@ test("browser preflight separates model context from one-message transport limit
     "gpt-5.6-sol",
     "medium",
     pro,
-    515_000,
+    500_000,
   )).not.toThrow();
   expect(() => assertChatGptWebInputWithinLimits(
     111_193,
@@ -2752,8 +2779,16 @@ test("browser preflight separates model context from one-message transport limit
     "gpt-5.6-sol",
     "medium",
     pro,
-    515_001,
+    500_000,
   )).toThrow("103,000-token ChatGPT browser message boundary");
+  expect(() => assertChatGptWebInputWithinLimits(
+    100_000,
+    100_000,
+    "gpt-5.6-sol",
+    "medium",
+    pro,
+    500_001,
+  )).toThrow("500,000-character ChatGPT composer boundary");
   expect(() => assertChatGptWebInputWithinLimits(
     112_192,
     104_000,
@@ -2791,8 +2826,8 @@ test("Bigger Context preflight expands only the total context ceiling and keeps 
     "gpt-5.6-sol",
     "high",
     pro,
-    900_000,
-    3,
+    400_000,
+    6,
   )).not.toThrow();
   expect(() => assertChatGptWebMultipartInputWithinLimits(
     333_579,
@@ -2800,16 +2835,16 @@ test("Bigger Context preflight expands only the total context ceiling and keeps 
     "gpt-5.6-sol",
     "high",
     pro,
-    900_000,
-    3,
-  )).toThrow("three-part ceiling");
+    400_000,
+    6,
+  )).toThrow("six-part ceiling");
   expect(() => assertChatGptWebMultipartInputWithinLimits(
     222_385,
     95_000,
     "gpt-5.6-sol",
     "high",
     pro,
-    900_000,
+    400_000,
     2,
   )).not.toThrow();
   expect(() => assertChatGptWebMultipartInputWithinLimits(
@@ -2818,7 +2853,7 @@ test("Bigger Context preflight expands only the total context ceiling and keeps 
     "gpt-5.6-sol",
     "high",
     pro,
-    900_000,
+    400_000,
     2,
   )).toThrow("two-part ceiling");
   expect(() => assertChatGptWebMultipartInputWithinLimits(
@@ -2828,7 +2863,7 @@ test("Bigger Context preflight expands only the total context ceiling and keeps 
     "high",
     plus,
     900_000,
-    3,
+    6,
   )).not.toThrow();
   expect(() => assertChatGptWebMultipartInputWithinLimits(
     270_000,
@@ -2837,8 +2872,8 @@ test("Bigger Context preflight expands only the total context ceiling and keeps 
     "high",
     plus,
     900_000,
-    3,
-  )).toThrow("270,000-token three-part ceiling");
+    6,
+  )).toThrow("270,000-token six-part ceiling");
   expect(() => assertChatGptWebMultipartInputWithinLimits(
     180_000,
     80_000,
@@ -2854,8 +2889,8 @@ test("Bigger Context preflight expands only the total context ceiling and keeps 
     "gpt-5.6-sol",
     "high",
     pro,
-    900_000,
-    3,
+    400_000,
+    6,
   )).toThrow("ChatGPT message boundary");
   expect(() => assertChatGptWebMultipartInputWithinLimits(
     20_000,
@@ -2881,7 +2916,7 @@ test("Bigger Context stages use the lowest account mode that can carry the stage
     300_000,
   )).toThrow("No ChatGPT effort");
   expect(resolveChatGptWebMultipartStagingMode("gpt-5.6-sol", pro, 100_000, 500_000).effort).toBe("low");
-  expect(resolveChatGptWebMultipartStagingMode("gpt-5.6-sol", pro, 100_000, 600_000).effort).toBe("medium");
+  expect(resolveChatGptWebMultipartStagingMode("gpt-5.6-sol", pro, 100_000, 545_001).effort).toBe("max");
   expect(resolveChatGptWebMultipartStagingMode("gpt-5.6-sol", pro, 104_000, 1_200_000).effort).toBe("max");
   expect(() => resolveChatGptWebMultipartStagingMode(
     "gpt-5.6-luna",
@@ -2896,7 +2931,7 @@ test("Bigger Context stages use the lowest account mode that can carry the stage
     "low",
     plus,
     300_000,
-    3,
+    6,
     {
       stagingEffort: "medium",
       maxStageMessageTokens: 30_000,

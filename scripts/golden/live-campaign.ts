@@ -54,6 +54,17 @@ function finiteCellOutcome(cell: GoldenCell, result: LiveCellResult, batch: Live
       throw new Error("Large-history coverage lacks its retained-context artifact");
     }
   }
+  if (cell.variant.id === "compaction") {
+    const scenario = "scenario" in proof.terminal ? proof.terminal.scenario : undefined;
+    const compact = scenario && "compaction" in scenario ? scenario.compaction : undefined;
+    const witnessSha256 = scenario && "historyWitnessSha256" in scenario ? scenario.historyWitnessSha256 : undefined;
+    if (!scenario || !compact || compact.threadId !== proof.terminal.threadId || compact.turn.status !== "completed" || compact.turn.id !== compact.turnId
+      || !compact.itemId || scenario.turns.length !== 2 || scenario.turns.some(turn => turn.status !== "completed" || turn.id === compact.turnId)
+      || typeof witnessSha256 !== "string" || !/^[a-f\d]{64}$/.test(witnessSha256)
+      || !proof.oracle.artifacts.some(artifact => artifact.path === "output/history-witness.txt" && artifact.sha256 === witnessSha256)) {
+      throw new Error("Compaction coverage requires the exact native item and terminal between completed same-task turns, plus a committed retained-context witness");
+    }
+  }
   if (["resumed", "archived-history", "large-history"].includes(cell.variant.id) && (!("preparation" in proof.terminal) || proof.terminal.preparation?.status !== "completed" || proof.terminal.preparation.threadId !== proof.terminal.threadId)) throw new Error("Resumed coverage requires completed preparation in the same native task");
   if (cell.variant.id === "archived-history" && (!("archive" in proof.terminal) || proof.terminal.archive?.threadId !== proof.terminal.threadId || !proof.terminal.archive.archived || !proof.terminal.archive.restored)) throw new Error("Archived coverage requires observed archive and restoration of the same native task");
   if (["continued", "plan-revise-execute", "plan-tui-execute"].includes(cell.variant.id) && (!("scenario" in proof.terminal) || proof.terminal.scenario?.turns.length !== finiteNativeScenarios[cell.variant.id as FiniteNativeScenario] || proof.terminal.scenario.turns.some(turn => turn.status !== "completed"))) throw new Error("Sequential scenario coverage requires every native turn to complete");

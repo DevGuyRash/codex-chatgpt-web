@@ -28,7 +28,7 @@ export function ownedNativeActivity(frame: { direction: string; message: ObjectV
   return { tool, phase };
 }
 export const finiteNativeScenarios = {
-  fresh: 1, formats: 1, unicode: 1, "tool-image": 1, "large-history": 2, continued: 2, resumed: 2, "archived-history": 2, "model-switch": 2, "plan-revise-execute": 3, "plan-stream-interrupt": 2, "plan-tui-execute": 2,
+  fresh: 1, formats: 1, unicode: 1, "tool-image": 1, "large-history": 2, continued: 2, compaction: 2, resumed: 2, "archived-history": 2, "model-switch": 2, "plan-revise-execute": 3, "plan-stream-interrupt": 2, "plan-tui-execute": 2,
   "steer-reasoning": 2, "steer-generation": 2, "steer-tools": 2,
   "stop-reasoning-continue": 2, "stop-generation-continue": 2, "stop-tools-continue": 2,
 } as const;
@@ -44,7 +44,7 @@ export async function runNativeScenario(options: {
   observeQueue?: Parameters<typeof runStructuredScenario>[0]["observeQueue"];
 }) {
   options.signal.throwIfAborted();
-  if (!["fresh", "formats", "unicode", "tool-image", "large-history", "continued", "resumed", "archived-history", "model-switch", "plan-revise-execute", "plan-stream-interrupt", "plan-tui-execute"].includes(options.variant) && !/^(?:steer|stop)-(?:reasoning|generation|tools|queue)(?:-image|-continue)?$/.test(options.variant)) throw new Error(`No native scenario implementation for ${options.variant}`);
+  if (!["fresh", "formats", "unicode", "tool-image", "large-history", "continued", "compaction", "resumed", "archived-history", "model-switch", "plan-revise-execute", "plan-stream-interrupt", "plan-tui-execute"].includes(options.variant) && !/^(?:steer|stop)-(?:reasoning|generation|tools|queue)(?:-image|-continue)?$/.test(options.variant)) throw new Error(`No native scenario implementation for ${options.variant}`);
   if (["formats", "tool-image"].includes(options.variant) && options.workload.formatCoverage !== "all") throw new Error("Format and native image coverage require the full shared fixture set at every workload level");
   if (options.resumeId && options.variant !== "resumed") throw new Error("Resume requires the exact prior native task and its declared scenario");
   if (options.variant === "model-switch" && (!options.modelSwitch || options.modelSwitch.to.slug !== options.route.slug)) throw new Error("Model-switch continuation must target the cell's requested route");

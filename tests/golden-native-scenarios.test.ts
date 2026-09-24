@@ -52,6 +52,7 @@ console.log(JSON.stringify({type:"thread.started",thread_id:"11111111-1111-7111-
 console.log(JSON.stringify({type:"turn.started"}));
 console.log(JSON.stringify({type:"turn.completed"}));
 });
+
 `, { mode: 0o700 });
   const workload = createWorkload({ level: 1, seed: "large-history-lifecycle", batch: 0 });
   try {
@@ -69,6 +70,45 @@ console.log(JSON.stringify({type:"turn.completed"}));
     await expect(runNativeScenario({ executable: peer, cwd: root, env: { EARLY_WRITE: "1" }, route: CHATGPT_WEB_MODEL_ROUTES[0]!, workload, variant: "large-history", signal: new AbortController().signal, timeoutMs: 2000,
       onRecord: async () => {}, checkpoint: () => {} })).rejects.toThrow("Large-history preparation wrote its witness before the retained continuation");
     expect(readFileSync(log, "utf8").trim().split("\n")).toHaveLength(3);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("native compaction continues the same task only after its own compact item and terminal", async () => {
+  const root = mkdtempSync(join(tmpdir(), "golden-native-compaction-")), peer = join(root, "peer"), log = join(root, "turns.jsonl");
+  mkdirSync(join(root, ".git"));
+  writeFileSync(peer, `#!${process.execPath}
+import {appendFileSync} from "node:fs";
+const send=message=>process.stdout.write(JSON.stringify(message)+"\\n");
+let buffer="",n=0;
+process.stdin.on("data",chunk=>{buffer+=chunk.toString();for(;;){const i=buffer.indexOf("\\n");if(i<0)break;const m=JSON.parse(buffer.slice(0,i));buffer=buffer.slice(i+1);
+if(m.method==="initialize")send({id:m.id,result:{userAgent:"fixture"}});
+if(m.method==="thread/start")send({id:m.id,result:{thread:{id:"thread-one"},model:m.params.model,modelProvider:"openai",reasoningEffort:"low",cwd:m.params.cwd}});
+if(m.method==="turn/start"){
+ const id="turn-"+(++n);appendFileSync(${JSON.stringify(log)},JSON.stringify({threadId:m.params.threadId,text:m.params.input[0].text})+"\\n");
+ send({method:"turn/started",params:{threadId:"thread-one",turn:{id,status:"inProgress",items:[]}}});
+ send({method:"turn/completed",params:{threadId:"thread-one",turn:{id,status:"completed",items:[]}}});
+ send({id:m.id,result:{turn:{id,status:"inProgress",items:[]}}});
+}
+if(m.method==="thread/compact/start"){
+ const id="compact-1",item={id:"compaction-item-1",type:"contextCompaction"};
+ send({method:"turn/started",params:{threadId:"thread-one",turn:{id,status:"inProgress",items:[]}}});
+ send({method:"item/completed",params:{threadId:"thread-one",turnId:id,item}});
+ send({method:"turn/completed",params:{threadId:"thread-one",turn:{id,status:"completed",items:[item]}}});
+ send({id:m.id,result:{}});
+}
+}});
+process.stdin.on("end",()=>process.exit(0));
+`, { mode: 0o700 });
+  const workload = createWorkload({ level: 1, seed: "native-compaction", batch: 0 });
+  try {
+    const result = await runNativeScenario({ executable: peer, cwd: root, env: {}, route: CHATGPT_WEB_MODEL_ROUTES[0]!, workload, variant: "compaction", signal: new AbortController().signal, timeoutMs: 2000,
+      onRecord: async () => {}, checkpoint: () => {} });
+    expect(result).toMatchObject({ status: "completed", threadId: "thread-one", scenario: { turns: [{ id: "turn-1" }, { id: "turn-2" }], compaction: { turnId: "compact-1", itemId: "compaction-item-1", turn: { status: "completed" } } } });
+    const prompts = readFileSync(log, "utf8").trim().split("\n").map(line => JSON.parse(line) as { text: string });
+    expect(prompts).toHaveLength(2);
+    expect(prompts[0]!.text).toContain(largeHistoryWitness(workload));
+    expect(prompts[1]!.text).toContain("output/history-witness.txt");
+    expect(prompts[1]!.text).not.toContain(largeHistoryWitness(workload));
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 

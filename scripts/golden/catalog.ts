@@ -19,7 +19,8 @@ export interface Variant { id: string; driver: Driver; requiresImage?: boolean; 
 
 const phases = ["reasoning", "generation", "tools", "queue"] as const;
 export const variants: readonly Variant[] = [
-  ...["fresh", "resumed", "archived-history", "formats", "tool-failure", "large-tool-result", "tool-image", "nested-delegation", "cross-effort-delegation", "compaction", "multipart", "unicode", "large-history", "retained-conversation-change"].map(id => ({ id, driver: "exec" as const })),
+  ...["fresh", "resumed", "archived-history", "formats", "tool-failure", "large-tool-result", "tool-image", "nested-delegation", "cross-effort-delegation", "multipart", "unicode", "large-history", "retained-conversation-change"].map(id => ({ id, driver: "exec" as const })),
+  { id: "compaction", driver: "app-server" },
   { id: "model-switch", driver: "app-server" },
   { id: "continued", driver: "app-server" },
   { id: "plan-revise-execute", driver: "app-server" },

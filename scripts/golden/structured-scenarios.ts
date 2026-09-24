@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { GoldenAppServer, type NativeTurn } from "./app-server";
-import { structuredScenarioPrompts, type GoldenWorkload } from "./workloads";
+import { largeHistoryWitness, structuredScenarioPrompts, type GoldenWorkload } from "./workloads";
 import { DiagnosticError } from "../../src/diagnostics/problems";
 import type { ChatGptWebModelRoute } from "../../src/chatgpt-web-models";
 import { isProGeneration } from "../../src/campaign-policy";
@@ -80,6 +80,15 @@ export async function runStructuredScenario(options: {
     completed(await finish(await start(prompts.prepare)));
     completed(await finish(await start(prompts.continue)));
     return { variant, turns };
+  }
+  if (variant === "compaction") {
+    const witness = largeHistoryWitness(workload);
+    completed(await finish(await start(`${prompts.prepare}\n\nRetain this exact runner-owned fact for the continuation: ${witness}. Do not write files or commit during preparation.`)));
+    signal.throwIfAborted();
+    const compaction = await app.compact({ signal, timeoutMs });
+    if (compaction.threadId !== threadId || compaction.turn.status !== "completed" || compaction.turn.id !== compaction.turnId || compaction.turnId === turns[0]!.id) throw new NativeScenarioFailure(threadId, [...turns, compaction.turn]);
+    completed(await finish(await start(`${prompts.continue} Also write output/history-witness.txt with the exact fact retained through compaction followed by a newline; do not guess it from repository files.`)));
+    return { variant, turns, compaction, historyWitnessSha256: createHash("sha256").update(`${witness}\n`).digest("hex") };
   }
   if (variant === "plan-revise-execute") {
     const planHashes: string[] = [];

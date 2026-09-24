@@ -113,7 +113,7 @@ index 67d3be4b5026069ec4ae73c1fc6e661f8a19098e..0bcf78dec01e38533070b4c8ad7a9720
    };
  
 diff --git a/dist/cjs/index.js b/dist/cjs/index.js
-index b4242b0b847d33d8544832bfb2d8723a884a3072..9ddff24747c48f983006fc0d0a0fba7c679dbe5e 100644
+index b4242b0b847d33d8544832bfb2d8723a884a3072..eaf9138d96e0c775e3555a44d289559a3905c98e 100644
 --- a/dist/cjs/index.js
 +++ b/dist/cjs/index.js
 @@ -605,7 +605,7 @@ var BrowserActionAPI = class {
@@ -134,7 +134,7 @@ index b4242b0b847d33d8544832bfb2d8723a884a3072..9ddff24747c48f983006fc0d0a0fba7c
        this.ctx.router.broadcastEvent(`webNavigation.${eventName}`, details);
      };
      this.onCreatedNavigationTarget = (tab, { url, frame }) => {
-@@ -1823,39 +1823,68 @@ async function readNativeMessagingHostConfig(application) {
+@@ -1823,39 +1823,89 @@ async function readNativeMessagingHostConfig(application) {
        const data = await import_node_fs2.promises.readFile(filePath);
        const config = JSON.parse(data.toString());
        if (isValidConfig(config)) {
@@ -158,10 +158,13 @@ index b4242b0b847d33d8544832bfb2d8723a884a3072..9ddff24747c48f983006fc0d0a0fba7c
  }
  var NativeMessagingHost = class {
 -  constructor(extensionId, sender, connectionId, application, keepAlive = true) {
-+  constructor(extensionId, sender, connectionId, application, keepAlive = true, onClose) {
++  constructor(extensionId, sender, connectionId, application, keepAlive = true, onClose, onLifecycle) {
      this.connected = false;
 +    this.closed = false;
 +    this.onClose = onClose;
++    this.onLifecycle = (phase, details = {}) => {
++      try { onLifecycle?.({ extensionId, connectionId, phase, ...details }); } catch {}
++    };
 +    this.pendingBytes = 0;
 +    this.receiveBuffer = Buffer.alloc(0);
      this.receiveExtensionMessage = (_event, message) => {
@@ -195,6 +198,24 @@ index b4242b0b847d33d8544832bfb2d8723a884a3072..9ddff24747c48f983006fc0d0a0fba7c
 +          return;
 +        }
 +        d7("received native message; content omitted");
++        const browserVerificationFailed = (message?.type === "NotificationModern"
++          && message?.content?.content?.type === "BrowserVerificationFailed")
++          || (message?.type === "Notification" && message?.content?.type === "BrowserVerificationFailed");
++        const notification = message?.type === "NotificationModern" ? message?.content?.content
++          : message?.type === "Notification" ? message?.content : null;
++        const verificationReason = browserVerificationFailed
++          ? notification?.content === "UnknownBrowser" ? "unknown-browser"
++            : notification?.content === "BrowserSignatureInvalid" ? "signature-invalid" : "other"
++          : void 0;
++        const responseClass = browserVerificationFailed ? "browser-verification-failed"
++          : message?.type === "NotificationModern" || message?.type === "Notification" ? "notification"
++          : message?.type === "Success" ? "success"
++          : message?.type === "Failure" ? "failure"
++          : message?.type === "BrowserSupport" ? "browser-support-failure"
++          : message && typeof message === "object" && (
++            Object.hasOwn(message, "error") || Object.hasOwn(message, "failure")
++          ) ? "error" : "other";
++        this.onLifecycle("response", { responseClass, ...(verificationReason ? { verificationReason } : {}) });
 +        if (this.keepAlive && this.sender) {
 +          try { this.sender.send(`crx-native-msg-${this.connectionId}`, message); }
 +          catch { this.destroy(); return; }
@@ -214,7 +235,7 @@ index b4242b0b847d33d8544832bfb2d8723a884a3072..9ddff24747c48f983006fc0d0a0fba7c
      if (keepAlive) {
        this.sender.ipc.on(`crx-native-msg-${connectionId}`, this.receiveExtensionMessage);
      }
-@@ -1863,51 +1892,67 @@ var NativeMessagingHost = class {
+@@ -1863,82 +1913,126 @@ var NativeMessagingHost = class {
      this.ready = this.launch(application, extensionId);
    }
    destroy() {
@@ -292,8 +313,12 @@ index b4242b0b847d33d8544832bfb2d8723a884a3072..9ddff24747c48f983006fc0d0a0fba7c
        this.destroy();
      });
      this.process.on("exit", (code) => {
-@@ -1917,28 +1962,54 @@ var NativeMessagingHost = class {
+       d7("exited %d", code);
++      this.onLifecycle("exit", { exitCode: Number.isInteger(code) ? code : null });
+       this.destroy();
+     });
      this.connected = true;
++    this.onLifecycle("started");
      if (this.pending && this.pending.length > 0) {
        d7("sending %d pending messages", this.pending.length);
 -      this.pending.forEach((msg) => this.send(msg));
@@ -354,14 +379,22 @@ index b4242b0b847d33d8544832bfb2d8723a884a3072..9ddff24747c48f983006fc0d0a0fba7c
      });
    }
  };
-@@ -1954,13 +2025,17 @@ var RuntimeAPI = class extends import_node_events3.EventEmitter {
+@@ -1948,19 +2042,25 @@ var RuntimeAPI = class extends import_node_events3.EventEmitter {
+   constructor(ctx) {
+     super();
+     this.ctx = ctx;
++    this.onNativeLifecycle = (details) => this.ctx.emit("native-messaging-lifecycle", details);
+     this.hostMap = {};
+     this.connectNative = async (event, connectionId, application) => {
+       const host = new NativeMessagingHost(
          event.extension.id,
          event.sender,
          connectionId,
 -        application
 +        application,
 +        true,
-+        () => { if (this.hostMap[connectionId] === host) delete this.hostMap[connectionId]; }
++        () => { if (this.hostMap[connectionId] === host) delete this.hostMap[connectionId]; },
++        this.onNativeLifecycle
        );
        this.hostMap[connectionId] = host;
 +      await host.ready.catch(() => host.destroy());
@@ -374,9 +407,14 @@ index b4242b0b847d33d8544832bfb2d8723a884a3072..9ddff24747c48f983006fc0d0a0fba7c
      };
      this.sendNativeMessage = async (event, application, message) => {
        const connectionId = (0, import_node_crypto.randomUUID)();
-@@ -1971,8 +2046,12 @@ var RuntimeAPI = class extends import_node_events3.EventEmitter {
+@@ -1969,10 +2069,16 @@ var RuntimeAPI = class extends import_node_events3.EventEmitter {
+         event.sender,
+         connectionId,
          application,
-         false
+-        false
++        false,
++        void 0,
++        this.onNativeLifecycle
        );
 -      await host.ready;
 -      return await host.sendAndReceive(message);
@@ -389,7 +427,7 @@ index b4242b0b847d33d8544832bfb2d8723a884a3072..9ddff24747c48f983006fc0d0a0fba7c
      };
      this.openOptionsPage = async ({ extension }) => {
        const manifest = getExtensionManifest(extension);
-@@ -2266,12 +2345,12 @@ var RoutingDelegate = class _RoutingDelegate {
+@@ -2266,12 +2372,12 @@ var RoutingDelegate = class _RoutingDelegate {
      this.sessionMap = /* @__PURE__ */ new WeakMap();
      this.workers = /* @__PURE__ */ new WeakSet();
      this.onRouterMessage = async (event, extensionId, handlerName, ...args) => {
@@ -404,7 +442,7 @@ index b4242b0b847d33d8544832bfb2d8723a884a3072..9ddff24747c48f983006fc0d0a0fba7c
        const ses = sessionPartition === DEFAULT_SESSION ? getSessionFromEvent(event) : resolvePartition(sessionPartition);
        const observer = this.sessionMap.get(ses);
        return observer?.onExtensionMessage(event, void 0, handlerName, ...args);
-@@ -2363,7 +2442,7 @@ var ExtensionRouter = class {
+@@ -2363,7 +2469,7 @@ var ExtensionRouter = class {
      });
      import_electron9.app.on("web-contents-created", (event, webContents2) => {
        if (webContents2.session === this.session && webContents2.getType() === "backgroundPage") {
@@ -413,7 +451,7 @@ index b4242b0b847d33d8544832bfb2d8723a884a3072..9ddff24747c48f983006fc0d0a0fba7c
          this.extensionHosts.add(webContents2);
        }
      });
-@@ -2378,7 +2457,7 @@ var ExtensionRouter = class {
+@@ -2378,7 +2484,7 @@ var ExtensionRouter = class {
          if (this.extensionHosts.has(serviceWorker)) {
            d8("%s running status changed to %s", scope, runningStatus);
          } else {
@@ -422,7 +460,7 @@ index b4242b0b847d33d8544832bfb2d8723a884a3072..9ddff24747c48f983006fc0d0a0fba7c
            this.extensionWorkers.add(serviceWorker);
          }
        }
-@@ -2400,7 +2479,7 @@ var ExtensionRouter = class {
+@@ -2400,7 +2506,7 @@ var ExtensionRouter = class {
    }
    observeListenerHost(host) {
      const hostId = getHostId(host);
@@ -431,7 +469,7 @@ index b4242b0b847d33d8544832bfb2d8723a884a3072..9ddff24747c48f983006fc0d0a0fba7c
      host.once("destroyed", () => {
        d8(`extension host destroyed [id:${hostId}]`);
        this.filterListeners((listener) => listener.type !== "frame" || listener.host !== host);
-@@ -2473,7 +2552,7 @@ var ExtensionRouter = class {
+@@ -2473,7 +2579,7 @@ var ExtensionRouter = class {
      }
      const extEvent = event.type === "frame" ? { type: event.type, sender: event.sender, extension } : { type: event.type, sender: event.serviceWorker, extension };
      const result = await handler.callback(extEvent, ...args);

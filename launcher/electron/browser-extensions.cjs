@@ -5,6 +5,7 @@ const { BrowserWindow } = require("electron");
 const { ElectronChromeExtensions } = require("electron-chrome-extensions");
 const { downloadExtension } = require("electron-chrome-web-store");
 const { BROWSER_EXTENSION_CATALOG, REVIEWED_EXTENSION_PERMISSIONS } = require("./browser-extension-catalog.cjs");
+const { createNativeHostLifecycle } = require("./native-host-lifecycle.cjs");
 const { placeWindowNearLauncher } = require("./window-placement.cjs");
 
 const ONE_PASSWORD_EXTENSION_ID = "aeblfdkhhhdcdjpifhhbdiojplfjncoa";
@@ -50,6 +51,8 @@ class BrowserExtensions {
       createWindow: details => this.createWindow(details),
       removeWindow: window => { if (this.pages.has(window) && !window.isDestroyed()) window.close(); },
     });
+    this.nativeHostLifecycle = createNativeHostLifecycle({ logger, providerIds: CATALOG_BY_ID });
+    this.api.on("native-messaging-lifecycle", this.nativeHostLifecycle.observe);
     const preload = require.resolve("electron-chrome-extensions/preload");
     const registered = browserSession.getPreloadScripts();
     if (!registered.some(script => script.type === "frame" && script.filePath === preload)) {
@@ -145,6 +148,8 @@ class BrowserExtensions {
   }
 
   destroy() {
+    this.api.off("native-messaging-lifecycle", this.nativeHostLifecycle.observe);
+    this.nativeHostLifecycle.destroy();
     if (this.autoCheckTimer) clearInterval(this.autoCheckTimer);
     this.autoCheckTimer = null;
     if (this.initialCheckTimer) clearTimeout(this.initialCheckTimer);

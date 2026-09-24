@@ -89,7 +89,7 @@ class WebAuthnPrompts {
     let request = this.pending.get(id);
     if (!request) {
       request = { id, ...source, kind, callback: null, qrAction: null, qrDataUrl: null, accounts: null };
-      request.operation = this.logger.diagnostics?.begin?.("browser.webauthn", { requestId: id, method: kind }, null);
+      request.operation = this.logger.diagnostics?.begin?.("browser.webauthn", { requestId: id, promptKind: kind }, null);
       this.pending.set(id, request);
       const onDocumentNavigation = (_event, _url, _code, _status, _main, processId, routingId) => {
         if (processId === source.frame.processId && routingId === source.frame.routingId) this.cancel(request, "navigation");
@@ -107,7 +107,7 @@ class WebAuthnPrompts {
         source.contents.off("did-navigate-in-page", onInPageNavigation);
         source.contents.off("destroyed", onDestroyed);
       };
-      this.logger.info("browser.webauthn_requested", { method: kind, requestId: id, webContentsId: source.contents.id });
+      this.logger.info("browser.webauthn_requested", { promptKind: kind, requestId: id, webContentsId: source.contents.id });
     } else if (request.frame !== source.frame || request.contents !== source.contents
       || request.relyingPartyId !== source.relyingPartyId) {
       return null;
@@ -477,7 +477,7 @@ class WebAuthnPrompts {
         });
       }
     }
-    this.logger.info("browser.webauthn_cancelled", { method: request.kind, requestId: request.id, reason });
+    this.logger.info("browser.webauthn_cancelled", { promptKind: request.kind, selectedMethod: request.methodChosen || null, requestId: request.id, reason });
     request.operation?.end(callbackFailed ? "unknown" : "cancelled");
     if (!this.batchCancelling) this.next();
   }
@@ -497,7 +497,10 @@ class WebAuthnPrompts {
     request.qrAction = null;
     request.transportAction = null;
     request.qrDataUrl = null;
-    this.logger.info("browser.webauthn_settled", { method: request.kind, requestId: request.id });
+    this.logger.info("browser.webauthn_settled", {
+      promptKind: request.kind, selectedMethod: request.methodChosen || null,
+      requestId: request.id, outcome: outcome === "succeeded" ? "succeeded" : "unknown",
+    });
     request.operation?.end(outcome === "succeeded" ? "succeeded" : "unknown");
     if (!this.batchCancelling) this.next();
   }

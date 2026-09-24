@@ -39,3 +39,17 @@ test("a failed native cancel callback cannot leave another transport callback un
   WebAuthnPrompts.prototype.cancel.call(controller, request, "provider-switch");
   assert.deepEqual(calls, ["pin", "problem", "warn", "shared:cancel", "end:unknown", "next"]);
 });
+
+test("WebAuthn settlement records a UI choice without claiming the winning authenticator", () => {
+  const events = [];
+  const request = { id: "33333333-3333-4333-8333-333333333333", kind: "qr", methodChosen: "phone", detach() {},
+    operation: { end: status => events.push(["operation", status]) } };
+  const controller = { pending: new Map([[request.id, request]]), batchCancelling: false,
+    logger: { info: (name, fields) => events.push([name, fields]) }, next() {} };
+  WebAuthnPrompts.prototype.closeRequest.call(controller, request.id, "succeeded");
+  assert.deepEqual(events, [
+    ["browser.webauthn_settled", { promptKind: "qr", selectedMethod: "phone", requestId: request.id, outcome: "succeeded" }],
+    ["operation", "succeeded"],
+  ]);
+  assert.equal(controller.pending.size, 0);
+});

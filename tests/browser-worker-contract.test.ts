@@ -2603,6 +2603,8 @@ function toolConfirmationPage(options: {
   allowLabel?: "Allow once" | "Allow";
   dismissDuringDenyWait?: boolean;
   denyUnavailable?: boolean;
+  dismissDuringAllowWait?: boolean;
+  allowUnavailable?: boolean;
 } = {}): {
   page: Page;
   pressed: string[];
@@ -2618,6 +2620,8 @@ function toolConfirmationPage(options: {
     return {
       last: () => button(name),
       waitFor: async () => {
+        if (actualName && actualName !== "Deny" && options.dismissDuringAllowWait) { visible = false; throw new Error("Allow disappeared with its card"); }
+        if (actualName && actualName !== "Deny" && options.allowUnavailable) throw new Error("Allow once is unavailable while approval remains visible");
         if (actualName === "Deny" && options.dismissDuringDenyWait) { visible = false; throw new Error("Deny disappeared with its card"); }
         if (actualName === "Deny" && options.denyUnavailable) throw new Error("Deny is unavailable while approval remains visible");
         if (!actualName) throw new Error(`Approval button not found: ${String(name)}`);
@@ -2694,6 +2698,17 @@ test("explicit connector auto-approval still selects Allow once", async () => {
 
   expect(await resolveChatGptToolConfirmation(fixture.page, "Codex Native", true)).toBeTrue();
   expect(fixture.pressed).toEqual(["Allow once:Enter"]);
+});
+
+test("a connector card that disappears while locating Allow once does not abort the browser turn", async () => {
+  const fixture = toolConfirmationPage({ surface: "card", dismissDuringAllowWait: true });
+  expect(await resolveChatGptToolConfirmation(fixture.page, "Codex Native", true)).toBeTrue();
+  expect(fixture.pressed).toEqual([]);
+});
+
+test("a visible connector card without one-time Allow remains an interaction failure", async () => {
+  const fixture = toolConfirmationPage({ surface: "card", allowUnavailable: true });
+  await expect(resolveChatGptToolConfirmation(fixture.page, "Codex Native", true)).rejects.toThrow("Allow once is unavailable");
 });
 
 test("connector auto-approval accepts the current shortened Allow action", async () => {

@@ -853,6 +853,7 @@ export async function resolveChatGptToolConfirmation(
     .last();
   if (!await dialog.isVisible().catch(() => false)) return false;
   await onVisible?.();
+  if (!await dialog.isVisible()) return true;
 
   if (autoApprove) {
     // ChatGPT exposes either "Allow once" or the shorter "Allow" for the
@@ -861,8 +862,16 @@ export async function resolveChatGptToolConfirmation(
     const allowCurrentAction = dialog
       .getByRole("button", { name: /^Allow(?: once)?$/ })
       .last();
-    await allowCurrentAction.waitFor({ state: "visible", timeout: 10_000 });
-    await allowCurrentAction.press("Enter");
+    try { await allowCurrentAction.waitFor({ state: "visible", timeout: 10_000 }); }
+    catch (error) {
+      if (!await dialog.isVisible()) return true;
+      throw error;
+    }
+    try { await allowCurrentAction.press("Enter"); }
+    catch (error) {
+      if (!await dialog.isVisible()) return true;
+      throw error;
+    }
     return true;
   }
 

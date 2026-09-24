@@ -203,6 +203,8 @@ Electron state、ブラウザーの cookie／ログイン、ChatGPT アカウン
 Responses daemon の起動や Codex の変更は行いません。任意の Full セットアップでは、独立した ChatGPT コネクタ名
 `Codex Native2 DEV` を使用し、隔離された MCP トンネルのみを起動・監視します。
 
+停止中の DEV プロファイルを起動する際は、`CODEX_WEB_GPT_LAUNCHER_EXECUTABLE` に検証済みパッケージの実行ファイルの絶対パスを設定してください。以後の `dev:launcher` は稼働中の DEV ランチャーを再利用し、このフォークの WebAuthn ランタイム記録がない可能性のある通常のインストール版へ暗黙に切り替えません。
+
 `dev:chat` は名前付きの永続的な synthetic outer-Codex ハーネスです。現在の作業ツリーを、隔離されたランチャーの
 ブラウザー、一時チャット、プロンプトコンパイラー、Responses parser、コンパクションハンドラーを通して実行します。
 任意の Full セットアップでは MCP コネクタと broker も検証され、ツールの効果は明示的なシミュレーション結果になります。
@@ -213,9 +215,10 @@ Browser-only チャットは外側のツールを公開しません。Responses 
 シミュレーションツールのターンが必要な場合にのみ、任意の Full ハーネスを設定します。
 ランチャーは DEV トンネルを使用可能な状態に保ち、名前付きチャットは必要に応じて broker を接続します。
 本番の認証情報や `Codex Native2` コネクタが暗黙的に再利用されることはありません。
-[DEV chat ハーネス](docs/dev-chat.md)を参照してください。
+ビルド、起動、コネクタ設定は[DEV ランチャーのセットアップ](docs/dev-setup.md)、対話コマンドは[DEV chat ハーネス](docs/dev-chat.md)を参照してください。
 
 - [アーキテクチャ](docs/architecture.md)
+- [DEV ランチャーのセットアップ](docs/dev-setup.md)
 - [DEV chat ハーネス](docs/dev-chat.md)
 - [セキュリティモデル](docs/security-model.md)
 - [トラブルシューティング](TROUBLESHOOTING.md)

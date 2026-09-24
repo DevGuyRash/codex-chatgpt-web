@@ -193,6 +193,8 @@ bun run app:package
 Codex。可选的完整模式只会启动并监管隔离的 DEV MCP tunnel，并使用独立连接器名称
 `Codex Native2 DEV`。
 
+启动已停止的 DEV 配置时，请将 `CODEX_WEB_GPT_LAUNCHER_EXECUTABLE` 设为经过验证的安装包可执行文件的绝对路径。再次运行 `dev:launcher` 会复用正在运行的 DEV 启动器，不会自动回退到可能缺少此分支 WebAuthn 运行时记录的普通安装版。
+
 `dev:chat` 是一个具名、持久的合成外层 Codex harness。它通过隔离的启动器浏览器、临时聊天、
 prompt compiler、Responses parser 和压缩处理器执行当前工作树。可选的完整模式也会测试 MCP
 连接器和 broker；工具效果会显示为明确的模拟回执。仅浏览器聊天不会暴露外层工具。该命令不会
@@ -200,9 +202,10 @@ prompt compiler、Responses parser 和压缩处理器执行当前工作树。可
 不带消息运行时，可使用 `/status`、`/fill 30000`、`/compact`、`/model` 和 `/reset`。首次使用时，
 请在标有 **DEV** 的窗口中登录并初始化一次配置。完整模式仅用于模拟工具轮次；DEV 启动器会保持
 DEV tunnel 就绪，具名聊天按需连接 broker。正式凭据和 `Codex Native2` 连接器绝不会被隐式复用。
-详见 [DEV chat harness](docs/dev-chat.md)。
+构建、启动和连接器设置详见 [DEV 启动器设置](docs/dev-setup.md)；交互命令详见 [DEV chat harness](docs/dev-chat.md)。
 
 - [架构说明](docs/architecture.md)
+- [DEV 启动器设置](docs/dev-setup.md)
 - [DEV chat harness](docs/dev-chat.md)
 - [安全模型](docs/security-model.md)
 - [故障排除](TROUBLESHOOTING.md)

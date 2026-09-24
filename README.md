@@ -209,19 +209,18 @@ diagnostics, broker, and tunnel profile. It can run beside the normal launcher a
 Responses daemon or changes Codex. Optional Full setup starts and supervises only its isolated MCP
 tunnel, using the distinct ChatGPT connector name `Codex Native2 DEV`.
 
+Set `CODEX_WEB_GPT_LAUNCHER_EXECUTABLE` to the absolute path of a reviewed package when starting a stopped DEV profile. A later `dev:launcher` call reuses its active owner; it never falls back to the normal installed launcher, which may lack this fork's WebAuthn runtime record.
+
 `dev:chat` is a named, persistent synthetic outer-Codex harness. It executes the current working
 tree through that isolated launcher browser, Temporary Chat, prompt compiler, Responses parser, and
 compaction handlers. Optional Full setup also exercises the MCP connector and broker; tool effects
 are explicit simulation receipts. Browser-only chats expose no outer tools. It does
 not open a Responses listener, change `openai_base_url`, stop the live daemon, or claim port 17841.
 Run it without a message for `/status`, `/fill 30000`, `/compact`, `/model`, and `/reset` commands.
-Sign in and initialize the profile once inside the window labelled **DEV**. Configure optional Full
-harness only for simulated tool rounds; its launcher keeps the DEV tunnel ready while named chats
-attach their broker on demand. Production credentials and the `Codex Native2` connector are never
-reused implicitly. See
-[DEV chat harness](docs/dev-chat.md).
+Sign in and initialize the profile once inside the window labelled **DEV**. Configure optional Full harness only for simulated tool rounds; its launcher keeps the DEV tunnel ready while named chats attach their broker on demand. Production credentials and the `Codex Native2` connector are never reused implicitly. See [development launcher setup](docs/dev-setup.md) for building, launching, and connector setup, and [DEV chat harness](docs/dev-chat.md) for interactive commands.
 
 - [Architecture](docs/architecture.md)
+- [Development launcher setup](docs/dev-setup.md)
 - [DEV chat harness](docs/dev-chat.md)
 - [Security model](docs/security-model.md)
 - [Troubleshooting](TROUBLESHOOTING.md)

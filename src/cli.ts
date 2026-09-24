@@ -35,6 +35,7 @@ import { VERSION } from "./version";
 import { applyCodexIntegrationRepair, previewCodexIntegrationRepair } from "./codex-integration-repair";
 import { assertRuntimeEndpointClosed } from "./service";
 import { runDevCommand } from "./dev-chat/cli";
+import { activateDevProfileEnvironment, resolveDevProfilePaths } from "./dev-chat/profile";
 import { integrationLaunch, integrationLaunchCommand, listIntegrationTargets, resolveIntegrationTarget } from "./codex-integration-target";
 import { withConfigurationReview } from "./codex-configuration-review";
 import type { IntegrationTarget } from "./contracts/codex-integration";
@@ -657,6 +658,12 @@ async function main(): Promise<void> {
   if (command === "dev" && (home || codexHome || profile)) {
     throw new Error(`${home ? "--home does not apply" : "Integration target selectors do not apply"} to DEV mode; use CODEX_WEB_GPT_DEV_HOME for an explicit isolated DEV profile`);
   }
+  // Bind diagnostics and all later ambient clients to DEV before the first worker is created.
+  let devPaths: ReturnType<typeof resolveDevProfilePaths> | undefined;
+  if (command === "dev") {
+    for (const key of ["CODEX_CHATGPT_WEB_DIAGNOSTICS_WORKER", "CODEX_CHATGPT_WEB_DIAGNOSTICS_FD", "CODEX_CHATGPT_WEB_TRACEPARENT", "CODEX_WEB_GPT_CAPTURE_CAMPAIGN_ID"]) delete process.env[key];
+    devPaths = activateDevProfileEnvironment(resolveDevProfilePaths());
+  }
   const runtimeRoot = getConfigDir();
   let target: IntegrationTarget | undefined;
   if (codexHome !== undefined || profile !== undefined) {
@@ -742,7 +749,7 @@ async function main(): Promise<void> {
     const server = startServer(config, { cleanupClaims: new InterruptCleanupClaims(getConfigDir()) });
     stdout.write(`codex-chatgpt-web ${VERSION} listening on http://${config.host}:${server.port}/v1 (${config.mode})\n`);
     await new Promise<void>(() => {});
-  } else if (command === "dev") await runDevCommand(args);
+  } else if (command === "dev") await runDevCommand(args, devPaths);
   else if (command === "mcp") await runChatGptMcpMain(args);
   else if (command === "service") await serviceCommand(args);
   else if (command === "hook") {

@@ -87,6 +87,8 @@ const APP_ICON_PATH = path.join(__dirname, "..", "assets", "icon.png");
 
 process.env.CODEX_CHATGPT_WEB_HOME = CORE_HOME;
 process.env.CODEX_HOME = LAUNCHER_PROFILE.codexHome;
+if (IS_DEV_PROFILE) process.env.CODEX_WEB_GPT_DEV_PROFILE = "1";
+else delete process.env.CODEX_WEB_GPT_DEV_PROFILE;
 app.setName(LAUNCHER_PROFILE.displayName);
 if (process.platform === "win32") {
   app.setAppUserModelId(IS_DEV_PROFILE ? "dev.codexwebgpt.launcher.dev" : "dev.codexwebgpt.launcher");

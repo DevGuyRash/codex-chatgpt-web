@@ -98,6 +98,7 @@ export function activateDevProfileEnvironment(paths = resolveDevProfilePaths()):
   process.env.CODEX_WEB_GPT_DEV_HOME = paths.home;
   process.env.CODEX_CHATGPT_WEB_HOME = paths.home;
   process.env.CODEX_HOME = paths.codexHome;
+  process.env.CODEX_WEB_GPT_DEV_PROFILE = "1";
   if (getConfigPath() !== paths.configPath) {
     throw new Error("DEV profile environment did not resolve to its isolated configuration path");
   }

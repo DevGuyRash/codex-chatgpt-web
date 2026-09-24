@@ -295,9 +295,8 @@ async function interactive(driver: DevChatDriver, state: DevChatState): Promise<
   }
 }
 
-export async function runDevCommand(args: string[]): Promise<void> {
+export async function runDevCommand(args: string[], paths = resolveDevProfilePaths()): Promise<void> {
   const action = args.shift() ?? "help";
-  const paths = resolveDevProfilePaths();
   if (action === "help") {
     if (args.length > 0) throw new Error(`Unknown DEV arguments: ${args.join(" ")}`);
     stdout.write(DEV_HELP);

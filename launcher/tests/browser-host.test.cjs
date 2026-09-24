@@ -1782,6 +1782,24 @@ test("an uninitialized browser surface is reaped instead of remaining as a gray 
   }]]);
 });
 
+test("closed running tabs release dead helpers without losing live late-completion ownership", () => {
+  const deadTrace = "dead-helper-trace";
+  const liveTrace = "live-helper-trace";
+  const fixture = Object.assign(Object.create(BrowserHost.prototype), {
+    turnTabs: new Map(),
+    closedTurnOwners: new Map([[deadTrace, 99_999_999], [liveTrace, process.pid]]),
+    userCancelledTurnOwners: new Map([[deadTrace, 99_999_999], [liveTrace, process.pid]]),
+    lastTurnSweepAt: 100,
+  });
+
+  BrowserHost.prototype.reapExpiredTurnTabs.call(fixture, 101);
+
+  assert.equal(fixture.closedTurnOwners.has(deadTrace), false);
+  assert.equal(fixture.userCancelledTurnOwners.has(deadTrace), false);
+  assert.equal(fixture.closedTurnOwners.get(liveTrace), process.pid);
+  assert.equal(fixture.userCancelledTurnOwners.get(liveTrace), process.pid);
+});
+
 test("removing the final turn tab keeps the descriptor-owned idle host attached offscreen", () => {
   const calls = [];
   const hiddenBounds = { x: 1201, y: 801, width: 1200, height: 800 };
@@ -2601,6 +2619,8 @@ test("a retained browser tab expires at thirty minutes", () => {
   };
   const fixture = {
     turnTabs: new Map([[tab.id, tab]]),
+    closedTurnOwners: new Map(),
+    userCancelledTurnOwners: new Map(),
     logger: { info() {} },
     removeTurnTab(candidate, abortRunning) {
       removed.push([candidate.id, abortRunning]);
@@ -3186,6 +3206,8 @@ test("manual turns have no live-session TTL but are revoked when their owner pro
   };
   const fixture = Object.assign(Object.create(BrowserHost.prototype), {
     turnTabs: new Map([[live.id, live], [dead.id, dead]]),
+    closedTurnOwners: new Map(),
+    userCancelledTurnOwners: new Map(),
     manualTerminalSignals: new Map(),
     logger: { info() {}, warn() {} },
     removeTurnTab(tab) {

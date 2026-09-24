@@ -54,6 +54,8 @@ test("the first sweep after a suspension refreshes stale leases instead of reapi
   const host = {
     lastTurnSweepAt: 1_000,
     turnTabs: new Map([["t1", tab]]),
+    closedTurnOwners: new Map(),
+    userCancelledTurnOwners: new Map(),
     logger: { warn: (event, detail) => warnings.push({ event, detail }), info: () => {} },
     removeTurnTab: t => reaped.push(t.traceId),
     refreshTurnLeases: BrowserHost.prototype.refreshTurnLeases,
@@ -80,6 +82,8 @@ test("a helper that is genuinely gone is still reaped on the ordinary cadence", 
   const host = {
     lastTurnSweepAt: 56_000,
     turnTabs: new Map([["t1", tab]]),
+    closedTurnOwners: new Map(),
+    userCancelledTurnOwners: new Map(),
     logger: { warn: () => {}, info: () => {} },
     removeTurnTab: t => reaped.push(t.traceId),
     refreshTurnLeases: BrowserHost.prototype.refreshTurnLeases,

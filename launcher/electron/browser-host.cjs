@@ -1435,6 +1435,14 @@ class BrowserHost {
   }
 
   reapExpiredTurnTabs(now = Date.now()) {
+    // A closed running tab retains its owner for a late native endTurn. Once that
+    // helper has exited, no valid completion can arrive and retaining the trace
+    // for the lifetime of a long-running launcher would grow without bound.
+    for (const [traceId, helperPid] of this.closedTurnOwners) {
+      if (processRunning(helperPid)) continue;
+      this.closedTurnOwners.delete(traceId);
+      this.userCancelledTurnOwners.delete(traceId);
+    }
     const lastSweepAt = this.lastTurnSweepAt;
     this.lastTurnSweepAt = now;
     if (sweepGapIndicatesSuspension(lastSweepAt, now, TURN_HEARTBEAT_SWEEP_MS)) {
@@ -3095,6 +3103,8 @@ class BrowserHost {
       if (!tab.view.webContents.isDestroyed()) tab.view.webContents.close();
     }
     this.turnTabs.clear();
+    this.closedTurnOwners.clear();
+    this.userCancelledTurnOwners.clear();
     if (this.view && !this.view.webContents.isDestroyed()) {
       this.browserExtensions?.unregister(this.view.webContents);
       this.view.webContents.close();

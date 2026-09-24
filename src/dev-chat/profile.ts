@@ -4,6 +4,7 @@ import { homedir } from "node:os";
 import { isAbsolute, join, posix, resolve, win32 } from "node:path";
 import { expandUserPath, getConfigPath } from "../config";
 import {
+  inspectLauncherBrowserHostLiveness,
   readLauncherBrowserHostDescriptor,
   type LauncherBrowserHostDescriptor,
 } from "../launcher-browser-host";
@@ -152,6 +153,14 @@ export function installedLauncherCandidates({
 }
 
 export function findInstalledLauncherExecutable(options: Parameters<typeof installedLauncherCandidates>[0] = {}): string {
+  const override = (options.environment ?? process.env).CODEX_WEB_GPT_LAUNCHER_EXECUTABLE?.trim();
+  if (override) {
+    const expanded = expandUserPath(override);
+    if (!isAbsolute(expanded)) throw new Error("Selected DEV launcher executable must be an absolute path");
+    const selected = resolve(expanded);
+    if (executableFile(selected)) return selected;
+    throw new Error(`Selected DEV launcher executable is not an executable regular file: ${selected}`);
+  }
   const candidates = installedLauncherCandidates(options);
   const executable = candidates.find(executableFile);
   if (executable) return executable;
@@ -181,6 +190,17 @@ function devDescriptor(path: string): LauncherBrowserHostDescriptor {
   return descriptor;
 }
 
+function processRunning(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ESRCH") return false;
+    if ((error as NodeJS.ErrnoException).code === "EPERM") return true;
+    throw error;
+  }
+}
+
 export async function waitForDevLauncher(
   descriptorPath: string,
   timeoutMs = 30_000,
@@ -189,7 +209,10 @@ export async function waitForDevLauncher(
   let lastError = "descriptor is not ready";
   while (Date.now() < deadline) {
     try {
-      return devDescriptor(descriptorPath);
+      return await inspectLauncherBrowserHostLiveness(descriptorPath, {
+        expectedProfile: DEV_LAUNCHER_PROFILE,
+        timeoutMs: 1_000,
+      });
     } catch (error) {
       lastError = error instanceof Error ? error.message : String(error);
     }
@@ -203,10 +226,30 @@ export async function launchDevProfile(
   options: { executable?: string; timeoutMs?: number } = {},
 ): Promise<{ descriptor: LauncherBrowserHostDescriptor; executable: string; alreadyRunning: boolean }> {
   let existing: LauncherBrowserHostDescriptor | undefined;
-  try { existing = devDescriptor(paths.descriptorPath); }
-  catch { /* A stale or absent descriptor is replaced only by its owning launcher. */ }
+  try {
+    existing = devDescriptor(paths.descriptorPath);
+  } catch { /* A missing or dead descriptor is replaced only by its owning launcher. */ }
+  if (existing) {
+    try {
+      const live = await inspectLauncherBrowserHostLiveness(paths.descriptorPath, {
+        expectedProfile: DEV_LAUNCHER_PROFILE,
+        timeoutMs: 3_000,
+      });
+      return { descriptor: live, executable: "", alreadyRunning: true };
+    } catch (error) {
+      // A dead owner may leave its descriptor behind. An unresponsive live owner still retains
+      // the profile lock, so starting a second launcher would race its browser and tunnel state.
+      if (processRunning(existing.pid)) throw error;
+    }
+  }
 
-  const executable = options.executable ? resolve(options.executable) : findInstalledLauncherExecutable();
+  const selected = options.executable?.trim() || process.env.CODEX_WEB_GPT_LAUNCHER_EXECUTABLE?.trim();
+  if (!selected) {
+    throw new Error("Starting DEV requires CODEX_WEB_GPT_LAUNCHER_EXECUTABLE set to the absolute executable path of the reviewed WebAuthn-enabled launcher; the normal installed app is not used implicitly");
+  }
+  const expanded = expandUserPath(selected);
+  if (!isAbsolute(expanded)) throw new Error("DEV launcher executable must be an absolute path");
+  const executable = resolve(expanded);
   if (!isAbsolute(executable) || !executableFile(executable)) {
     throw new Error(`DEV launcher executable is not an executable regular file: ${executable}`);
   }
@@ -218,5 +261,5 @@ export async function launchDevProfile(
   });
   child.unref();
   const descriptor = await waitForDevLauncher(paths.descriptorPath, options.timeoutMs);
-  return { descriptor, executable, alreadyRunning: existing?.pid === descriptor.pid };
+  return { descriptor, executable, alreadyRunning: false };
 }

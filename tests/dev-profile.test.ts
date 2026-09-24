@@ -1,13 +1,15 @@
 import { expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import {
   devLauncherEnvironment,
   installedLauncherCandidates,
+  launchDevProfile,
   readDevChatExperimentalFeatures,
   resolveDevProfilePaths,
 } from "../src/dev-chat/profile";
+import { LAUNCHER_BROWSER_IDLE_URL } from "../src/launcher-browser-host";
 
 test("DEV profile paths isolate browser, Codex, config, chat, and runtime state", () => {
   const homeDirectory = "/Users/tester";
@@ -118,4 +120,38 @@ test("DEV launcher child cannot inherit production home or browser-profile overr
     KEEP_ME: "yes",
     CODEX_WEB_GPT_DEV_HOME: paths.home,
   });
+});
+
+test("a dead DEV descriptor cannot block an explicit reviewed launcher restart", async () => {
+  const root = mkdtempSync(join(tmpdir(), "codex-web-gpt-dev-dead-owner-"));
+  const paths = resolveDevProfilePaths({
+    homeDirectory: root,
+    environment: { CODEX_WEB_GPT_DEV_HOME: join(root, "dev") },
+  });
+  const executable = join(root, "reviewed-launcher");
+  const helperScript = join(root, "helper.cjs");
+  try {
+    mkdirSync(join(paths.home, "runtime"), { recursive: true });
+    writeFileSync(executable, '#!/bin/sh\nprintf started > "$CODEX_WEB_GPT_DEV_HOME/started"\n', { mode: 0o755 });
+    writeFileSync(helperScript, "module.exports = {};\n");
+    writeFileSync(paths.descriptorPath, `${JSON.stringify({
+      version: 3,
+      kind: "codex-web-gpt-launcher",
+      profile: "development",
+      pid: 999999999,
+      endpoint: "http://127.0.0.1:48121",
+      control: { endpoint: "http://127.0.0.1:48122", token: "a".repeat(64) },
+      helper: { executable: process.execPath, script: helperScript },
+      partition: "persist:codex-web-gpt-dev-chatgpt",
+      idleUrl: LAUNCHER_BROWSER_IDLE_URL,
+      surfaceId: "d".repeat(32),
+      surfaceTargets: { ["d".repeat(32)]: "dev_native_target_0123456789abcdef" },
+      createdAt: new Date().toISOString(),
+    })}\n`, { mode: 0o600 });
+    await expect(launchDevProfile(paths, { executable, timeoutMs: 250 }))
+      .rejects.toThrow("DEV launcher did not become ready");
+    expect(existsSync(join(paths.home, "started"))).toBe(true);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 });

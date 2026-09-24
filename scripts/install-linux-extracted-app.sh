@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-if [[ $# -ne 3 ]]; then
-  printf 'Usage: sudo bash %s EXTRACTED_APPDIR /opt/codex-web-gpt[-dev]/app-NAME EXPECTED_APP_ASAR_SHA256\n' "$0" >&2
+if [[ $# -ne 4 ]]; then
+  printf 'Usage: sudo bash %s EXTRACTED_APPDIR /opt/codex-web-gpt[-dev]/app-NAME EXPECTED_APP_ASAR_SHA256 EXPECTED_RUNTIME_CLI_SHA256\n' "$0" >&2
   exit 2
 fi
 if [[ "$(uname -s)" != Linux || $EUID -ne 0 ]]; then
@@ -13,23 +13,25 @@ fi
 source_root=${1%/}
 destination=${2%/}
 expected_hash=$3
+expected_cli_hash=$4
 if [[ "$source_root" != /* || -L "$source_root" || ! -d "$source_root" || ! -x "$source_root/AppRun"
-  || ! -f "$source_root/resources/app.asar" ]]; then
-  printf 'The source must be an absolute extracted AppImage directory with AppRun and resources/app.asar.\n' >&2
+  || ! -f "$source_root/resources/app.asar" || ! -f "$source_root/resources/runtime/app/cli.js" ]]; then
+  printf 'The source must be an absolute extracted AppImage directory with AppRun, app.asar, and the runtime CLI.\n' >&2
   exit 2
 fi
 if [[ ! "$destination" =~ ^/opt/codex-web-gpt(-dev)?/app-[A-Za-z0-9._-]+$ ]]; then
   printf 'The destination must be a new app-NAME directory under /opt/codex-web-gpt or /opt/codex-web-gpt-dev.\n' >&2
   exit 2
 fi
-if [[ ! "$expected_hash" =~ ^[a-f0-9]{64}$ ]]; then
-  printf 'Expected app.asar SHA-256 must be 64 lowercase hexadecimal characters.\n' >&2
+if [[ ! "$expected_hash" =~ ^[a-f0-9]{64}$ || ! "$expected_cli_hash" =~ ^[a-f0-9]{64}$ ]]; then
+  printf 'Expected app.asar and runtime CLI SHA-256 values must be 64 lowercase hexadecimal characters.\n' >&2
   exit 2
 fi
 
 source_hash=$(sha256sum "$source_root/resources/app.asar" | cut -d' ' -f1)
-if [[ "$source_hash" != "$expected_hash" ]]; then
-  printf 'Extracted app.asar hash differs from the reviewed build.\n' >&2
+source_cli_hash=$(sha256sum "$source_root/resources/runtime/app/cli.js" | cut -d' ' -f1)
+if [[ "$source_hash" != "$expected_hash" || "$source_cli_hash" != "$expected_cli_hash" ]]; then
+  printf 'Extracted launcher or runtime hash differs from the reviewed build.\n' >&2
   exit 1
 fi
 parent=${destination%/*}
@@ -51,7 +53,9 @@ find "$destination" -type d -exec chmod 755 {} +
 find "$destination" -type f -perm /022 -exec chmod go-w {} +
 
 installed_hash=$(sha256sum "$destination/resources/app.asar" | cut -d' ' -f1)
-if [[ "$installed_hash" != "$expected_hash" || $(stat -c %u "$destination/AppRun") != 0 ]]; then
+installed_cli_hash=$(sha256sum "$destination/resources/runtime/app/cli.js" | cut -d' ' -f1)
+if [[ "$installed_hash" != "$expected_hash" || "$installed_cli_hash" != "$expected_cli_hash"
+  || $(stat -c %u "$destination/AppRun") != 0 ]]; then
   printf 'Installed app identity or ownership verification failed; do not launch it.\n' >&2
   exit 1
 fi

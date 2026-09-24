@@ -61,11 +61,11 @@ Linux 1Password desktop integration has an additional packaging constraint: on t
 mkdir -p /absolute/staging/directory
 cd /absolute/staging/directory
 /absolute/artifacts/REVIEWED.AppImage --appimage-extract >/dev/null
-sha256sum squashfs-root/resources/app.asar
-sudo bash /absolute/repo/scripts/install-linux-extracted-app.sh /absolute/staging/directory/squashfs-root /opt/codex-web-gpt-dev/app-reviewed EXPECTED_APP_ASAR_SHA256
+sha256sum squashfs-root/resources/app.asar squashfs-root/resources/runtime/app/cli.js
+sudo bash /absolute/repo/scripts/install-linux-extracted-app.sh /absolute/staging/directory/squashfs-root /opt/codex-web-gpt-dev/app-reviewed EXPECTED_APP_ASAR_SHA256 EXPECTED_RUNTIME_CLI_SHA256
 ```
 
-The installer refuses an existing destination, preserves root ownership, makes extracted directories traversable, removes group/world write access, and verifies the installed `app.asar` hash. Select the installed `AppRun` as the DEV executable only after that verification; the normal installation remains separate. The official 1Password extension is installed only when selected in the launcher's extension catalog, and its desktop application and additional-browser trust step are separate. See [Embedded browser authentication](browser-authentication.md) before testing 1Password. Hardware-key login does not require installing that extension. This Linux install does not establish Windows or macOS provider trust; those platforms use their own packaged app identity and need separate real-device acceptance.
+The installer refuses an existing destination, preserves root ownership, makes extracted directories traversable, removes group/world write access, and verifies the installed launcher `app.asar` and bundled runtime CLI hashes. Select the installed `AppRun` as the DEV executable only after that verification; the normal installation remains separate. The official 1Password extension is installed only when selected in the launcher's extension catalog, and its desktop application and additional-browser trust step are separate. See [Embedded browser authentication](browser-authentication.md) before testing 1Password. Hardware-key login does not require installing that extension. This Linux install does not establish Windows or macOS provider trust; those platforms use their own packaged app identity and need separate real-device acceptance.
 
 ## Initialize the isolated profile
 

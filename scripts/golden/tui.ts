@@ -8,7 +8,7 @@ import { isProGeneration } from "../../src/campaign-policy";
 import type { ChatGptWebModelRoute } from "../../src/chatgpt-web-models";
 import { NativeRpcError, OwnedNativeProcess } from "./native-process";
 import { ownedProcessIdentity, ownsProcess, type OwnedProcess } from "./workspace";
-import type { OwnedNativeSocketIdentity } from "./native-socket";
+import { inspectOwnedNativeSocket, type OwnedNativeSocketIdentity } from "./native-socket";
 import { goldenArtifactWritableRoots } from "./runtime-config";
 
 interface TuiOptions {
@@ -26,7 +26,7 @@ export class GoldenTui {
   private serverIdentity?: OwnedProcess;
   private paneIdentity?: OwnedProcess;
   private socketInode?: number;
-  private controlInode?: number;
+  private controlEndpoint?: OwnedNativeSocketIdentity;
   private ended = false;
   private closing?: Promise<void>;
   private readonly socket: string;
@@ -71,14 +71,13 @@ export class GoldenTui {
         if (exited || Date.now() > deadline) throw new NativeRpcError("Private native control socket did not become ready", "native_tui_unavailable");
         await wait(50);
       }
-      if (!lstatSync(tui.control).isSocket()) throw new Error("Native control endpoint is not a private socket");
-      tui.controlInode = lstatSync(tui.control).ino;
+      if (!tui.native.identity) throw new Error("Native app-server process identity is unavailable");
+      tui.controlEndpoint = inspectOwnedNativeSocket(tui.control, tui.native.identity);
       const pid = Number(tui.tmux(["new-session", "-d", "-P", "-F", "#{pid}", "-s", "golden", "-x", "120", "-y", "40", "-c", options.cwd, "--", options.nativeExecutable,
         "--remote", `unix://${tui.control}`, "--no-alt-screen", ...nativeConfig, "--sandbox", "workspace-write", "--ask-for-approval", "never"], true).trim());
       tui.serverIdentity = ownedProcessIdentity(pid); tui.socketInode = lstatSync(tui.socket).ino;
       tui.assertOwned();
       tui.paneIdentity = ownedProcessIdentity(Number(tui.tmux(["display-message", "-p", "-t", "golden:0.0", "#{pane_pid}"]).trim()));
-      if (!tui.native.identity) throw new Error("Native app-server process identity is unavailable");
       if (!tui.paneIdentity) throw new Error("Native terminal process identity is unavailable");
       await options.onLaunch({ appServer: tui.native.identity, tmux: tui.serverIdentity!, pane: tui.paneIdentity });
       return tui;
@@ -94,8 +93,16 @@ export class GoldenTui {
   controlIdentity(): OwnedNativeSocketIdentity {
     this.assertOwned();
     const owner = this.native.identity;
-    if (!owner || !ownsProcess(owner) || this.controlInode === undefined || lstatSync(this.control).ino !== this.controlInode) throw new NativeRpcError("Private native control endpoint ownership changed", "native_tui_ownership_missing", true);
-    return { path: this.control, inode: this.controlInode, owner: { ...owner } };
+    if (!owner || !this.controlEndpoint) throw new NativeRpcError("Private native control endpoint ownership changed", "native_tui_ownership_missing", true);
+    let current: OwnedNativeSocketIdentity;
+    try { current = inspectOwnedNativeSocket(this.control, owner); }
+    catch { throw new NativeRpcError("Private native control endpoint ownership changed", "native_tui_ownership_missing", true); }
+    const expected = this.controlEndpoint;
+    if (current.inode !== expected.inode || current.linkInode !== expected.linkInode
+      || current.targetPath !== expected.targetPath || current.kernelInode !== expected.kernelInode) {
+      throw new NativeRpcError("Private native control endpoint ownership changed", "native_tui_ownership_missing", true);
+    }
+    return { ...expected, owner: { ...owner } };
   }
   async waitForView(predicate: (text: string) => boolean, options: { timeoutMs: number; signal?: AbortSignal }): Promise<string> {
     const deadline = performance.now() + options.timeoutMs;

@@ -1,9 +1,10 @@
 import { expect, test } from "bun:test";
 import { spawn } from "node:child_process";
-import { chmodSync, lstatSync, mkdtempSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, lstatSync, mkdtempSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { NativeRpc } from "../scripts/golden/native-protocol";
+import { inspectOwnedNativeSocket } from "../scripts/golden/native-socket";
 import { ownedProcessIdentity, ownsProcess } from "../scripts/golden/workspace";
 
 async function fixture() {
@@ -36,6 +37,32 @@ test("private socket ownership failures are typed before attachment and after en
     await expect(client.request("effect")).rejects.toMatchObject({ code: "native_tui_ownership_missing" });
     expect(ownsProcess(peer.identity.owner)).toBeTrue();
   } finally { await client?.close(100); await peer.close(); }
+});
+
+test("an owned private link may target only the native process's exact socket", async () => {
+  const peer = await fixture(); let client: NativeRpc | undefined;
+  const alias = join(peer.root, "native.sock");
+  try {
+    symlinkSync(peer.identity.path, alias);
+    const linked = inspectOwnedNativeSocket(alias, peer.identity.owner);
+    expect(linked.targetPath).toBe(peer.identity.path);
+    expect(linked.linkInode).toBe(lstatSync(alias).ino);
+    expect(inspectOwnedNativeSocket(alias, peer.identity.owner)).toEqual(linked);
+    client = new NativeRpc({ socket: linked, onFrame: () => {} });
+    expect(await client.request("count")).toEqual({ count: 0 });
+    unlinkSync(alias);
+    symlinkSync(peer.identity.path, alias);
+    await expect(client.request("count")).rejects.toMatchObject({ code: "native_tui_ownership_missing" });
+  } finally { await client?.close(100); await peer.close(); }
+});
+
+test("a private link to another native process cannot borrow its socket ownership", async () => {
+  const first = await fixture(), second = await fixture();
+  try {
+    const alias = join(first.root, "foreign.sock");
+    symlinkSync(second.identity.path, alias);
+    expect(() => inspectOwnedNativeSocket(alias, first.identity.owner)).toThrow("not held by its recorded process");
+  } finally { await second.close(); await first.close(); }
 });
 
 for (const [method, code] of [["binary", "native_protocol_invalid"], ["invalid", "native_protocol_invalid"], ["large", "native_protocol_too_large"], ["disconnect", "native_socket_closed"]]) test(`socket ${method} settles pending requests without killing its server`, async () => {

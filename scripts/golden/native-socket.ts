@@ -1,9 +1,42 @@
-import { lstatSync, realpathSync } from "node:fs";
-import { dirname, resolve } from "node:path";
+import { lstatSync, readFileSync, readdirSync, readlinkSync, realpathSync } from "node:fs";
+import { dirname, isAbsolute, resolve } from "node:path";
 import { NativeRpcError } from "./native-process";
 import { ownsProcess, type OwnedProcess } from "./workspace";
 
-export interface OwnedNativeSocketIdentity { path: string; inode: number; owner: OwnedProcess }
+export interface OwnedNativeSocketIdentity {
+  path: string; inode: number; owner: OwnedProcess;
+  linkInode?: number; targetPath?: string; kernelInode?: string;
+}
+
+/** Current native app-server may publish a private symlink to its owned hashed Unix socket. */
+export function inspectOwnedNativeSocket(path: string, owner: OwnedProcess): OwnedNativeSocketIdentity {
+  if (!isAbsolute(path) || resolve(path) !== path || !ownsProcess(owner)) throw new Error("Native socket owner or path is invalid");
+  const uid = process.getuid?.();
+  const privateDirectory = (directoryPath: string) => {
+    const directory = lstatSync(directoryPath);
+    return directory.isDirectory() && directory.uid === uid && (directory.mode & 0o077) === 0
+      && realpathSync(directoryPath) === directoryPath;
+  };
+  if (!privateDirectory(dirname(path))) throw new Error("Native socket request directory is not private");
+  const endpoint = lstatSync(path);
+  if (endpoint.isSocket() && endpoint.uid === uid) return { path, inode: endpoint.ino, owner };
+  if (!endpoint.isSymbolicLink() || endpoint.uid !== uid) throw new Error("Native endpoint is neither an owned socket nor an owned link");
+  const targetPath = readlinkSync(path);
+  if (!isAbsolute(targetPath) || resolve(targetPath) !== targetPath || realpathSync(path) !== targetPath
+    || !privateDirectory(dirname(targetPath))) throw new Error("Native socket link leaves its owned private target");
+  const target = lstatSync(targetPath);
+  if (!target.isSocket() || target.uid !== uid) throw new Error("Native socket link target is not an owned socket");
+  const rows = readFileSync(`/proc/${owner.pid}/net/unix`, "utf8").split("\n").slice(1)
+    .map(line => line.trim().split(/\s+/)).filter(fields => fields.length >= 8
+      && fields[3] === "00010000" && fields[5] === "01" && fields.slice(7).join(" ") === targetPath);
+  const fds = new Set(readdirSync(`/proc/${owner.pid}/fd`).flatMap(fd => {
+    try { return [readlinkSync(`/proc/${owner.pid}/fd/${fd}`)]; }
+    catch { return []; }
+  }));
+  const kernelInode = rows.map(fields => fields[6]!).find(inode => fds.has(`socket:[${inode}]`));
+  if (!kernelInode) throw new Error("Native socket target is not held by its recorded process");
+  return { path, inode: target.ino, owner, linkInode: endpoint.ino, targetPath, kernelInode };
+}
 
 /** Observe an exact private native endpoint; closing this client never stops its owning server. */
 export class OwnedNativeSocket {
@@ -60,10 +93,12 @@ export class OwnedNativeSocket {
     catch { throw new NativeRpcError("Private native socket ownership changed", "native_tui_ownership_missing", true); }
   }
   private inspectOwnership(): void {
-    const identity = this.options.identity, path = resolve(identity.path);
-    const directory = lstatSync(dirname(path)), endpoint = lstatSync(path);
-    if (path !== identity.path || realpathSync(path) !== path || !directory.isDirectory() || directory.uid !== process.getuid?.() || (directory.mode & 0o077) !== 0
-      || !endpoint.isSocket() || endpoint.ino !== identity.inode || endpoint.uid !== directory.uid || !ownsProcess(identity.owner)) throw new NativeRpcError("Private native socket ownership changed", "native_tui_ownership_missing", true);
+    const identity = this.options.identity;
+    const current = inspectOwnedNativeSocket(identity.path, identity.owner);
+    if (current.inode !== identity.inode || current.linkInode !== identity.linkInode
+      || current.targetPath !== identity.targetPath || current.kernelInode !== identity.kernelInode) {
+      throw new NativeRpcError("Private native socket ownership changed", "native_tui_ownership_missing", true);
+    }
   }
   private fail(error: unknown): void {
     if (this.failure) return;

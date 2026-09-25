@@ -10,8 +10,12 @@ import { ContentCaptureCommandSchema, ContentCaptureResultSchema, type ContentCa
 
 export interface WorkerInvocation { executable: string; args: string[]; cwd?: string; }
 type Request = WorkerRequest extends infer T ? T extends WorkerRequest ? Omit<T, "id"> : never : never;
-type Pending = { resolve: (value: unknown) => void; reject: (error: Error) => void; timer: ReturnType<typeof setTimeout>; bytes: number; method: WorkerRequest["method"]; action?: ContentCaptureCommand["action"]; requestedAt: number; workerStartedAt?: number; workerPhase?: DiagnosticWritePhase; workerPhaseAt?: number; inputWriteCompleted: boolean; inputWrittenAt?: number; cpuUsage: NodeJS.CpuUsage; maxEventLoopLagMs: number };
+type Pending = { resolve: (value: unknown) => void; reject: (error: Error) => void; timer: ReturnType<typeof setTimeout>; bytes: number; method: WorkerRequest["method"]; action?: ContentCaptureCommand["action"]; requestedAt: number; deadlineAt: number; timeoutMs: number; extendForCommit?: () => void; workerStartedAt?: number; workerPhase?: DiagnosticWritePhase; workerPhaseAt?: number; inputWriteCompleted: boolean; inputWrittenAt?: number; cpuUsage: NodeJS.CpuUsage; maxEventLoopLagMs: number };
 const MAX_QUEUE_BYTES = 4 * 1024 * 1024;
+// SQLite may be waiting on host I/O after it reports commit progress. Grant one bounded
+// extension for the default write budget; explicit short caller deadlines stay authoritative.
+const COMMIT_PROGRESS_GRACE_MS = 15_000;
+const MAX_COMMIT_REQUEST_MS = 20_000;
 
 /** Cross-platform bounded worker transport, usable by Electron and standalone Bun processes. */
 export class DiagnosticsClient {
@@ -87,6 +91,7 @@ export class DiagnosticsClient {
             if (pending?.method === progress.data.method && pending.workerStartedAt !== undefined) {
               pending.workerPhase = progress.data.phase;
               pending.workerPhaseAt = performance.now();
+              if (progress.data.phase === "commit") pending.extendForCommit?.();
             }
             continue;
           }
@@ -182,24 +187,41 @@ export class DiagnosticsClient {
     signal?.addEventListener("abort", abort, { once: true });
     const requestedAt = performance.now();
     return new Promise((resolve, reject) => {
-      const timer = setTimeout(() => {
+      const onTimeout = () => {
         // A synchronous parent operation can delay both timers and readable events.
         // Drain the pending I/O turn before deciding that the worker did not answer.
         setImmediate(() => {
         const pending = this.pending.get(id);
-        if (!pending) return;
+        if (!pending || performance.now() < pending.deadlineAt) return;
         const details = this.failureDetails(pending);
         const pendingWork = [...this.pending.values()].map(pending => `${pending.method}:${pending.workerStartedAt === undefined ? "start-unobserved" : "started"}:${Math.round(performance.now() - pending.requestedAt)}ms${pending.workerPhase ? `:${pending.workerPhase}:${Math.round(performance.now() - pending.workerPhaseAt!)}ms` : ""}`).join(",");
         if (this.pending.delete(id)) this.pendingBytes -= bytes;
         // An unresponsive transport may still own buffered bytes. Retire it before accepting more.
-        this.failure = `Diagnostic worker request timed out (method=${request.method}; timeoutMs=${timeout}) (elapsedMs=${Math.round(performance.now() - requestedAt)}; pendingRequests=${this.pending.size}; work=${pendingWork}) (${Object.entries(details).map(([key, value]) => `${key}=${value}`).join("; ")})`; this.stopped = true; this.child.kill();
+        this.failure = `Diagnostic worker request timed out (method=${request.method}; timeoutMs=${pending.timeoutMs}) (elapsedMs=${Math.round(performance.now() - requestedAt)}; pendingRequests=${this.pending.size}; work=${pendingWork}) (${Object.entries(details).map(([key, value]) => `${key}=${value}`).join("; ")})`; this.stopped = true; this.child.kill();
         reject(new DiagnosticRequestError("timeout", details));
         });
-      }, timeout);
-      this.pending.set(id, { resolve, reject, timer, bytes, method: request.method, ...(request.method === "content-capture" ? { action: request.command.action } : {}), requestedAt, inputWriteCompleted: false, cpuUsage: process.cpuUsage(), maxEventLoopLagMs: 0 }); this.pendingBytes += bytes;
+      };
+      const pending: Pending = { resolve, reject, timer: setTimeout(onTimeout, timeout), bytes, method: request.method,
+        ...(request.method === "content-capture" ? { action: request.command.action } : {}),
+        requestedAt, deadlineAt: requestedAt + timeout, timeoutMs: timeout,
+        inputWriteCompleted: false, cpuUsage: process.cpuUsage(), maxEventLoopLagMs: 0 };
+      if (timeout === 5000 && (request.method === "append" || request.method === "content-capture")) {
+        let extended = false;
+        pending.extendForCommit = () => {
+          if (extended) return;
+          extended = true;
+          const deadlineAt = Math.min(requestedAt + MAX_COMMIT_REQUEST_MS, performance.now() + COMMIT_PROGRESS_GRACE_MS);
+          if (deadlineAt <= pending.deadlineAt) return;
+          clearTimeout(pending.timer);
+          pending.deadlineAt = deadlineAt;
+          pending.timeoutMs = Math.round(deadlineAt - requestedAt);
+          pending.timer = setTimeout(onTimeout, Math.max(1, deadlineAt - performance.now()));
+        };
+      }
+      this.pending.set(id, pending); this.pendingBytes += bytes;
       this.child.stdin.write(message, error => {
         const pending = this.pending.get(id);
-        if (error) { clearTimeout(timer); if (this.pending.delete(id)) this.pendingBytes -= bytes; reject(new DiagnosticRequestError("unavailable", pending ? this.failureDetails(pending) : undefined)); }
+        if (error) { if (pending) clearTimeout(pending.timer); if (this.pending.delete(id)) this.pendingBytes -= bytes; reject(new DiagnosticRequestError("unavailable", pending ? this.failureDetails(pending) : undefined)); }
         else if (pending) { pending.inputWriteCompleted = true; pending.inputWrittenAt = performance.now(); }
       });
     }).finally(() => {

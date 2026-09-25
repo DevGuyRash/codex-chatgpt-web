@@ -326,6 +326,21 @@ for (const method of ["append", "content-capture"] as const) test(`worker ${meth
   } finally { await client.close(); }
 }, 5000);
 
+test("an observed SQLite commit can outlast the ordinary append deadline without losing the worker", async () => {
+  const home = root();
+  const script = `const { DiagnosticStore } = await import(${JSON.stringify(resolve("src/diagnostics/store.ts"))}); const original = DiagnosticStore.prototype.append; DiagnosticStore.prototype.append = function(events, progress) { return original.call(this, events, phase => { progress?.(phase); if (phase === "commit") Bun.sleepSync(6000); }); }; const { runDiagnosticsWorker } = await import(${JSON.stringify(resolve("src/diagnostics/worker.ts"))}); await runDiagnosticsWorker(${JSON.stringify(join(home, "diagnostics", "observability"))});`;
+  const client = new DiagnosticsClient({ executable: process.execPath, args: ["-e", script] });
+  try {
+    expect((await client.status()).available).toBe(true);
+    const event: DiagnosticEvent = { version: 1, id: crypto.randomUUID(), time: Date.now(), kind: "log", name: "fixture.slow-commit", body: "Safe synthetic commit witness", severity: "info", component: "test", environment: "test", target: "fixture", attributes: {} };
+    expect(await client.request({ method: "append", events: [event] })).toEqual({ accepted: 1 });
+    const status = await client.status();
+    expect(status.available).toBe(true);
+    expect(status.dropped).toBe(0);
+    expect((await client.query({ eventId: event.id })).events.map(item => item.id)).toEqual([event.id]);
+  } finally { await client.close(); }
+}, 15000);
+
 test("worker timeouts identify the active retention phase without exposing its payload", async () => {
   const home = root();
   const script = `const { DiagnosticStore } = await import(${JSON.stringify(resolve("src/diagnostics/store.ts"))}); const original = DiagnosticStore.prototype.prune; DiagnosticStore.prototype.prune = function() { Bun.sleepSync(600); return original.call(this); }; const { runDiagnosticsWorker } = await import(${JSON.stringify(resolve("src/diagnostics/worker.ts"))}); await runDiagnosticsWorker(${JSON.stringify(join(home, "diagnostics", "observability"))});`;

@@ -7,6 +7,7 @@ import { createRequire } from "node:module";
 import type * as Host from "../launcher/diagnostics/host";
 import { CaptureCommandSchema, QuerySchema, QueryResultSchema } from "../src/diagnostics/contracts";
 import { diagnosticsCopy } from "../launcher/src/diagnostics/copy";
+import { ChatGptWebAdapterError } from "../src/adapters/chatgpt-web/adapter-error";
 
 // Real App, emitted host, worker, SQLite and CLI. Test-only HTTP substitutes Electron IPC.
 test.skipIf(!process.env.CHATGPT_TEST_CHROME_EXECUTABLE)("whole launcher opens a persisted failure and keeps capture controls reachable on narrow layouts", async () => {
@@ -18,8 +19,13 @@ test.skipIf(!process.env.CHATGPT_TEST_CHROME_EXECUTABLE)("whole launcher opens a
   try {
     await logger.ready;
     await logger.operation("fixture-approval", async () => { throw new host.DiagnosticError({ code: "setup_preview_stale", message: "Synthetic approval failure: review a fresh preview", recovery: "not-needed" }); }).catch(() => {});
+    await logger.operation("fixture-chatgpt", async () => { throw new ChatGptWebAdapterError("ChatGPT rejected the owned conversation request with HTTP 429", {
+      status: 429, errorType: "rate_limit_error", code: "rate_limit_exceeded", retryable: false, source: "chatgpt-http",
+    }); }).catch(() => {});
     await logger.client!.flush();
-    const problem = (await logger.client!.query({ view: "problems" })).events[0].problem!;
+    const problem = (await logger.client!.query({ view: "problems" })).events.find(event => event.problem?.code === "rate_limit_exceeded")?.problem;
+    if (!problem) throw new Error("The ChatGPT HTTP problem did not reach production diagnostics");
+    expect(problem).toMatchObject({ origin: "chatgpt-http", httpStatus: 429 });
     const built = Bun.spawnSync([process.execPath, "build", "tests/fixtures/diagnostics-app.tsx", "--target", "browser", "--outdir", root], { cwd: resolve("launcher") });
     expect(built.exitCode).toBe(0);
     server = Bun.serve({ hostname: "127.0.0.1", port: 0, async fetch(request) {
@@ -43,7 +49,13 @@ test.skipIf(!process.env.CHATGPT_TEST_CHROME_EXECUTABLE)("whole launcher opens a
       try { await page.getByRole("button", { name: openLabel, exact: true }).click(); }
       catch (error) { throw new Error(`${String(error)}\nRenderer errors: ${JSON.stringify(errors)}\nSynthetic visible state: ${(await page.locator("body").innerText()).slice(0, 4000)}`); }
       await page.getByRole("heading", { name: copy.timeline, exact: true }).waitFor();
-      try { await page.getByRole("complementary", { name: copy.detail }).getByText(problem.message, { exact: true }).first().waitFor(); }
+      try {
+        const inspector = page.getByRole("complementary", { name: copy.detail });
+        await inspector.getByText(problem.message, { exact: true }).first().waitFor();
+        await inspector.getByText(copy.chatgptHttp, { exact: true }).waitFor();
+        await inspector.getByText(problem.code, { exact: true }).waitFor();
+        await inspector.getByText("429", { exact: true }).waitFor();
+      }
       catch (error) {
         await page.screenshot({ path: resolve("context/diagnostics-app-failure.png"), fullPage: true });
         throw new Error(`${String(error)}\nSynthetic inspector: ${await page.getByRole("complementary", { name: copy.detail }).innerText()}\nErrors: ${JSON.stringify(errors)}`);

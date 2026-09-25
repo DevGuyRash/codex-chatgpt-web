@@ -27,7 +27,7 @@ const pendingSubmissionSchema = z.object({
   message: z.string().min(1),
   model: z.enum(DEV_CHAT_MODELS),
   status: z.enum(["unsent", "uncertain"]),
-  reason: z.literal("rate_limit_before_send"),
+  reason: z.enum(["rate_limit_before_send", "chatgpt_ui_blocked_before_send"]),
   observedAt: z.string(),
 });
 

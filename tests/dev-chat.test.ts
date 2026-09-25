@@ -327,7 +327,7 @@ test("interrupting a DEV message aborts its active browser request without commi
   }
 });
 
-test("a pre-Send rate limit preserves the exact pending DEV message and requires an explicit retry", async () => {
+test.each(["rate_limit_before_send", "chatgpt_ui_blocked_before_send"] as const)("a pre-Send %s preserves the exact pending DEV message and requires an explicit retry", async code => {
   const root = scratch("cgw-dev-rate-limit");
   const config = {
     ...defaultConfig("browser-only"),
@@ -340,10 +340,10 @@ test("a pre-Send rate limit preserves the exact pending DEV message and requires
     async runTurn(_parsed, _incoming, emit) {
       emit({
         type: "error",
-        message: "ChatGPT rate limit: too many requests. The pending message was not sent.",
-        status: 429,
-        errorType: "rate_limit_error",
-        code: "rate_limit_before_send",
+        message: "ChatGPT did not accept the pending message.",
+        status: code === "rate_limit_before_send" ? 429 : 502,
+        errorType: code === "rate_limit_before_send" ? "rate_limit_error" : "server_error",
+        code,
         retryable: false,
       });
     },
@@ -361,9 +361,9 @@ test("a pre-Send rate limit preserves the exact pending DEV message and requires
       message: "Continue this exact long chat",
       model: "chatgpt-web/high",
       status: "unsent",
-      reason: "rate_limit_before_send",
+      reason: code,
     });
-    await expect(rateLimited.send(state, "A different message")).rejects.toThrow("pending rate-limited message");
+    await expect(rateLimited.send(state, "A different message")).rejects.toThrow("pending unsent message");
     expect(() => rateLimited.setModel(state, "chatgpt-web/light")).toThrow("pending DEV message");
   } finally {
     await rateLimited.close();

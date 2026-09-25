@@ -505,7 +505,7 @@ export class DevChatDriver {
         throw new Error("DEV retry must preserve the exact pending message and model");
       }
     } else if (pending) {
-      throw new Error("DEV chat has a pending rate-limited message; retry or discard it before sending another instruction");
+      throw new Error("DEV chat has a pending unsent message; retry or discard it before sending another instruction");
     }
     const turnId = id("dev_turn");
     let compactions = 0;
@@ -551,16 +551,16 @@ export class DevChatDriver {
       const envelope = await response.json() as ResponsesEnvelope;
       if (!Array.isArray(envelope.output)) throw new Error("DEV Responses handler returned no output array");
       if (envelope.status !== "completed") {
-        if (round === 0 && envelope.error?.code === "rate_limit_before_send") {
+        if (round === 0 && ["rate_limit_before_send", "chatgpt_ui_blocked_before_send"].includes(envelope.error?.code ?? "")) {
           state.pendingSubmission = {
             message: prompt,
             model: state.model,
             status: "unsent",
-            reason: "rate_limit_before_send",
+            reason: envelope.error!.code as "rate_limit_before_send" | "chatgpt_ui_blocked_before_send",
             observedAt: new Date().toISOString(),
           };
           this.store.save(state);
-          throw new Error(`${responseError(envelope)} The exact unsent DEV message was saved; wait for capacity, then use /retry or --retry-pending.`);
+          throw new Error(`${responseError(envelope)} The exact unsent DEV message was saved; inspect ChatGPT before using /retry or --retry-pending.`);
         }
         throw new Error(responseError(envelope));
       }

@@ -50,8 +50,8 @@ An already-running DEV launcher is reused. Starting a stopped profile requires t
 
 Interactive commands:
   /status              Show estimated next-turn context occupancy
-  /pending             Show a saved pre-Send rate-limit message without displaying its content
-  /retry               Retry that exact unsent message after account capacity returns
+  /pending             Show a saved pre-Send message without displaying its content
+  /retry               Retry that exact unsent message after checking ChatGPT
   /discard yes         Discard the pending message without changing completed history
   /fill TOKENS         Append deterministic inert context without opening ChatGPT
   /send-fill TOKENS    Send deterministic inert text through the live browser now
@@ -454,7 +454,7 @@ export async function runDevCommand(args: string[], paths = resolveDevProfilePat
     printHeader(opened.state, opened.created, driver.status(opened.state), runtimeConfig.mode, features.biggerContext);
     if (opened.state.pendingSubmission) {
       const pending = opened.state.pendingSubmission;
-      stdout.write(`${yellow(`Pending ${pending.status} DEV message from ${pending.observedAt}; ${pending.status === "unsent" ? "wait for capacity, then use /retry or --retry-pending" : "inspect ChatGPT before discarding; automatic replay is blocked"}.`)}\n`);
+      stdout.write(`${yellow(`Pending ${pending.status} DEV message from ${pending.observedAt}; ${pending.status === "unsent" ? "inspect ChatGPT, then use /retry or --retry-pending" : "inspect ChatGPT before discarding; automatic replay is blocked"}.`)}\n`);
     }
     if (retryPending) {
       const pending = opened.state.pendingSubmission;

@@ -141,7 +141,26 @@ export async function runLiveBatch(options: {
       await evidence.bind(operation.context.traceId);
       await options.onPrepared?.({ work, campaignId, traceId: operation.context.traceId });
       workspace = await restartGoldenLauncher(root);
-      const inspection = await inspectLauncherBrowserHost(workspace.descriptorPath, { detectCapabilities: true });
+      const inspection = await diagnostics.run("golden.session_inspection", async () => {
+        const ownedPid = workspace.processes.launcher?.pid;
+        let lastFailure: unknown;
+        for (let attempt = 1; attempt <= 2; attempt++) {
+          options.signal.throwIfAborted();
+          if (!workspace.processes.launcher || !ownsProcess(workspace.processes.launcher)
+            || readLauncherBrowserHostDescriptor(workspace.descriptorPath).pid !== ownedPid) {
+            throw new DiagnosticError({ code: "golden_launcher_owner_changed", message: "The hidden launcher owner changed during account inspection", origin: "golden", stage: "session_inspection", retryable: false });
+          }
+          try { return await inspectLauncherBrowserHost(workspace.descriptorPath, { detectCapabilities: true }); }
+          catch (error) {
+            lastFailure = error;
+            if (attempt === 1) await new Promise(resolveDelay => setTimeout(resolveDelay, 1_000));
+          }
+        }
+        throw new DiagnosticError({ code: "golden_session_inspection_failed", message: "The restarted hidden launcher did not provide account capability evidence", origin: "golden", stage: "session_inspection", retryable: false,
+          findings: [{ message: `Two read-only inspections failed; last failure class=${lastFailure instanceof Error ? lastFailure.name : "unknown"}` }],
+          evidenceMissing: "The account capability selector did not return a validated result; no native task or model request was admitted.",
+        });
+      });
       if (typeof inspection.solAvailable !== "boolean" || typeof inspection.proAvailable !== "boolean") throw new Error("The isolated session did not expose its capabilities");
       const available = availableChatGptWebModelRoutes({ solAvailable: inspection.solAvailable, proAvailable: inspection.proAvailable, browserInteractionMode: "automatic" });
       if (cells.some(cell => !available.some(route => route.slug === cell.request.route.slug))) throw new Error("The inspected session does not expose every requested route");

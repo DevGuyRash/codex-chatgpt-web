@@ -3,6 +3,7 @@ export interface ChatGptWebAdapterErrorOptions {
   errorType: string;
   code: string;
   retryable: boolean;
+  source?: "chatgpt-http" | "chatgpt-ui";
   cause?: unknown;
 }
 
@@ -11,6 +12,7 @@ export class ChatGptWebAdapterError extends Error {
   readonly errorType: string;
   readonly code: string;
   readonly retryable: boolean;
+  readonly source?: "chatgpt-http" | "chatgpt-ui";
 
   constructor(message: string, options: ChatGptWebAdapterErrorOptions) {
     super(message, options.cause === undefined ? undefined : { cause: options.cause });
@@ -19,6 +21,7 @@ export class ChatGptWebAdapterError extends Error {
     this.errorType = options.errorType;
     this.code = options.code;
     this.retryable = options.retryable;
+    this.source = options.source;
   }
 }
 

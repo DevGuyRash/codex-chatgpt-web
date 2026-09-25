@@ -1409,8 +1409,8 @@ export function createChatGptWebAdapter(
             void session.runtime.token.then(turnToken => broker.revoke(turnToken)).catch(() => {});
           }
           if (handledError instanceof ChatGptWebAdapterError) {
-            const message = handledError.code === "rate_limit_before_send"
-              ? `${handledError.message} Wait for account capacity, then send a new instruction in this same Codex task asking to retry the previous unsent request. The current turn will not be submitted again automatically; if its original instruction is missing from task history, provide it again.`
+            const message = ["rate_limit_before_send", "chatgpt_ui_blocked_before_send"].includes(handledError.code)
+              ? `${handledError.message} ChatGPT did not accept this instruction. Check the browser interface, then send a new instruction in this same Codex task if you want to try again. The current turn will not be submitted again automatically; if its original instruction is missing from task history, provide it again.`
               : handledError.message;
             emitRoundEvent({
               type: "error",

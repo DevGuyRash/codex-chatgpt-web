@@ -701,38 +701,59 @@ export class ChatGptPromptAttachmentIntegrityError extends ChatGptWebAdapterErro
   }
 }
 
-const chatGptRateLimitDialog = (page: Page): Locator => page.locator('[role="dialog"]')
+const chatGptRequestFrequencyDialog = (page: Page): Locator => page.locator('[role="dialog"]')
   .filter({ hasText: /Too many requests|太多要求|太多请求|リクエストが多すぎます|요청이 너무 많습니다|요청을 너무 빠르게|너무 많은 요청/i })
   .filter({ hasText: /making requests too quickly|過於頻繁|过于频繁|リクエストの頻度が高すぎます|요청을 너무 빠르게|요청이 너무 많습니다|너무 많은 요청/i })
   .last();
 
-export async function throwIfChatGptRateLimitDialog(page: Page): Promise<void> {
-  const dialog = chatGptRateLimitDialog(page);
-  if (!await dialog.isVisible().catch(() => false)) return;
+const requestFrequencyWarnings = new WeakMap<Page, { count: number; lastAt: number }>();
 
+/** A visible frequency notice is not an HTTP 429 or proof that generation is unavailable. */
+export async function handleChatGptRequestFrequencyNotice(page: Page): Promise<void> {
+  const dialog = chatGptRequestFrequencyDialog(page);
+  if (!await dialog.isVisible().catch(() => false)) return;
+  const now = Date.now(), previous = requestFrequencyWarnings.get(page);
+  const count = previous && now - previous.lastAt < 60_000 ? previous.count + 1 : 1;
+  requestFrequencyWarnings.set(page, { count, lastAt: now });
   const acknowledge = dialog.getByRole("button", { name: /^(Got it|知道了|了解|알겠습니다|확인)$/ }).last();
-  if (await acknowledge.isVisible().catch(() => false)) {
-    try {
-      await acknowledge.press("Enter");
-    } catch (error) {
-      throw new ChatGptWebAdapterError(
-        `ChatGPT rate limit: too many requests, and the dialog could not be dismissed (${error instanceof Error ? error.message : String(error)}). Try again in a few minutes.`,
-        { status: 429, errorType: "rate_limit_error", code: "rate_limit_exceeded", retryable: false },
-      );
-    }
+  if (!await acknowledge.isVisible().catch(() => false)) {
+    throw new ChatGptWebAdapterError(
+      "ChatGPT showed a request-frequency dialog without a usable dismissal action.",
+      { status: 502, errorType: "server_error", code: "chatgpt_ui_warning_blocked", retryable: false, source: "chatgpt-ui" },
+    );
   }
-  throw new ChatGptWebAdapterError(
-    "ChatGPT rate limit: too many requests. Try again in a few minutes.",
-    { status: 429, errorType: "rate_limit_error", code: "rate_limit_exceeded", retryable: false },
+  try {
+    await acknowledge.press("Enter");
+    await dialog.waitFor({ state: "hidden", timeout: 3_000 });
+  } catch {
+    throw new ChatGptWebAdapterError(
+      "ChatGPT's request-frequency dialog did not close after its dismissal action.",
+      { status: 502, errorType: "server_error", code: "chatgpt_ui_warning_blocked", retryable: false, source: "chatgpt-ui" },
+    );
+  }
+  runtimeDiagnostics()?.event("browser.chatgpt_ui_notice", "ChatGPT request-frequency notice acknowledged", { kind: "request-frequency", surface: "dialog", dismissed: true, count }, "warning");
+}
+
+export function classifyChatGptUiBlockedBeforeSend(error: unknown, sendActivated: boolean): unknown {
+  if (sendActivated || !(error instanceof ChatGptWebAdapterError)
+    || error.code !== "chatgpt_ui_warning_blocked") return error;
+  return new ChatGptWebAdapterError(
+    `${error.message} The pending message was not sent.`,
+    { status: 502, errorType: "server_error", code: "chatgpt_ui_blocked_before_send", retryable: false, source: "chatgpt-ui", cause: error },
   );
 }
 
-export function classifyChatGptRateLimitBeforeSend(error: unknown, sendActivated: boolean): unknown {
-  if (sendActivated || !(error instanceof ChatGptWebAdapterError) || error.code !== "rate_limit_exceeded") return error;
-  return new ChatGptWebAdapterError(
-    `${error.message} The pending message was not sent.`,
-    { status: 429, errorType: "rate_limit_error", code: "rate_limit_before_send", retryable: false, cause: error },
-  );
+/** Preserve structural evidence for unfamiliar ChatGPT alerts without reading their content. */
+export async function visibleChatGptErrorAlertCount(page: Page): Promise<number> {
+  try {
+    return await page.locator('[role="alert"]').evaluateAll(elements => elements.filter(element => {
+      const candidate = element as HTMLElement;
+      const style = getComputedStyle(candidate);
+      return style.visibility !== "hidden" && style.display !== "none"
+        && !candidate.querySelector("input,textarea,[contenteditable=true]")
+        && Boolean((candidate.innerText ?? candidate.textContent ?? "").trim());
+    }).length);
+  } catch { return 0; }
 }
 
 const chatGptTemporaryChatOnboardingDialog = (page: Page): Locator => page
@@ -770,13 +791,13 @@ export async function throwIfChatGptSessionFailureAlert(page: Page): Promise<voi
   if (await chatGptExpiredSessionAlert(page).isVisible().catch(() => false)) {
     throw new ChatGptWebAdapterError(
       "The ChatGPT session has expired. Sign in again in Codex Web GPT.",
-      { status: 401, errorType: "authentication_error", code: "chatgpt_session_expired", retryable: false },
+      { status: 401, errorType: "authentication_error", code: "chatgpt_session_expired", retryable: false, source: "chatgpt-ui" },
     );
   }
   if (!await chatGptSubscriptionFailureAlert(page).isVisible().catch(() => false)) return;
   throw new ChatGptWebAdapterError(
     "ChatGPT could not load the account subscription. Reload ChatGPT inside the launcher and retry; sign out only if the error persists.",
-    { status: 503, errorType: "server_error", code: "chatgpt_subscription_unavailable", retryable: true },
+    { status: 503, errorType: "server_error", code: "chatgpt_subscription_unavailable", retryable: true, source: "chatgpt-ui" },
   );
 }
 
@@ -784,7 +805,32 @@ const chatGptTerminalErrorAlert = (scope: ChatGptTextScope): Locator => scope
   .getByText(/Something went wrong[\s\S]*help\.openai\.com/i)
   .last();
 
-/** Classify only an owned submission's explicit size rejection, never an old DOM alert. */
+/** Status belongs to this turn's main-frame conversation POST; no UI notice can create it. */
+export function chatGptConversationHttpError(status: number, detailCode?: string): ChatGptWebAdapterError | undefined {
+  if (!Number.isInteger(status) || status < 400 || status > 599) return;
+  if (status === 413 && detailCode === "message_length_exceeds_limit") return new ChatGptWebAdapterError(
+    "ChatGPT rejected this message because it exceeds the selected mode's input-size limit. Compact the task before retrying.",
+    { status: 400, errorType: "invalid_request_error", code: "context_length_exceeded", retryable: false, source: "chatgpt-http" },
+  );
+  if (status === 429) return new ChatGptWebAdapterError(
+    "ChatGPT rejected this submitted conversation request with HTTP 429. The turn will not be replayed automatically.",
+    { status, errorType: "rate_limit_error", code: "rate_limit_exceeded", retryable: false, source: "chatgpt-http" },
+  );
+  if (status === 401) return new ChatGptWebAdapterError(
+    "ChatGPT rejected this conversation request because the session is no longer authorized. Sign in again in the launcher.",
+    { status, errorType: "authentication_error", code: "chatgpt_session_expired", retryable: false, source: "chatgpt-http" },
+  );
+  if (status === 403) return new ChatGptWebAdapterError(
+    "ChatGPT denied this conversation request. Inspect the account and connector permissions before a new turn.",
+    { status, errorType: "permission_error", code: "chatgpt_conversation_forbidden", retryable: false, source: "chatgpt-http" },
+  );
+  return new ChatGptWebAdapterError(
+    `ChatGPT rejected this owned conversation request with HTTP ${status}. Inspect Diagnostics before starting another turn.`,
+    { status, errorType: status >= 500 ? "server_error" : "invalid_request_error", code: "chatgpt_http_rejected", retryable: false, source: "chatgpt-http" },
+  );
+}
+
+/** Classify only an owned submission's HTTP failure, never a prior DOM notice. */
 export class ChatGptSubmissionRejectionObserver {
   private page?: Page;
   private readonly requests = new Set<Request>();
@@ -801,15 +847,29 @@ export class ChatGptSubmissionRejectionObserver {
   };
 
   private readonly onResponse = (response: Response): void => {
-    if (!this.requests.delete(response.request()) || response.status() !== 413
-      || !response.headers()["content-type"]?.includes("application/json")) return;
-    this.checks.push(withChatGptBrowserObservationTimeout(response.json(), 3_000)
-      .then(body => body?.detail?.code === "message_length_exceeds_limit"
-        ? new ChatGptWebAdapterError(
-          "ChatGPT rejected this message because it exceeds the selected mode's input-size limit. Compact the task before retrying.",
-          { status: 400, errorType: "invalid_request_error", code: "context_length_exceeded", retryable: false },
-        ) : undefined)
-      .catch(() => undefined));
+    if (!this.requests.delete(response.request())) return;
+    const status = response.status();
+    if (status < 400) {
+      if (this.checks.length) runtimeDiagnostics()?.event("browser.chatgpt_http_recovery", "A later owned conversation POST received an HTTP success", { status, requestClass: "owned-conversation-post" }, "info");
+      this.checks = [];
+      return;
+    }
+    const error = status === 413 && response.headers()["content-type"]?.includes("application/json")
+      ? withChatGptBrowserObservationTimeout(response.json(), 3_000)
+        .then(body => chatGptConversationHttpError(status, body?.detail?.code))
+        .catch(() => chatGptConversationHttpError(status))
+      : Promise.resolve(chatGptConversationHttpError(status));
+    this.checks.push(error);
+    runtimeDiagnostics()?.event("browser.chatgpt_http_rejection", "ChatGPT conversation POST was rejected", { status, requestClass: "owned-conversation-post" }, "warning");
+  };
+
+  private readonly onRequestFailed = (request: Request): void => {
+    if (!this.requests.delete(request)) return;
+    this.checks.push(Promise.resolve(new ChatGptWebAdapterError(
+      "The owned ChatGPT conversation request lost its transport before an HTTP response was observed. Its submission outcome is uncertain; it will not be replayed automatically.",
+      { status: 502, errorType: "server_error", code: "chatgpt_submission_transport_unknown", retryable: false, source: "chatgpt-http" },
+    )));
+    runtimeDiagnostics()?.event("browser.chatgpt_http_rejection", "ChatGPT conversation POST lost its transport", { requestClass: "owned-conversation-post", outcome: "unknown" }, "warning");
   };
 
   begin(page: Page): void {
@@ -818,6 +878,7 @@ export class ChatGptSubmissionRejectionObserver {
     this.page = page;
     page.on("request", this.onRequest);
     page.on("response", this.onResponse);
+    page.on("requestfailed", this.onRequestFailed);
   }
 
   async failure(): Promise<ChatGptWebAdapterError | undefined> {
@@ -827,6 +888,7 @@ export class ChatGptSubmissionRejectionObserver {
   dispose(): void {
     this.page?.off("request", this.onRequest);
     this.page?.off("response", this.onResponse);
+    this.page?.off("requestfailed", this.onRequestFailed);
     this.page = undefined;
     this.requests.clear();
   }
@@ -836,7 +898,7 @@ export async function throwIfChatGptTerminalErrorAlert(scope: ChatGptTextScope):
   if (!await chatGptTerminalErrorAlert(scope).isVisible().catch(() => false)) return;
   throw new ChatGptWebAdapterError(
     "ChatGPT ended the turn with 'Something went wrong'. Retry the turn.",
-    { status: 502, errorType: "server_error", code: "upstream_server_error", retryable: true },
+    { status: 502, errorType: "server_error", code: "upstream_server_error", retryable: true, source: "chatgpt-ui" },
   );
 }
 
@@ -2224,7 +2286,7 @@ export class ChatGptBrowserWorker {
     const uiEffortIndex = mode.uiEffortIndex;
     if (uiEffortIndex === null) {
       await settleChatGptUi();
-      await throwIfChatGptRateLimitDialog(page);
+      await handleChatGptRequestFrequencyNotice(page);
       const visibleControls = composerForm.locator(CHATGPT_EFFORT_CONTROL_SELECTOR).filter({ visible: true });
       if (await visibleControls.count() > 0) {
         throw chatGptModelControlUnavailableError(
@@ -2253,9 +2315,9 @@ export class ChatGptBrowserWorker {
       effortWaitAbort.abort();
     }
     await settleChatGptUi();
-    await throwIfChatGptRateLimitDialog(page);
+    await handleChatGptRequestFrequencyNotice(page);
     await captureDiagnostic?.("effort-control-ready");
-    await throwIfChatGptRateLimitDialog(page);
+    await handleChatGptRequestFrequencyNotice(page);
     let activation = await activateChatGptEffortMenu(page, currentEffort);
     const selectionUrl = page.url();
     if (activation.method === "pointerdown") {
@@ -2267,7 +2329,7 @@ export class ChatGptBrowserWorker {
     let reacquired = false, capturedReady = false;
     let observation: Awaited<ReturnType<typeof readChatGptEffortSliderState>>;
     while (true) {
-      await throwIfChatGptRateLimitDialog(page);
+      await handleChatGptRequestFrequencyNotice(page);
       await throwIfChatGptSessionFailureAlert(page);
       observation = await readChatGptEffortSliderState(effortSlider);
       if (observation.status === "ready") {
@@ -2288,7 +2350,7 @@ export class ChatGptBrowserWorker {
         try { activation = await activateChatGptEffortMenu(page, currentEffort); }
         catch (error) {
           if (error instanceof ChatGptWebAdapterError) throw error;
-          await throwIfChatGptRateLimitDialog(page);
+          await handleChatGptRequestFrequencyNotice(page);
           await throwIfChatGptSessionFailureAlert(page);
           throw chatGptModelControlUnavailableError("ChatGPT effort picker disappeared and could not be reacquired before selection");
         }
@@ -2317,7 +2379,7 @@ export class ChatGptBrowserWorker {
     }
     const sliderControl = effortSlider.locator("xpath=ancestor::*[@role='menuitem'][1]");
     while (sliderState.value !== targetValue) {
-      await throwIfChatGptRateLimitDialog(page);
+      await handleChatGptRequestFrequencyNotice(page);
       const direction = targetValue > sliderState.value ? 1 : -1;
       const key = direction > 0 ? "ArrowRight" : "ArrowLeft";
       const previousValue = sliderState.value;
@@ -2523,7 +2585,7 @@ export class ChatGptBrowserWorker {
       }
       if (progress && progress.lastToolBatchRevision > initialToolBatchRevision) return "mcp_tool_call";
       await throwIfChatGptSessionFailureAlert(page);
-      await throwIfChatGptRateLimitDialog(page);
+      await handleChatGptRequestFrequencyNotice(page);
       await throwIfChatGptTerminalErrorAlert(baseline.responseTurns.last());
       let evidence: ChatGptSubmissionEvidence | undefined;
       if (externalProgress) {
@@ -2728,7 +2790,7 @@ export class ChatGptBrowserWorker {
         throw new Error("ChatGPT web turn timed out");
       }
       await throwIfChatGptSessionFailureAlert(observationPage);
-      await throwIfChatGptRateLimitDialog(observationPage);
+      await handleChatGptRequestFrequencyNotice(observationPage);
       let state: ChatGptSubmissionDomState;
       try {
         state = await this.submissionDomState(
@@ -3298,7 +3360,7 @@ export class ChatGptBrowserWorker {
       if (abortSignal?.aborted) throw new DOMException("ChatGPT web turn aborted", "AbortError");
       if (page.isClosed()) throw chatGptBrowserTabClosedError();
       await throwIfChatGptSessionFailureAlert(page);
-      await throwIfChatGptRateLimitDialog(page);
+      await handleChatGptRequestFrequencyNotice(page);
       if (await sendButton.isEnabled()) break;
       if (Date.now() >= sendEnableDeadline) {
         await captureDiagnostic?.("send-disabled");
@@ -4332,6 +4394,7 @@ export class ChatGptBrowserWorker {
         return connection.page;
       });
       if (!maintenancePage && !launcherSurfaceId) managedPage = page;
+      requestFrequencyWarnings.delete(page);
       diagnosticPage = page;
       const rebindLauncherPage = async (
         attempt: number,
@@ -5020,12 +5083,18 @@ export class ChatGptBrowserWorker {
         && !(error instanceof ChatGptWebAdapterError && error.code === "client_cancelled")) {
         error = await submissionRejection.failure() ?? error;
       }
-      error = classifyChatGptRateLimitBeforeSend(error, browserSendActivated);
+      error = classifyChatGptUiBlockedBeforeSend(error, browserSendActivated);
       console.error(
         `[chatgpt-web] browser turn ${turn.traceId} failed:`
         + ` ${redactChatGptUiDiagnostic(error instanceof Error ? error.message : String(error))}`,
       );
       if (diagnosticPage && !diagnosticPage.isClosed()) {
+        const alertCount = await visibleChatGptErrorAlertCount(diagnosticPage);
+        if (alertCount) runtimeDiagnostics()?.event("browser.chatgpt_ui_alert", "A visible ChatGPT alert accompanied the turn failure", {
+          alertCount,
+          sendActivated: browserSendActivated,
+          errorCode: error instanceof ChatGptWebAdapterError ? error.code : "unclassified",
+        }, "warning");
         await diagnostics.capture(diagnosticPage, "turn-failed", error);
       }
       throw error;

@@ -1,13 +1,15 @@
 import { expect, test } from "bun:test";
 import { Diagnostics } from "../src/diagnostics/instrumentation";
+import { problemFor } from "../src/diagnostics/problems";
 import { setRuntimeDiagnostics } from "../src/diagnostics/runtime";
 import type { DiagnosticEvent } from "../src/diagnostics/contracts";
 import { mkdtempSync, readFileSync, readdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { EventEmitter } from "node:events";
 import type { Page } from "playwright-core";
-import { CHATGPT_BROWSER_OBSERVATION_PROBE_TIMEOUT_MS, CHATGPT_COMPLETION_SETTLE_MS, CHATGPT_EXTERNAL_PROGRESS_CLOCK_SKEW_MS, CHATGPT_EXTERNAL_PROGRESS_STALL_CEILING_MS, ChatGptCompletionTracker, chatGptExternalProgressSuppressesDomHealth, CHATGPT_RESPONSE_DOM_GRACE_MS, MAX_CHATGPT_INTERNAL_OBSERVATION_FAULTS, CHATGPT_COMPOSER_DOCUMENT_END_KEY, CHATGPT_COMPOSER_SELECT_ALL_KEY, CHATGPT_STOPPED_THINKING_GRACE_MS, ChatGptBrowserObservationTimeoutError, ChatGptBrowserWorker, ChatGptPromptAttachmentIntegrityError, ChatGptStoppedThinkingTracker, ChatGptTurnDomHealthTracker, ChatGptVisibleTraceTracker, MAX_CHATGPT_BROWSER_PAGE_REBINDS, MAX_CHATGPT_BROWSER_TABS, MAX_CHATGPT_CONNECTOR_TRIGGER_ATTEMPTS, assertChatGptWebInputWithinLimits, assertChatGptWebMultipartInputWithinLimits, browserDiagnosticCheckpoint, chatGptConnectorAttachmentMode, chatGptNewTurnIdentity, chatGptReboundTurnIdentity, chatGptSubmissionEvidence, classifyChatGptRateLimitBeforeSend, connectAfterClosingBrowserConnection, dismissChatGptTemporaryChatOnboarding, isChatGptTraceControl, redactChatGptUiDiagnostic, resolveBrowserConfig, resolveChatGptToolConfirmation, resolveChatGptWebMultipartStagingMode, sanitizeChatGptBrowserDiagnosticState, setChatGptThinkMode, stripChatGptTraceControlSuffix, throwIfChatGptRateLimitDialog, throwIfChatGptSessionFailureAlert, throwIfChatGptTerminalErrorAlert, withChatGptBrowserObservationTimeout, CHATGPT_MULTIPART_RESPONSE_DOM_GRACE_MS, browserStageTimeouts, ChatGptSuspensionClock, remainingStageBudgetMs } from "../src/adapters/chatgpt-web/browser-worker";
-import { ensureChatGptPersonalizedConnectorAccess } from "../src/adapters/chatgpt-web/browser-worker";
+import { CHATGPT_BROWSER_OBSERVATION_PROBE_TIMEOUT_MS, CHATGPT_COMPLETION_SETTLE_MS, CHATGPT_EXTERNAL_PROGRESS_CLOCK_SKEW_MS, CHATGPT_EXTERNAL_PROGRESS_STALL_CEILING_MS, ChatGptCompletionTracker, chatGptExternalProgressSuppressesDomHealth, CHATGPT_RESPONSE_DOM_GRACE_MS, MAX_CHATGPT_INTERNAL_OBSERVATION_FAULTS, CHATGPT_COMPOSER_DOCUMENT_END_KEY, CHATGPT_COMPOSER_SELECT_ALL_KEY, CHATGPT_STOPPED_THINKING_GRACE_MS, ChatGptBrowserObservationTimeoutError, ChatGptBrowserWorker, ChatGptPromptAttachmentIntegrityError, ChatGptStoppedThinkingTracker, ChatGptTurnDomHealthTracker, ChatGptVisibleTraceTracker, MAX_CHATGPT_BROWSER_PAGE_REBINDS, MAX_CHATGPT_BROWSER_TABS, MAX_CHATGPT_CONNECTOR_TRIGGER_ATTEMPTS, assertChatGptWebInputWithinLimits, assertChatGptWebMultipartInputWithinLimits, browserDiagnosticCheckpoint, chatGptConnectorAttachmentMode, chatGptNewTurnIdentity, chatGptReboundTurnIdentity, chatGptSubmissionEvidence, classifyChatGptUiBlockedBeforeSend, connectAfterClosingBrowserConnection, dismissChatGptTemporaryChatOnboarding, isChatGptTraceControl, redactChatGptUiDiagnostic, resolveBrowserConfig, resolveChatGptToolConfirmation, resolveChatGptWebMultipartStagingMode, sanitizeChatGptBrowserDiagnosticState, setChatGptThinkMode, stripChatGptTraceControlSuffix, handleChatGptRequestFrequencyNotice, throwIfChatGptSessionFailureAlert, throwIfChatGptTerminalErrorAlert, withChatGptBrowserObservationTimeout, CHATGPT_MULTIPART_RESPONSE_DOM_GRACE_MS, browserStageTimeouts, ChatGptSuspensionClock, remainingStageBudgetMs } from "../src/adapters/chatgpt-web/browser-worker";
+import { ChatGptSubmissionRejectionObserver, chatGptConversationHttpError, ensureChatGptPersonalizedConnectorAccess } from "../src/adapters/chatgpt-web/browser-worker";
 import { chatGptStoppedThinkingError } from "../src/adapters/chatgpt-web/adapter-error";
 import { CHATGPT_WEB_MODEL_ID } from "../src/adapters/chatgpt-web/model";
 import { CHATGPT_CONNECTOR_NAME, DEV_CHATGPT_CONNECTOR_NAME, defaultChromeExecutable, legacyChatGptConnectorMigrationMessage } from "../src/config";
@@ -2349,15 +2351,16 @@ test("an unrelated Continue dialog is never auto-accepted", async () => {
   expect(lookedForButton).toBeFalse();
 });
 
-function dialogPage(text: string, buttonText = "Got it"): { page: Page; pressed: string[] } {
+function dialogPage(text: string, buttonText = "Got it"): { page: Page; pressed: string[]; reopen(): void } {
   const pressed: string[] = [];
+  let dismissed = false;
   const createDialog = () => {
     let matches = true;
     let buttonMatches = true;
     const button = {
       last: () => button,
       isVisible: async () => matches && buttonMatches,
-      press: async (key: string) => { pressed.push(key); },
+      press: async (key: string) => { pressed.push(key); dismissed = true; },
     };
     const dialog = {
       filter: ({ hasText }: { hasText: string | RegExp }) => {
@@ -2365,7 +2368,8 @@ function dialogPage(text: string, buttonText = "Got it"): { page: Page; pressed:
         return dialog;
       },
       last: () => dialog,
-      isVisible: async () => matches,
+      isVisible: async () => matches && !dismissed,
+      waitFor: async ({ state }: { state: string }) => { if (state !== "hidden" || !dismissed) throw new Error("Dialog stayed visible"); },
       getByRole: (_role: string, options?: { name?: string | RegExp }) => {
         const name = options?.name;
         buttonMatches = name === undefined
@@ -2381,84 +2385,101 @@ function dialogPage(text: string, buttonText = "Got it"): { page: Page; pressed:
       getByText: (hasText: string | RegExp) => createDialog().filter({ hasText }),
     } as unknown as Page,
     pressed,
+    reopen: () => { dismissed = false; },
   };
 }
 
-test("the known ChatGPT rate-limit dialog is acknowledged and returns a structured 429", async () => {
+test("the known ChatGPT request-frequency dialog is acknowledged as a UI notice", async () => {
   const fixture = dialogPage("Too many requests. You're making requests too quickly.");
-
-  await expect(throwIfChatGptRateLimitDialog(fixture.page)).rejects.toMatchObject({
-    name: "ChatGptWebAdapterError",
-    status: 429,
-    errorType: "rate_limit_error",
-    code: "rate_limit_exceeded",
-    retryable: false,
-    message: "ChatGPT rate limit: too many requests. Try again in a few minutes.",
-  });
+  const events: DiagnosticEvent[] = [];
+  const diagnostics = new Diagnostics({ emit: event => events.push(event) }, { component: "browser-helper", target: "fixture", environment: "test" });
+  setRuntimeDiagnostics(diagnostics);
+  try { await handleChatGptRequestFrequencyNotice(fixture.page); }
+  finally { setRuntimeDiagnostics(undefined); await diagnostics.close(); }
   expect(fixture.pressed).toEqual(["Enter"]);
+  expect(events.find(event => event.name === "browser.chatgpt_ui_notice")).toMatchObject({ attributes: { kind: "request-frequency", surface: "dialog", dismissed: true, count: 1 } });
+  expect(JSON.stringify(events)).not.toContain("Too many requests");
 });
 
-test("a rate limit is recoverable only before the first inline or multipart Send activation", async () => {
+test("an undismissable UI notice preserves pre-Send ownership without inventing account capacity", async () => {
   const runStage = (ChatGptBrowserWorker.prototype as unknown as {
     runStage<T>(traceId: string, stage: string, timeoutMs: number, action: () => Promise<T>): Promise<T>;
   }).runStage;
-  const beforeSend = dialogPage("Too many requests. You're making requests too quickly.");
+  const beforeSend = dialogPage("Too many requests. You're making requests too quickly.", "Other action");
   const original = await runStage.call({}, "pre-send-rate-limit", "prompt_attachment", 1_000, () => (
-    throwIfChatGptRateLimitDialog(beforeSend.page)
+    handleChatGptRequestFrequencyNotice(beforeSend.page)
   )).catch(error => error);
-  expect(original).toMatchObject({ code: "rate_limit_exceeded" });
-  expect(classifyChatGptRateLimitBeforeSend(original, false)).toMatchObject({
-    status: 429,
-    errorType: "rate_limit_error",
-    code: "rate_limit_before_send",
+  expect(original).toMatchObject({ code: "chatgpt_ui_warning_blocked" });
+  expect(problemFor(original).origin).toBe("chatgpt-ui");
+  expect(classifyChatGptUiBlockedBeforeSend(original, false)).toMatchObject({
+    status: 502,
+    errorType: "server_error",
+    code: "chatgpt_ui_blocked_before_send",
     retryable: false,
   });
-  expect(classifyChatGptRateLimitBeforeSend(original, true)).toBe(original);
+  expect(classifyChatGptUiBlockedBeforeSend(original, true)).toBe(original);
 });
 
-test("submission acceptance reports a rate-limit dialog that appears after Enter", async () => {
+test("a request-frequency dialog after Send is not reported as a provider HTTP 429", async () => {
   const fixture = dialogPage("Too many requests. You're making requests too quickly.");
-  const waitForSubmissionAccepted = (ChatGptBrowserWorker.prototype as unknown as {
-    waitForSubmissionAccepted(page: Page, baseline: unknown): Promise<unknown>;
-  }).waitForSubmissionAccepted;
-
-  await expect(waitForSubmissionAccepted.call(
-    {},
-    fixture.page,
-    {},
-  )).rejects.toMatchObject({
-    name: "ChatGptWebAdapterError",
-    status: 429,
-    errorType: "rate_limit_error",
-    code: "rate_limit_exceeded",
-    retryable: false,
-  });
+  await handleChatGptRequestFrequencyNotice(fixture.page);
   expect(fixture.pressed).toEqual(["Enter"]);
+});
+
+test("repeated dismissible ChatGPT UI notices remain diagnostic warnings", async () => {
+  const fixture = dialogPage("Too many requests. You're making requests too quickly.");
+  await handleChatGptRequestFrequencyNotice(fixture.page);
+  fixture.reopen();
+  await handleChatGptRequestFrequencyNotice(fixture.page);
+  fixture.reopen();
+  await handleChatGptRequestFrequencyNotice(fixture.page);
+  expect(fixture.pressed).toEqual(["Enter", "Enter", "Enter"]);
+});
+
+test("only an owned conversation POST status establishes an HTTP error", async () => {
+  expect(chatGptConversationHttpError(200)).toBeUndefined();
+  expect(chatGptConversationHttpError(413, "message_length_exceeds_limit")).toMatchObject({ code: "context_length_exceeded" });
+  expect(chatGptConversationHttpError(429)).toMatchObject({ code: "rate_limit_exceeded", status: 429 });
+  expect(problemFor(chatGptConversationHttpError(429)).origin).toBe("chatgpt-http");
+  expect(chatGptConversationHttpError(503)).toMatchObject({ code: "chatgpt_http_rejected", status: 503 });
+  const events = new EventEmitter(), frame = {};
+  const page = { mainFrame: () => frame, on: events.on.bind(events), off: events.off.bind(events) } as unknown as Page;
+  const observer = new ChatGptSubmissionRejectionObserver();
+  const request = (url: string) => ({ method: () => "POST", url: () => url, frame: () => frame });
+  const unrelated = request("https://example.invalid/backend-api/f/conversation");
+  const owned = request("https://chatgpt.com/backend-api/f/conversation");
+  observer.begin(page);
+  try {
+    events.emit("request", unrelated);
+    events.emit("response", { request: () => unrelated, status: () => 429, headers: () => ({}) });
+    expect(await observer.failure()).toBeUndefined();
+    events.emit("request", owned);
+    events.emit("response", { request: () => owned, status: () => 429, headers: () => ({}) });
+    expect(await observer.failure()).toMatchObject({ code: "rate_limit_exceeded", status: 429 });
+    events.emit("request", owned);
+    events.emit("response", { request: () => owned, status: () => 200, headers: () => ({}) });
+    expect(await observer.failure()).toBeUndefined();
+    observer.begin(page);
+    events.emit("request", owned);
+    events.emit("requestfailed", owned);
+    expect(await observer.failure()).toMatchObject({ code: "chatgpt_submission_transport_unknown", retryable: false });
+  } finally { observer.dispose(); }
+  expect(events.listenerCount("request")).toBe(0);
+  expect(events.listenerCount("response")).toBe(0);
+  expect(events.listenerCount("requestfailed")).toBe(0);
 });
 
 test("the Traditional Chinese ChatGPT rate-limit dialog is acknowledged and returns a structured 429", async () => {
   const fixture = dialogPage("太多要求。你提出要求的頻率過於頻繁。", "知道了");
 
-  await expect(throwIfChatGptRateLimitDialog(fixture.page)).rejects.toMatchObject({
-    name: "ChatGptWebAdapterError",
-    status: 429,
-    errorType: "rate_limit_error",
-    code: "rate_limit_exceeded",
-    retryable: false,
-  });
+  await handleChatGptRequestFrequencyNotice(fixture.page);
   expect(fixture.pressed).toEqual(["Enter"]);
 });
 
 test("the Simplified Chinese ChatGPT rate-limit dialog is acknowledged and returns a structured 429", async () => {
   const fixture = dialogPage("太多请求。你提出请求的频率过于频繁。", "知道了");
 
-  await expect(throwIfChatGptRateLimitDialog(fixture.page)).rejects.toMatchObject({
-    name: "ChatGptWebAdapterError",
-    status: 429,
-    errorType: "rate_limit_error",
-    code: "rate_limit_exceeded",
-    retryable: false,
-  });
+  await handleChatGptRequestFrequencyNotice(fixture.page);
   expect(fixture.pressed).toEqual(["Enter"]);
 });
 
@@ -2468,20 +2489,14 @@ test("the Japanese ChatGPT rate-limit dialog is acknowledged and returns a struc
     "了解",
   );
 
-  await expect(throwIfChatGptRateLimitDialog(fixture.page)).rejects.toMatchObject({
-    name: "ChatGptWebAdapterError",
-    status: 429,
-    errorType: "rate_limit_error",
-    code: "rate_limit_exceeded",
-    retryable: false,
-  });
+  await handleChatGptRequestFrequencyNotice(fixture.page);
   expect(fixture.pressed).toEqual(["Enter"]);
 });
 
 test("unrelated ChatGPT dialogs are left untouched", async () => {
   const fixture = dialogPage("Confirm another action");
 
-  await throwIfChatGptRateLimitDialog(fixture.page);
+  await handleChatGptRequestFrequencyNotice(fixture.page);
   expect(fixture.pressed).toEqual([]);
 });
 

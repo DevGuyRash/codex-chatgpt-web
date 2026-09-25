@@ -49,7 +49,8 @@ export function problemFor(error: unknown, fallback = "The operation failed; ope
       seen.add(cause); causes.push({ code: cause.name.slice(0, 96), message: safeText(cause.message) }); cause = cause.cause;
     }
     return safeProblem(ProblemSchema.parse({ code: candidate.code, message: safeText(typeof candidate.message === "string" ? candidate.message : fallback),
-      origin: "adapter", httpStatus: candidate.status, retryable: candidate.retryable, causes,
+      origin: candidate.source === "chatgpt-http" || candidate.source === "chatgpt-ui" ? candidate.source : "adapter", httpStatus: candidate.status, retryable: candidate.retryable, causes,
+      actions: ["open-diagnostics", "run-doctor", "export-logs"],
       ...(typeof candidate.stack === "string" ? { stack: safeText(candidate.stack) } : {}), ...context }));
   }
   const code = typeof candidate.code === "string" && Object.hasOwn(recovery, candidate.code) ? candidate.code : "operation_failed";

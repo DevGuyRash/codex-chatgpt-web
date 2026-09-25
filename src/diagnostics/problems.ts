@@ -21,12 +21,21 @@ export function problemFor(error: unknown, fallback = "The operation failed; ope
   const existing = ProblemSchema.safeParse(candidate.problem);
   if (existing.success) return safeProblem(ProblemSchema.parse({ ...existing.data, ...context }));
   if (error instanceof AggregateError && Array.isArray(error.errors)) {
-    const parts = error.errors.slice(0, 8).filter(item => item !== error && !(item instanceof AggregateError))
-      .map(item => problemFor(item, fallback));
-    const primary = parts.find(item => item.code !== "operation_failed");
+    const pending: unknown[] = error.errors.slice(0, 8), seen = new Set<unknown>([error]), parts: Problem[] = [];
+    while (pending.length && seen.size < 32 && parts.length < 8) {
+      const item = pending.shift();
+      if (seen.has(item)) continue;
+      seen.add(item);
+      if (item instanceof AggregateError && Array.isArray(item.errors)) {
+        pending.unshift(...item.errors.slice(0, 8));
+        continue;
+      }
+      const part = problemFor(item, fallback);
+      if (part.code !== "operation_failed") parts.push(part);
+    }
+    const primary = parts[0];
     if (primary) return safeProblem(ProblemSchema.parse({ ...primary,
-      causes: [...primary.causes, ...parts.filter(item => item !== primary && item.code !== "operation_failed")
-        .map(item => ({ code: item.code, message: item.message }))].slice(0, 8), ...context }));
+      causes: [...primary.causes, ...parts.slice(1).map(item => ({ code: item.code, message: item.message }))].slice(0, 8), ...context }));
   }
   if (error instanceof DiagnosticRequestError) return safeProblem(ProblemSchema.parse({ code: error.code, message: error.message, origin: "diagnostics",
     findings: error.details ? [{ message: Object.entries(error.details).map(([key, value]) => `${key}=${value}`).join("; ") }] : [], ...context }));

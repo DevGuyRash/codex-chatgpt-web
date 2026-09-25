@@ -41,7 +41,7 @@ test("worker request errors retain their typed origin in operational evidence", 
 test("combined failures preserve typed evidence loss and storage contention without raw child text", () => {
   const incomplete = new DiagnosticError({ code: "golden_evidence_incomplete", message: "Required capture is unavailable", origin: "diagnostics" });
   const busy = new DiagnosticRequestError("storage_busy", { method: "content-capture", action: "bind", sqliteCode: "SQLITE_BUSY" });
-  const combined = new AggregateError([incomplete, busy, new Error("private synthetic child output")], "Multiple owners failed");
+  const combined = new AggregateError([incomplete, new AggregateError([new Error("private synthetic child output"), busy], "Nested cleanup failed")], "Multiple owners failed");
   const problem = problemFor(combined);
   expect(problem).toMatchObject({ code: "golden_evidence_incomplete", origin: "diagnostics", causes: [{ code: "storage_busy", message: diagnosticRequestMessages.storage_busy }] });
   expect(JSON.stringify(problem)).not.toContain("private synthetic child output");

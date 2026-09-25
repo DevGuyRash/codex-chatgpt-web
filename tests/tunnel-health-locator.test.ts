@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -30,6 +30,17 @@ test("native profile locator uses its configured health file without reading run
     f.profile.control_plane.tunnel_id = `tunnel_${"b".repeat(32)}`;
     writeFileSync(f.profileFile, Bun.YAML.stringify(f.profile));
     expect(() => tunnelHealthLocator(f.tunnel)).toThrow("does not identify");
+  } finally { rmSync(f.root, { recursive: true, force: true }); }
+});
+
+test("standalone health-locator exits from its local read without starting a diagnostics writer", () => {
+  const f = fixture();
+  try {
+    const config = { ...defaultConfig("full", f.root), tunnel: f.tunnel, automaticTunnel: f.tunnel };
+    writeFileSync(join(f.root, "config.json"), JSON.stringify(config));
+    const result = Bun.spawnSync([process.execPath, resolve("src/cli.ts"), "--home", f.root, "tunnel", "health-locator"], { stdout: "pipe", stderr: "pipe" });
+    expect({ code: result.exitCode, output: result.stdout.toString().trim() }).toEqual({ code: 0, output: JSON.stringify({ baseUrl: "http://127.0.0.1:43127" }) });
+    expect(existsSync(join(f.root, "diagnostics", "observability", "diagnostics.sqlite"))).toBeFalse();
   } finally { rmSync(f.root, { recursive: true, force: true }); }
 });
 

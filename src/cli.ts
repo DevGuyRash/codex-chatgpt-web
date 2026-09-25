@@ -679,7 +679,11 @@ async function main(): Promise<void> {
     process.env.CODEX_CHATGPT_WEB_HOME = target.runtimeHome;
     process.env.CODEX_HOME = target.codexHome;
   }
-  const readOnly = ["help", "diagnostics", "doctor", "status", "targets", "browser", "setup", "uninstall"].includes(command) || args.includes("--preview-json") || args.includes("--preflight-only");
+  // Tunnel health discovery is a local read. Its caller already owns the timeout and
+  // diagnostic span; starting a second worker can delay process exit behind SQLite I/O.
+  const readOnly = ["help", "diagnostics", "doctor", "status", "targets", "browser", "setup", "uninstall"].includes(command)
+    || (command === "tunnel" && ["status", "health-locator"].includes(args[0] ?? "status"))
+    || args.includes("--preview-json") || args.includes("--preflight-only");
   const telemetry = command !== "diagnostics" ? initializeRuntimeDiagnostics({ component: "runtime", target: target?.id, standalone: !readOnly }) : undefined;
   const operation = telemetry?.begin(`cli.${command}`, { "runtime.version": VERSION }, runtimeParent());
   const execute = async () => {

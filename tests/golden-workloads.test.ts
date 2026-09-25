@@ -10,6 +10,7 @@ test("shared workloads are deterministic, vary across batches, and preserve Unic
     expect(workload).toEqual(createWorkload({ level, seed: "fixed-fixture", batch: 0 }));
     expect(workload.id).not.toBe(createWorkload({ level, seed: "fixed-fixture", batch: 1 }).id);
     expect(workload.files["input/orders.json"]).toContain("東京");
+    expect(workload.files["input/spec.md"]).toContain("use {} when there are no facts");
     expect(workload.prompt).toContain("output/result.json");
     expect(workload.minimumProgressMs).toBe(level === 5 ? 2 * 60 * 60 * 1000 : 0);
     const formats = createWorkload({ level, seed: "fixed-fixture", batch: 0, formatCoverage: "all" });
@@ -48,6 +49,11 @@ test.each([undefined, "all"] as const)("the independent artifact oracle rejects 
       writeFileSync(join(root, "output/attachments.json"), JSON.stringify(workload.attachmentAnswers));
     }
     expect(evaluateWorkload(root, workload)).toMatchObject({ passed: true, failures: [] });
+    writeFileSync(join(root, "output/result.json"), JSON.stringify({ ...result, facts: [] }));
+    expect(evaluateWorkload(root, workload).failures).toContain("result does not match required JSON shape (facts)");
+    writeFileSync(join(root, "output/result.json"), "{");
+    expect(evaluateWorkload(root, workload).failures).toContain("result is not valid JSON");
+    writeFileSync(join(root, "output/result.json"), JSON.stringify(result));
     expect(evaluateWorkload(root, workload, undefined, "formats").passed).toBe(formatCoverage === "all");
     expect(evaluateWorkload(root, workload, undefined, "unicode").passed).toBe(false);
     writeFileSync(join(root, "output/unicode.txt"), "Almost the same\n");

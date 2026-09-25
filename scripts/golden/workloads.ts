@@ -61,7 +61,7 @@ export function createWorkload(input: { level: WorkloadLevel; seed: string; batc
     "input/orders.json": JSON.stringify(orders, null, 2) + "\n",
     "input/adjustments.csv": `id,replacementUnits\n${adjustments}${adjustments ? "\n" : ""}`,
     "input/facts.md": `# Dispatch facts\n\n${Object.entries(facts).map(([key, value]) => `- ${key}: ${value}`).join("\n")}\n`,
-    "input/spec.md": `# Order reconciliation\n\nDataset: ${id}\n\nEach order has a unique id. Replace units using the matching CSV row, then validate: units must be a nonnegative integer, unitPriceCents a nonnegative integer, and discountBps an integer between 0 and 10000 inclusive. Reject invalid orders and continue; do not count them toward totals. For every valid order, net cents = floor(units * unitPriceCents * (10000 - discountBps) / 10000). Do not round individual floating-point currency values.\n\nWrite output/result.json with exactly these fields: datasetId (the dataset identifier above), recordsSeen (all input orders), validRecords, rejectedIds (sorted by id), grandTotalCents, byTeam (sorted by team; each object has team, count, totalCents), samples (the first and last valid order in input order, each with id and totalCents), and facts (key/value pairs from input/facts.md, excluding its heading). Preserve the facts exactly, including Unicode.\n\nWrite output/report.md as a readable explanation identifying the dataset and the grand total in integer cents. ${input.level >= 2 ? "Write output/teams.csv with header team,count,totalCents and the same sorted team totals." : ""}\n`,
+    "input/spec.md": `# Order reconciliation\n\nDataset: ${id}\n\nEach order has a unique id. Replace units using the matching CSV row, then validate: units must be a nonnegative integer, unitPriceCents a nonnegative integer, and discountBps an integer between 0 and 10000 inclusive. Reject invalid orders and continue; do not count them toward totals. For every valid order, net cents = floor(units * unitPriceCents * (10000 - discountBps) / 10000). Do not round individual floating-point currency values.\n\nWrite output/result.json with exactly these fields: datasetId (the dataset identifier above), recordsSeen (all input orders), validRecords, rejectedIds (sorted by id), grandTotalCents, byTeam (sorted by team; each object has team, count, totalCents), samples (the first and last valid order in input order, each with id and totalCents), and facts (a JSON object mapping keys to string values from input/facts.md, excluding its heading; use {} when there are no facts). Preserve the facts exactly, including Unicode.\n\nWrite output/report.md as a readable explanation identifying the dataset and the grand total in integer cents. ${input.level >= 2 ? "Write output/teams.csv with header team,count,totalCents and the same sorted team totals." : ""}\n`,
   };
   if (input.level >= 3) {
     files["project/README.md"] = "# Reconciliation project\n\nImplement project/analyze.ts as a reusable Bun CLI. Arguments are an input directory and dataset ID. Read orders.json, adjustments.csv and facts.md from that directory, and print only the result JSON specified by input/spec.md. Invalid rows are expected recoverable data errors; one invalid row must not abort the project. The independent runner will execute the CLI against additional generated input.\n";
@@ -134,10 +134,20 @@ export function evaluateWorkload(rootInput: string, workload: GoldenWorkload, pr
   const expected = expectedResult(workload);
   const checkResult = (text: string | undefined, expected: z.infer<typeof ResultSchema>, prefix: string) => {
     if (text === undefined) return;
-    try {
-      const actual = ResultSchema.parse(JSON.parse(text));
-      for (const key of Object.keys(expected) as (keyof typeof expected)[]) if (JSON.stringify(comparable(actual[key])) !== JSON.stringify(comparable(expected[key]))) failures.push(`${prefix}.${key} differs from the independent calculation`);
-    } catch { failures.push(`${prefix} is not valid result JSON`); }
+    let parsed: unknown;
+    try { parsed = JSON.parse(text); }
+    catch { failures.push(`${prefix} is not valid JSON`); return; }
+    const checked = ResultSchema.safeParse(parsed);
+    if (!checked.success) {
+      const fields = new Set(checked.error.issues.map(issue => {
+        const first = issue.path[0];
+        return typeof first === "string" && Object.hasOwn(expected, first) ? first : "root";
+      }));
+      failures.push(`${prefix} does not match required JSON shape (${[...fields].sort().join(", ")})`);
+      return;
+    }
+    const actual = checked.data;
+    for (const key of Object.keys(expected) as (keyof typeof expected)[]) if (JSON.stringify(comparable(actual[key])) !== JSON.stringify(comparable(expected[key]))) failures.push(`${prefix}.${key} differs from the independent calculation`);
   };
   checkResult(read("output/result.json", 1024 * 1024), expected, "result");
   const report = read("output/report.md", 1024 * 1024);

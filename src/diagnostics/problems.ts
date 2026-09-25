@@ -20,6 +20,14 @@ export function problemFor(error: unknown, fallback = "The operation failed; ope
   const candidate = error && typeof error === "object" ? error as Record<string, unknown> : {};
   const existing = ProblemSchema.safeParse(candidate.problem);
   if (existing.success) return safeProblem(ProblemSchema.parse({ ...existing.data, ...context }));
+  if (error instanceof AggregateError && Array.isArray(error.errors)) {
+    const parts = error.errors.slice(0, 8).filter(item => item !== error && !(item instanceof AggregateError))
+      .map(item => problemFor(item, fallback));
+    const primary = parts.find(item => item.code !== "operation_failed");
+    if (primary) return safeProblem(ProblemSchema.parse({ ...primary,
+      causes: [...primary.causes, ...parts.filter(item => item !== primary && item.code !== "operation_failed")
+        .map(item => ({ code: item.code, message: item.message }))].slice(0, 8), ...context }));
+  }
   if (error instanceof DiagnosticRequestError) return safeProblem(ProblemSchema.parse({ code: error.code, message: error.message, origin: "diagnostics",
     findings: error.details ? [{ message: Object.entries(error.details).map(([key, value]) => `${key}=${value}`).join("; ") }] : [], ...context }));
   if (typeof candidate.code === "string" && /^[a-z][a-z0-9_]{0,95}$/.test(candidate.code)

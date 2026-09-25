@@ -6,6 +6,7 @@ import { dirname, join, resolve } from "node:path";
 import { setTimeout as wait } from "node:timers/promises";
 import { createRequire } from "node:module";
 import { DiagnosticStore } from "../../src/diagnostics/store";
+import { DiagnosticError } from "../../src/diagnostics/problems";
 import { signInMessage, signInPage } from "./sign-in";
 import { readLauncherBrowserHostDescriptor, readLauncherBrowserHostDescriptorFile } from "../../src/launcher-browser-host";
 
@@ -33,6 +34,24 @@ function owns(process: OwnedProcess): boolean {
   return Boolean(actual && actual.start === process.start && actual.executable === process.executable && actual.group === process.group && actual.group === actual.pid);
 }
 export { identity as ownedProcessIdentity, owns as ownsProcess };
+
+/** Retry only a typed refusal made before shutdown effects; every other outcome stays uncertain. */
+export async function requestIdleGoldenLauncherShutdown(control: { endpoint: string; token: string }, ownerAlive: () => boolean, retryMs = 500, timeoutMs = 15_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    if (!ownerAlive()) throw new DiagnosticError({ code: "golden_launcher_owner_changed", message: "The hidden launcher owner changed before idle shutdown was acknowledged", origin: "launcher", stage: "launcher_restart" });
+    const response = await fetch(`${control.endpoint}/v1/launcher/shutdown-idle`, { method: "POST", headers: { authorization: `Bearer ${control.token}`, "content-type": "application/json" }, body: "{}", signal: AbortSignal.timeout(Math.min(5_000, Math.max(1, deadline - Date.now()))) });
+    const payload: unknown = await response.json().catch(() => undefined);
+    const record = payload && typeof payload === "object" && !Array.isArray(payload) ? payload as Record<string, unknown> : {};
+    if (response.ok && record.ok === true) return;
+    const reason = typeof record.error === "string" && ["launcher_busy", "shutdown_failed", "shutdown_in_progress", "idle_shutdown_refused"].includes(record.error) ? record.error : "unknown";
+    if (response.status === 409 && reason === "launcher_busy" && Date.now() + retryMs < deadline) {
+      await wait(retryMs);
+      continue;
+    }
+    throw new DiagnosticError({ code: "golden_launcher_shutdown_refused", message: "The hidden launcher could not confirm an idle shutdown", origin: "launcher", stage: "launcher_restart", findings: [{ message: `controlStatus=${response.status}; controlReason=${reason}` }] });
+  }
+}
 
 /** A missing leader alone does not prove its browser/helper process group has stopped. */
 export function verifyStoppedGoldenLauncher(prior: OwnedProcess): void {
@@ -161,8 +180,7 @@ export async function restartGoldenLauncher(rootInput: string): Promise<GoldenWo
   if (descriptor && descriptor.pid !== prior.pid) throw new Error("The browser descriptor belongs to another launcher");
   if (owns(prior)) {
     if (!descriptor) throw new Error("The live isolated launcher has no shutdown control descriptor");
-    const response = await fetch(`${descriptor.control.endpoint}/v1/launcher/shutdown-idle`, { method: "POST", headers: { authorization: `Bearer ${descriptor.control.token}`, "content-type": "application/json" }, body: "{}", signal: AbortSignal.timeout(30_000) });
-    if (!response.ok || (await response.json() as { ok?: boolean }).ok !== true) throw new Error("The isolated launcher did not approve an idle shutdown");
+    await requestIdleGoldenLauncherShutdown(descriptor.control, () => owns(prior));
     await until(() => !owns(prior));
   } else verifyStoppedGoldenLauncher(prior);
   const env: NodeJS.ProcessEnv = { ...process.env, DISPLAY: state.display, XAUTHORITY: join(root, "xauthority"), XDG_SESSION_TYPE: "x11" };

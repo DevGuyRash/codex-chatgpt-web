@@ -13,7 +13,7 @@ test("idle shutdown authenticates, refuses busy work, and acknowledges before cl
     getPreferences: () => ({}),
     shutdownIdle: async acknowledge => {
       calls += 1;
-      if (busy) return { ok: false };
+      if (busy) return { ok: false, code: "launcher_busy" };
       await acknowledge();
       acknowledged = true;
       await server.close();
@@ -27,7 +27,9 @@ test("idle shutdown authenticates, refuses busy work, and acknowledges before cl
   try {
     assert.equal((await request("Bearer wrong")).status, 401);
     assert.equal(calls, 0);
-    assert.equal((await request(`Bearer ${token}`)).status, 409);
+    const blocked = await request(`Bearer ${token}`);
+    assert.equal(blocked.status, 409);
+    assert.deepEqual(await blocked.json(), { error: "launcher_busy" });
     assert.equal(acknowledged, false);
     busy = false;
     const response = await request(`Bearer ${token}`);

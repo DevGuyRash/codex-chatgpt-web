@@ -125,7 +125,10 @@ class BrowserControlServer {
           writeJson(response, 200, { ok: true });
         }));
         succeeded = result?.ok === true;
-        if (!succeeded && !response.headersSent) writeJson(response, 409, { error: "idle_shutdown_refused" });
+        if (!succeeded && !response.headersSent) {
+          const code = ["launcher_busy", "shutdown_failed", "shutdown_in_progress"].includes(result?.code) ? result.code : "idle_shutdown_refused";
+          writeJson(response, 409, { error: code });
+        }
       } finally {
         if (!succeeded) this.shutdownPending = false;
       }

@@ -1164,14 +1164,16 @@ function registerIpc({ logger, stateStore }) {
 
 async function requestQuit({ idleOnly = false, beforeClose } = {}) {
   if (shutdownInProgress || exitCommitted) {
-    return { ok: false, message: "Launcher shutdown is already in progress" };
+    return { ok: false, code: "shutdown_in_progress", message: "Launcher shutdown is already in progress" };
   }
   shutdownInProgress = true;
+  let refusalCode = "shutdown_failed";
   try {
     const browserOperation = browserHost?.currentOperation();
     const activeOperation = runtimeHost?.currentOperation()
       || (browserOperation === "ChatGPT login" ? null : browserOperation);
     if (activeOperation) {
+      refusalCode = "launcher_busy";
       throw new Error(`Wait for ${activeOperation} to finish before quitting Codex Web GPT`);
     }
     await runtimeSupervisor?.shutdown({ cancelActiveTurns: !idleOnly, force: !idleOnly });
@@ -1192,7 +1194,7 @@ async function requestQuit({ idleOnly = false, beforeClose } = {}) {
     quitting = false;
     showMainWindow();
     publishOperation({ name: "launcher-quit", status: "failed", message });
-    return { ok: false, message };
+    return { ok: false, code: refusalCode, message };
   } finally {
     shutdownInProgress = false;
   }

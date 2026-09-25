@@ -4,7 +4,22 @@ import { once } from "node:events";
 import { existsSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { ownedProcessIdentity, startGoldenWorkspace, verifyStoppedGoldenLauncher } from "../scripts/golden/workspace";
+import { ownedProcessIdentity, requestIdleGoldenLauncherShutdown, startGoldenWorkspace, verifyStoppedGoldenLauncher } from "../scripts/golden/workspace";
+
+test("idle launcher recovery retries only a typed no-effect busy refusal", async () => {
+  let attempts = 0;
+  const server = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: () => Response.json(++attempts < 3 ? { error: "launcher_busy" } : { ok: true }, { status: attempts < 3 ? 409 : 200 }) });
+  try {
+    await requestIdleGoldenLauncherShutdown({ endpoint: `http://127.0.0.1:${server.port}`, token: "fixture" }, () => true, 5, 1000);
+    expect(attempts).toBe(3);
+  } finally { server.stop(true); }
+  let rejected = 0;
+  const failed = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: () => { rejected++; return Response.json({ error: "shutdown_failed" }, { status: 409 }); } });
+  try {
+    await expect(requestIdleGoldenLauncherShutdown({ endpoint: `http://127.0.0.1:${failed.port}`, token: "fixture" }, () => true, 5, 1000)).rejects.toMatchObject({ code: "golden_launcher_shutdown_refused", problem: { findings: [{ message: "controlStatus=409; controlReason=shutdown_failed" }] } });
+    expect(rejected).toBe(1);
+  } finally { failed.stop(true); }
+});
 
 test.skipIf(process.platform !== "linux")("golden workspace rejects stock Electron before creating a hidden display", async () => {
   const parent = mkdtempSync(join(tmpdir(), "codex-golden-reviewed-electron-"));

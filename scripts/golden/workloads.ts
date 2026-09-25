@@ -159,7 +159,7 @@ export function evaluateWorkload(rootInput: string, workload: GoldenWorkload, pr
       else checkResult(projectExecution.stdout, expectedResult(projectExecution.validationWorkload), "project");
     } else pendingChecks.push("Execute the generated project against an independent dataset in the native sandbox");
   }
-  if (variant === "large-history") {
+  if (variant === "large-history" || variant === "compaction") {
     const witness = read("output/history-witness.txt", 1024);
     if (witness !== undefined && witness !== `${largeHistoryWitness(workload)}\n`) failures.push("Large-history witness differs from the retained preparation fact");
   }

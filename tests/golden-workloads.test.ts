@@ -65,6 +65,8 @@ test.each([undefined, "all"] as const)("the independent artifact oracle rejects 
     const history = evaluateWorkload(root, workload, undefined, "large-history");
     expect(history.passed).toBe(true);
     expect(history.artifacts.map(artifact => artifact.path)).toContain("output/history-witness.txt");
+    expect(evaluateWorkload(root, workload, undefined, "compaction")).toMatchObject({ passed: true,
+      artifacts: expect.arrayContaining([expect.objectContaining({ path: "output/history-witness.txt" })]) });
     expect(evaluateWorkload(root, workload, undefined, "steer-generation").passed).toBe(false);
     writeFileSync(join(root, "output/steering.txt"), "Acknowledged the correction.\n");
     expect(evaluateWorkload(root, workload, undefined, "steer-generation").passed).toBe(false);

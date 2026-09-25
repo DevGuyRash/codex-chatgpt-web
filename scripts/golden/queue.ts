@@ -189,6 +189,22 @@ export class GoldenQueue {
       this.db.query("UPDATE cells SET status='pending',token=NULL,checkpoint=NULL,outcome=NULL,updated=? WHERE id=?").run(Date.now(), review.id);
     }).immediate();
   }
+  /** A failed attempt with no native identity can be retried only against its retained review. */
+  resumeFailedPreGenerationCell(input: { id: string; expectedAttempt: number; expectedOutcomeSha256: string; expectedCheckpointSha256: string; reason: string; evidence: string }): void {
+    const review = z.object({ id: z.string().regex(/^[a-f\d]{64}$/), expectedAttempt: z.number().int().positive(), expectedOutcomeSha256: z.string().regex(/^[a-f\d]{64}$/), expectedCheckpointSha256: z.string().regex(/^[a-f\d]{64}$/), reason: z.string().min(1).max(4096), evidence: z.string().min(1).max(4096) }).strict().parse(input);
+    this.db.transaction(() => {
+      this.assertImplementation();
+      if (this.running().length || liveRunner(this.meta("runner"))) throw new Error("Resolve owned attempts and stop the scheduler before reviewing a failed cell");
+      const row = this.db.query("SELECT status,attempt,outcome,checkpoint FROM cells WHERE id=?").get(review.id) as { status: string; attempt: number; outcome: string | null; checkpoint: string | null } | null;
+      if (!row || row.status !== "failed" || row.attempt !== review.expectedAttempt || !row.outcome || !row.checkpoint
+        || createHash("sha256").update(row.outcome).digest("hex") !== review.expectedOutcomeSha256
+        || createHash("sha256").update(row.checkpoint).digest("hex") !== review.expectedCheckpointSha256) throw new Error("Failed cell evidence changed since its review");
+      const checkpoint = CheckpointSchema.parse(JSON.parse(row.checkpoint));
+      if (checkpoint.threadId || checkpoint.turnId || checkpoint.nativePid || checkpoint.nativeStart || checkpoint.nativeExecutable) throw new Error("A native attempt cannot use pre-generation retry review");
+      this.db.query("INSERT INTO metadata(key,value) VALUES(?,?)").run(`pre_generation_review:${review.id}:${review.expectedAttempt}`, JSON.stringify(review));
+      this.db.query("UPDATE cells SET status='pending',token=NULL,checkpoint=NULL,outcome=NULL,updated=? WHERE id=?").run(Date.now(), review.id);
+    }).immediate();
+  }
   private admissionHold() {
     const value = this.meta("admission_hold"); return value ? AdmissionHoldSchema.parse(JSON.parse(value)) : undefined;
   }
@@ -203,10 +219,10 @@ export class GoldenQueue {
       if (liveRunner(this.meta("runner"))) throw new Error("A live scheduler prevents implementation reconciliation");
       // A blocked attempt may retain uncertain external effects or an incomplete export.
       // Changing source cannot authorize replay of that cell; keep its review boundary.
-      const rows = this.db.query("SELECT id FROM cells WHERE attempt>0 AND status IN ('passed','failed','substituted') ORDER BY ordinal").all() as { id: string }[];
+      const rows = this.db.query("SELECT id FROM cells WHERE attempt>0 AND status='passed' ORDER BY ordinal").all() as { id: string }[];
       const requeuedCellIds = rows.map(row => row.id);
       this.db.query("INSERT INTO implementation_revisions(previous,next,review,requeued,created) VALUES(?,?,?,?,?)").run(this.implementation, review.implementationSha256, JSON.stringify(review), JSON.stringify(requeuedCellIds), Date.now());
-      this.db.query("UPDATE cells SET status='pending',token=NULL,checkpoint=NULL,outcome=NULL,updated=? WHERE attempt>0 AND status IN ('passed','failed','substituted')").run(Date.now());
+      this.db.query("UPDATE cells SET status='pending',token=NULL,checkpoint=NULL,outcome=NULL,updated=? WHERE attempt>0 AND status='passed'").run(Date.now());
       this.db.query("UPDATE metadata SET value=? WHERE key='implementation'").run(review.implementationSha256);
       this.db.query("DELETE FROM metadata WHERE key='runner'").run();
       return { requeuedCellIds };

@@ -23,7 +23,7 @@ test("reviewed implementation reconciliation preserves attempts, refuses unresol
     const runner = queue.acquireRunner();
     expect(() => queue.reconcileImplementation(revision)).toThrow("scheduler");
     queue.releaseRunner(runner);
-    expect(queue.reconcileImplementation(revision).requeuedCellIds).toEqual([claim.cell.id]);
+    expect(queue.reconcileImplementation(revision).requeuedCellIds).toEqual([]);
     const database = new Database(path, { readonly: true });
     try { expect(database.query("SELECT status FROM cells WHERE id=?").get(blocked.cell.id)).toEqual({ status: "blocked" }); }
     finally { database.close(); }
@@ -32,12 +32,12 @@ test("reviewed implementation reconciliation preserves attempts, refuses unresol
     expect(() => stale.claim({ lane: "serial", protocol: "native" })).toThrow("implementation changed");
     expect(() => queue.reconcileImplementation(revision)).toThrow("implementation changed");
     const repeat = queue.claim({ lane: "serial", protocol: "native" })!;
-    expect(repeat.cell.id).toBe(claim.cell.id);
+    expect(repeat.cell.id).not.toBe(claim.cell.id);
     expect(repeat.token).not.toBe(claim.token);
     const db = new Database(path, { readonly: true });
     try {
       const attempts = db.query("SELECT attempt,implementation,checkpoint,outcome FROM attempts WHERE cell_id=? ORDER BY attempt").all(claim.cell.id) as { attempt: number; implementation: string; checkpoint: string | null; outcome: string | null }[];
-      expect(attempts.map(attempt => attempt.implementation)).toEqual(["b".repeat(64), "c".repeat(64)]);
+      expect(attempts.map(attempt => attempt.implementation)).toEqual(["b".repeat(64)]);
       expect(JSON.parse(attempts[0]!.checkpoint!)).toMatchObject({ threadId: "retained-thread" });
       expect(JSON.parse(attempts[0]!.outcome!)).toMatchObject({ status: "failed", evidence: "/fixture/attempt.zip" });
       expect(db.query("SELECT COUNT(*) AS n FROM implementation_revisions").get()).toEqual({ n: 1 });
@@ -61,6 +61,26 @@ test("blocked unknown effects survive source revisions until their exact outcome
     const repeat = queue.claim({ lane: "serial", protocol: "native" })!;
     expect(repeat.cell.id).toBe(claim.cell.id);
     expect(repeat.token).not.toBe(claim.token);
+  } finally { queue.close(); rmSync(root, { recursive: true, force: true }); }
+});
+
+test("failed pre-generation work needs an exact checkpoint and outcome review before retry", () => {
+  const root = mkdtempSync(join(tmpdir(), "golden-pre-generation-review-")), path = join(root, "campaign.sqlite");
+  const queue = new GoldenQueue(path, { snapshot, implementationSha256: "b".repeat(64) });
+  try {
+    const claim = queue.claim({ lane: "serial", protocol: "native" })!;
+    queue.checkpoint(claim.cell.id, claim.token, { traceIds: ["a".repeat(32)] });
+    queue.settle(claim.cell.id, claim.token, { status: "failed", reason: "Launcher preflight failed before native startup", evidence: "/fixture/preflight.zip" });
+    const db = new Database(path, { readonly: true });
+    const row = db.query("SELECT attempt,outcome,checkpoint FROM cells WHERE id=?").get(claim.cell.id) as { attempt: number; outcome: string; checkpoint: string };
+    db.close();
+    expect(queue.reconcileImplementation({ expectedImplementationSha256: "b".repeat(64), implementationSha256: "c".repeat(64), reason: "Reviewed source update", evidence: "/fixture/revision.json", evidenceSha256: "d".repeat(64) }).requeuedCellIds).toEqual([]);
+    const review = { id: claim.cell.id, expectedAttempt: row.attempt, expectedOutcomeSha256: createHash("sha256").update(row.outcome).digest("hex"), expectedCheckpointSha256: createHash("sha256").update(row.checkpoint).digest("hex"), reason: "No native task or Send was observed", evidence: "/fixture/preflight-review.json" };
+    expect(() => queue.resumeFailedPreGenerationCell({ ...review, expectedCheckpointSha256: "0".repeat(64) })).toThrow("evidence changed");
+    queue.resumeFailedPreGenerationCell(review);
+    const retry = queue.claim({ lane: "serial", protocol: "native" })!;
+    expect(retry.cell.id).toBe(claim.cell.id);
+    expect(retry.token).not.toBe(claim.token);
   } finally { queue.close(); rmSync(root, { recursive: true, force: true }); }
 });
 

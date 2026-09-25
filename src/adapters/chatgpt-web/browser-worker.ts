@@ -2503,10 +2503,12 @@ export class ChatGptBrowserWorker {
     if (await dismissChatGptTemporaryChatOnboarding(page)) {
       await captureDiagnostic?.("temporary-chat-onboarding-dismissed");
     }
+    await handleChatGptRequestFrequencyNotice(page);
     await captureDiagnostic?.("composer-ready");
     await throwIfChatGptSessionFailureAlert(page);
     await assertAuthenticatedChatGptPage(page);
     await assertTemporaryChatPage(page);
+    await handleChatGptRequestFrequencyNotice(page);
     await captureDiagnostic?.("session-verified");
     return composer;
   }
@@ -5071,6 +5073,13 @@ export class ChatGptBrowserWorker {
       if (this.context && this.config.browserHost === "managed-chrome") {
         const state = await this.context.storageState();
         atomicWriteFile(this.config.storageStatePath, `${JSON.stringify(state)}\n`);
+      }
+      try { await handleChatGptRequestFrequencyNotice(page); }
+      catch (error) {
+        runtimeDiagnostics()?.event("browser.chatgpt_ui_notice", "ChatGPT notice remained after the completed turn", {
+          kind: "request-frequency", surface: "dialog", dismissed: false,
+          errorCode: error instanceof ChatGptWebAdapterError ? error.code : "unclassified",
+        }, "warning");
       }
       await diagnostics.capture(page, "turn-completed");
       console.info(

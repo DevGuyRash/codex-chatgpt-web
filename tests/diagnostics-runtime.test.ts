@@ -9,7 +9,7 @@ import { DiagnosticsClient } from "../src/diagnostics/client";
 import { queryDiagnostics } from "../src/diagnostics/query";
 import { exportDiagnostics, toOtlp } from "../src/diagnostics/export";
 import type { DiagnosticEvent } from "../src/diagnostics/contracts";
-import { WorkerResponseSchema } from "../src/diagnostics/contracts";
+import { ContentManifestSchema, WorkerResponseSchema } from "../src/diagnostics/contracts";
 import { diagnosticRequestMessages } from "../src/diagnostics/request-error";
 import { Database } from "bun:sqlite";
 import { problemFor } from "../src/diagnostics/problems";
@@ -56,6 +56,28 @@ test("a real contested worker write identifies the request and phase without raw
     expect((await client.status()).available).toBe(true);
   } finally { if (writer) { writer.exec("ROLLBACK"); writer.close(); } await client.close(); }
 }, 15000);
+
+test("a capture bind waits for a transient competing writer without duplicating its trace", async () => {
+  const home = root();
+  const client = new DiagnosticsClient({ executable: process.execPath, args: [resolve("src/cli.ts"), "--home", home, "diagnostics", "worker"] });
+  let writer: Database | undefined;
+  try {
+    const campaignId = crypto.randomUUID(), traceId = "a".repeat(32);
+    await client.contentCapture({ action: "start", campaignId, until: Date.now() + 60000, maxBytes: 1048576, acknowledged: true });
+    writer = new Database(join(home, "diagnostics", "observability", "diagnostics.sqlite"));
+    writer.exec("BEGIN IMMEDIATE");
+    const bound = client.contentCapture({ action: "bind", campaignId, traceId });
+    // This exceeds the former one-second SQLite wait while remaining below the request deadline.
+    await Bun.sleep(1500);
+    writer.exec("ROLLBACK"); writer.close(); writer = undefined;
+    await expect(bound).resolves.toEqual({ bound: true });
+    const manifest = ContentManifestSchema.parse(await client.contentCapture({ action: "manifest", campaignId }));
+    expect(manifest.traceIds).toEqual([traceId]);
+    expect(manifest.omitted).toBe(0);
+    expect(manifest.collectionFailures).toBe(0);
+    expect((await client.status()).dropped).toBe(0);
+  } finally { if (writer) { writer.exec("ROLLBACK"); writer.close(); } await client.close(); }
+}, 10000);
 
 test("worker startup lock failure retains its typed cause for pending and later requests", async () => {
   const home = root(), directory = join(home, "diagnostics", "observability");

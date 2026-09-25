@@ -83,7 +83,10 @@ export class DiagnosticStore {
     if (existsSync(this.file) && lstatSync(this.file).isSymbolicLink()) throw new Error("Diagnostics database must not be a symbolic link");
     const database = new Database(this.file, { readonly: this.readonly, create: !this.readonly, strict: true });
     try {
-      database.exec("PRAGMA busy_timeout=1000; PRAGMA foreign_keys=ON");
+      // A second owned worker can briefly hold the WAL writer lock during a large capture.
+      // Wait inside SQLite before BEGIN IMMEDIATE; the client keeps a separate five-second
+      // request boundary and never resubmits a capture with an uncertain outcome.
+      database.exec("PRAGMA busy_timeout=3000; PRAGMA foreign_keys=ON");
       const version = (database.query("PRAGMA user_version").get() as { user_version: number }).user_version;
       if (version > SCHEMA_VERSION || this.readonly && version !== SCHEMA_VERSION) throw new Error("Diagnostics schema is not supported by this build; use the matching launcher");
       if (!this.readonly) {

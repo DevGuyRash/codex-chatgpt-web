@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { GoldenQueue } from "../scripts/golden/queue";
 import type { CapabilitySnapshot } from "../scripts/golden/catalog";
 import { Database } from "bun:sqlite";
+import { createHash } from "node:crypto";
 
 const snapshot: CapabilitySnapshot = { inspectedAt: "2026-09-08T00:00:00Z", source: "launcher-session-inspection", capabilities: { solAvailable: true, proAvailable: true }, nativeCodexVersion: "fixture", nativeCatalogSha256: "a".repeat(64) };
 
@@ -17,10 +18,15 @@ test("reviewed implementation reconciliation preserves attempts, refuses unresol
     queue.checkpoint(claim.cell.id, claim.token, { threadId: "retained-thread" });
     expect(() => queue.reconcileImplementation(revision)).toThrow("unresolved");
     queue.settle(claim.cell.id, claim.token, { status: "failed", reason: "Retained observed failure", evidence: "/fixture/attempt.zip" });
+    const blocked = queue.claim({ lane: "serial", protocol: "native" })!;
+    queue.settle(blocked.cell.id, blocked.token, { status: "blocked", reason: "Uncertain tool effect requires manual review", evidence: "/fixture/unknown.zip" });
     const runner = queue.acquireRunner();
     expect(() => queue.reconcileImplementation(revision)).toThrow("scheduler");
     queue.releaseRunner(runner);
     expect(queue.reconcileImplementation(revision).requeuedCellIds).toEqual([claim.cell.id]);
+    const database = new Database(path, { readonly: true });
+    try { expect(database.query("SELECT status FROM cells WHERE id=?").get(blocked.cell.id)).toEqual({ status: "blocked" }); }
+    finally { database.close(); }
     expect(queue.implementationSha256).toBe("c".repeat(64));
     expect(() => stale.acquireRunner()).toThrow("implementation changed");
     expect(() => stale.claim({ lane: "serial", protocol: "native" })).toThrow("implementation changed");
@@ -37,6 +43,25 @@ test("reviewed implementation reconciliation preserves attempts, refuses unresol
       expect(db.query("SELECT COUNT(*) AS n FROM implementation_revisions").get()).toEqual({ n: 1 });
     } finally { db.close(); }
   } finally { stale.close(); queue.close(); rmSync(root, { recursive: true, force: true }); }
+});
+
+test("blocked unknown effects survive source revisions until their exact outcome is reviewed", () => {
+  const root = mkdtempSync(join(tmpdir(), "golden-blocked-review-")), path = join(root, "campaign.sqlite");
+  const queue = new GoldenQueue(path, { snapshot, implementationSha256: "b".repeat(64) });
+  try {
+    const claim = queue.claim({ lane: "serial", protocol: "native" })!;
+    queue.settle(claim.cell.id, claim.token, { status: "blocked", reason: "Tool receipt missing after diagnostic loss", evidence: "/fixture/loss.zip" });
+    const db = new Database(path, { readonly: true });
+    const row = db.query("SELECT attempt,outcome FROM cells WHERE id=?").get(claim.cell.id) as { attempt: number; outcome: string };
+    db.close();
+    expect(queue.reconcileImplementation({ expectedImplementationSha256: "b".repeat(64), implementationSha256: "c".repeat(64), reason: "Reviewed source update", evidence: "/fixture/revision.json", evidenceSha256: "d".repeat(64) }).requeuedCellIds).toEqual([]);
+    const review = { id: claim.cell.id, expectedAttempt: row.attempt, expectedOutcomeSha256: createHash("sha256").update(row.outcome).digest("hex"), reason: "The prior effect was independently reconciled", evidence: "/fixture/effect-review.json" };
+    expect(() => queue.resumeBlockedCell({ ...review, expectedOutcomeSha256: "0".repeat(64) })).toThrow("outcome changed");
+    queue.resumeBlockedCell(review);
+    const repeat = queue.claim({ lane: "serial", protocol: "native" })!;
+    expect(repeat.cell.id).toBe(claim.cell.id);
+    expect(repeat.token).not.toBe(claim.token);
+  } finally { queue.close(); rmSync(root, { recursive: true, force: true }); }
 });
 
 test("durable claims preserve full coverage, serialize the serial lane and fence duplicate settlement", () => {

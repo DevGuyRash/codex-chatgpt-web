@@ -1,7 +1,7 @@
 import { Database } from "bun:sqlite";
 import { chmodSync, existsSync, lstatSync, mkdirSync } from "node:fs";
 import { dirname, resolve } from "node:path";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { z } from "zod";
 import { buildGoldenMatrix, matrixSummary, type CapabilitySnapshot, type ExecutionLane, type GoldenCell, type Protocol } from "./catalog";
 import { ownedProcessIdentity } from "./workspace";
@@ -176,6 +176,19 @@ export class GoldenQueue {
       this.db.query("DELETE FROM metadata WHERE key='admission_hold'").run();
     }).immediate();
   }
+  /** Reopen an evidence-blocked cell only after reviewing its exact retained outcome. */
+  resumeBlockedCell(input: { id: string; expectedAttempt: number; expectedOutcomeSha256: string; reason: string; evidence: string }): void {
+    const review = z.object({ id: z.string().regex(/^[a-f\d]{64}$/), expectedAttempt: z.number().int().positive(), expectedOutcomeSha256: z.string().regex(/^[a-f\d]{64}$/), reason: z.string().min(1).max(4096), evidence: z.string().min(1).max(4096) }).strict().parse(input);
+    this.db.transaction(() => {
+      this.assertImplementation();
+      if (this.running().length || liveRunner(this.meta("runner"))) throw new Error("Resolve owned attempts and stop the scheduler before reviewing a blocked cell");
+      const row = this.db.query("SELECT status,attempt,outcome FROM cells WHERE id=?").get(review.id) as { status: string; attempt: number; outcome: string | null } | null;
+      if (!row || row.status !== "blocked" || row.attempt !== review.expectedAttempt || !row.outcome
+        || createHash("sha256").update(row.outcome).digest("hex") !== review.expectedOutcomeSha256) throw new Error("Blocked cell outcome changed since its review");
+      this.db.query("INSERT INTO metadata(key,value) VALUES(?,?)").run(`blocked_review:${review.id}:${review.expectedAttempt}`, JSON.stringify(review));
+      this.db.query("UPDATE cells SET status='pending',token=NULL,checkpoint=NULL,outcome=NULL,updated=? WHERE id=?").run(Date.now(), review.id);
+    }).immediate();
+  }
   private admissionHold() {
     const value = this.meta("admission_hold"); return value ? AdmissionHoldSchema.parse(JSON.parse(value)) : undefined;
   }
@@ -188,10 +201,12 @@ export class GoldenQueue {
       if (review.implementationSha256 === this.implementation) throw new Error("Reconciliation requires a changed implementation");
       if (this.running().length) throw new Error("Campaign has unresolved attempts; implementation reconciliation cannot replay them");
       if (liveRunner(this.meta("runner"))) throw new Error("A live scheduler prevents implementation reconciliation");
-      const rows = this.db.query("SELECT id FROM cells WHERE attempt>0 AND status IN ('passed','failed','blocked','substituted') ORDER BY ordinal").all() as { id: string }[];
+      // A blocked attempt may retain uncertain external effects or an incomplete export.
+      // Changing source cannot authorize replay of that cell; keep its review boundary.
+      const rows = this.db.query("SELECT id FROM cells WHERE attempt>0 AND status IN ('passed','failed','substituted') ORDER BY ordinal").all() as { id: string }[];
       const requeuedCellIds = rows.map(row => row.id);
       this.db.query("INSERT INTO implementation_revisions(previous,next,review,requeued,created) VALUES(?,?,?,?,?)").run(this.implementation, review.implementationSha256, JSON.stringify(review), JSON.stringify(requeuedCellIds), Date.now());
-      this.db.query("UPDATE cells SET status='pending',token=NULL,checkpoint=NULL,outcome=NULL,updated=? WHERE attempt>0 AND status IN ('passed','failed','blocked','substituted')").run(Date.now());
+      this.db.query("UPDATE cells SET status='pending',token=NULL,checkpoint=NULL,outcome=NULL,updated=? WHERE attempt>0 AND status IN ('passed','failed','substituted')").run(Date.now());
       this.db.query("UPDATE metadata SET value=? WHERE key='implementation'").run(review.implementationSha256);
       this.db.query("DELETE FROM metadata WHERE key='runner'").run();
       return { requeuedCellIds };

@@ -19,7 +19,7 @@ const patch = resolve(root, "native/electron", manifest.patch);
 const chromiumPatch = resolve(root, "native/electron", manifest.chromiumPatch);
 const chromiumRoot = resolve(source, "..");
 // Electron's npm preflight must use the native npm. Workspace PATH interceptors can route
-// npm into unrelated read-only caches before the pinned /ai_models build is reached.
+// npm into unrelated read-only caches before the selected build root is reached.
 const gnTools = resolve(source, "..", "buildtools/linux64");
 const buildPath = process.platform === "linux"
   ? `/usr/bin:/bin:${gnTools}:${dirname(process.execPath)}:${process.env.PATH ?? ""}` : process.env.PATH;

@@ -12,7 +12,7 @@ Use Bun 1.4.0 and install the repository's locked dependencies:
 just bootstrap
 ```
 
-Build the reviewed Electron 44.4.4 WebAuthn runtime as described in [Embedded WebAuthn runtime](../native/electron/README.md). Stock Electron cannot satisfy the launcher's PIN and phone request contract. Keep its build directory and caches on a volume with enough space; the build instructions use `/ai_models` on this Linux development host.
+Build the reviewed Electron 44.4.4 WebAuthn runtime as described in [Embedded WebAuthn runtime](../native/electron/README.md). Stock Electron cannot satisfy the launcher's PIN and phone request contract. Use a build volume with enough space for Chromium and its cache; use `/tmp` for smaller disposable package and smoke scratch when space permits, and remove that scratch after verification.
 
 For source development, point the launcher at the resulting native executable and start its Vite-backed window:
 

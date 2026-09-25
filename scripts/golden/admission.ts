@@ -16,14 +16,15 @@ export function nativeAdmissionObservation(failure: NativeScenarioFailure["nativ
   return AdmissionObservationSchema.parse({ code: "rate_limit_exceeded", reason: "Native account rate limit; admission remains suspended until reviewed resumption. Incomplete evidence still requires reconciliation.", evidence, threadId: failure.threadId, turnId: limited.id });
 }
 
-/** A correlated native request can report a limit without a retained native turn record. */
+/** Only an owned ChatGPT conversation POST's HTTP 429 can constrain admission without native rate evidence. */
 export function diagnosticAdmissionObservation(events: readonly DiagnosticEvent[], ownedThreads: readonly string[], evidence: string): AdmissionObservation | undefined {
   const owners = new Map<string, Set<string>>();
   for (const event of events) if (event.kind === "span" && event.name === "http.responses" && event.traceId && event.taskId) {
     const known = owners.get(event.traceId) ?? new Set<string>(); known.add(event.taskId); owners.set(event.traceId, known);
   }
   for (const event of events) {
-    if (event.kind !== "problem" || event.problem?.code !== "rate_limit_exceeded" || !event.traceId) continue;
+    if (event.kind !== "problem" || event.problem?.code !== "rate_limit_exceeded"
+      || event.problem.origin !== "chatgpt-http" || event.problem.httpStatus !== 429 || !event.traceId) continue;
     const known = owners.get(event.traceId);
     if (known?.size !== 1) continue;
     const [threadId, turnId, extra] = [...known][0]!.split(":");

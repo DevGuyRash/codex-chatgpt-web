@@ -203,7 +203,7 @@ test("a scoped ancillary rate limit constrains admission despite missing content
     await client.contentCapture({ action: "start", campaignId, acknowledged: true, until: Date.now() + 7200000 });
     const observer = diagnostics.begin("golden.acceptance", {}, null), request = diagnostics.begin("http.responses", {}, null, { id: `${threadId}:${turnId}` });
     for (const operation of [observer, request]) await client.contentCapture({ action: "bind", campaignId, traceId: operation.context.traceId });
-    request.run(() => diagnostics.problem(new DiagnosticError({ code: "rate_limit_exceeded", message: "Synthetic account limit", httpStatus: 429, origin: "browser" })));
+    request.run(() => diagnostics.problem(new DiagnosticError({ code: "rate_limit_exceeded", message: "Synthetic account limit", httpStatus: 429, origin: "chatgpt-http" })));
     request.end("failed");
     await client.contentCapture({ action: "omit", campaignId, traceId: request.context.traceId, reason: "surface-excluded" });
     await expect(readGoldenEvents(client, campaignId, { observerTraceId: observer.context.traceId })).rejects.toMatchObject({ code: "golden_evidence_incomplete" });
@@ -211,6 +211,7 @@ test("a scoped ancillary rate limit constrains admission despite missing content
     const failure = findNativeTuiTitleFailure(new AggregateError([new Error("Synthetic cleanup failure"), new NativeTuiTitleFailure(threadId)]))!;
     const observation = diagnosticAdmissionObservation(observed.events, [failure.threadId], join(root, "title-admission.json"));
     expect(observation).toMatchObject({ code: "rate_limit_exceeded", threadId, turnId });
+    expect(diagnosticAdmissionObservation(observed.events.map(event => event.problem ? { ...event, problem: { ...event.problem, origin: "chatgpt-ui" } } : event), [threadId], "/fixture/evidence.zip")).toBeUndefined();
     const input = { root, campaignId, observerTraceId: observer.context.traceId, ownedThreadIds: [failure.threadId], evidencePath: observation!.evidence };
     expect(await retainLiveProviderAdmission(client, { ...input, ownedThreadIds: [randomUUID()] })).toBeUndefined();
     expect(queue.summary().admissionHold).toBeUndefined();

@@ -230,7 +230,7 @@ test.skipIf(!process.env.CODEX_TEST_PROFILE_BINARY)("native exec preparation pre
     if (!identity.threadId || !identity.turnId) return new Response("Native fixture requires actual task metadata", { status: 400 });
     const operation = diagnostics.begin("http.responses", {}, null, { id: `${identity.threadId}:${identity.turnId}` });
     await client.contentCapture({ action: "bind", campaignId, traceId: operation.context.traceId });
-    operation.run(() => diagnostics.problem(new DiagnosticError({ code: "rate_limit_exceeded", message: "Synthetic account limit", httpStatus: 429, origin: "browser" })));
+    operation.run(() => diagnostics.problem(new DiagnosticError({ code: "rate_limit_exceeded", message: "Synthetic account limit", httpStatus: 429, origin: "chatgpt-http" })));
     operation.end("failed");
     await client.contentCapture({ action: "omit", campaignId, traceId: operation.context.traceId, reason: "surface-excluded" });
     return Response.json({ error: { message: "Synthetic account limit", type: "rate_limit_error", code: "rate_limit_exceeded" } }, { status: 429 });

@@ -166,7 +166,8 @@ test("native account evidence survives an independent cleanup failure without er
   const combined = new AggregateError([native, cleanup], "Cleanup did not settle");
   expect(findNativeScenarioFailure(combined)).toBe(native);
   expect(combined.errors).toContain(cleanup);
-  expect(problemFor(combined).code).toBe("operation_failed");
+  expect(problemFor(combined)).toMatchObject({ code: "rate_limit_exceeded", httpStatus: 429, retryable: true });
+  expect(JSON.stringify(problemFor(combined))).not.toContain("Synthetic cleanup failure");
   expect(findNativeScenarioFailure(new Error("rateLimitExceeded"))).toBeUndefined();
 });
 

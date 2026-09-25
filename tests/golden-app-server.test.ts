@@ -21,6 +21,11 @@ process.stdin.on("data", chunk => { buffer+=chunk.toString(); for (;;) {
  if(m.method==="test/compact-mode") { compactMode=m.params.mode; send({id:m.id,result:{}}); }
  if(m.method==="thread/compact/start") {
   const id="compact-"+(++n), item={id:"compact-item-"+n,type:"contextCompaction"};
+  if(compactMode==="failed-no-item") {
+   send({method:"turn/started",params:{threadId:"thread-one",turn:{id,status:"inProgress",items:[]}}});
+   send({method:"turn/completed",params:{threadId:"thread-one",turn:{id,status:"failed",items:[],error:{codexErrorInfo:"other"}}}});
+   send({id:m.id,result:{}}); continue;
+  }
   const complete=()=>{
    send({method:"turn/started",params:{threadId:"thread-one",turn:{id,status:"inProgress",items:[]}}});
    send({method:"item/started",params:{threadId:"thread-one",turnId:id,item}});
@@ -147,6 +152,16 @@ test("native compaction accepts later terminal notifications but never an item-f
     await f.app.rpc.request("test/compact-mode", { mode: "missing-item" });
     await expect(f.app.compact({ timeoutMs: 20 })).rejects.toMatchObject({ code: "native_event_timeout", uncertain: true });
     await expect(f.app.startTurn({ text: "must not replay" })).rejects.toMatchObject({ code: "native_turn_unsettled" });
+  } finally { await f.close(); }
+});
+
+test("a failed native compaction turn without an item settles promptly with its exact terminal", async () => {
+  const f = fixture();
+  try {
+    await f.app.initialize(); await f.app.openThread();
+    await f.app.rpc.request("test/compact-mode", { mode: "failed-no-item" });
+    await expect(f.app.compact({ timeoutMs: 1000 })).rejects.toMatchObject({ code: "native_compaction_failed", threadId: "thread-one", turn: { id: "compact-1", status: "failed" } });
+    expect(f.app.state().compaction).toBe("idle");
   } finally { await f.close(); }
 });
 

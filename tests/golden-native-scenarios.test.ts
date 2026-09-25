@@ -92,6 +92,10 @@ if(m.method==="turn/start"){
 if(m.method==="thread/compact/start"){
  const id="compact-1",item={id:"compaction-item-1",type:"contextCompaction"};
  send({method:"turn/started",params:{threadId:"thread-one",turn:{id,status:"inProgress",items:[]}}});
+ if(process.env.FAIL_COMPACT==="1"){
+  send({method:"turn/completed",params:{threadId:"thread-one",turn:{id,status:"failed",items:[],error:{codexErrorInfo:"other"}}}});
+  send({id:m.id,result:{}});continue;
+ }
  send({method:"item/completed",params:{threadId:"thread-one",turnId:id,item}});
  send({method:"turn/completed",params:{threadId:"thread-one",turn:{id,status:"completed",items:[item]}}});
  send({id:m.id,result:{}});
@@ -109,6 +113,9 @@ process.stdin.on("end",()=>process.exit(0));
     expect(prompts[0]!.text).toContain(largeHistoryWitness(workload));
     expect(prompts[1]!.text).toContain("output/history-witness.txt");
     expect(prompts[1]!.text).not.toContain(largeHistoryWitness(workload));
+    await expect(runNativeScenario({ executable: peer, cwd: root, env: { FAIL_COMPACT: "1" }, route: CHATGPT_WEB_MODEL_ROUTES[0]!, workload, variant: "compaction", signal: new AbortController().signal, timeoutMs: 2000,
+      onRecord: async () => {}, checkpoint: () => {} })).rejects.toMatchObject({ code: "native_scenario_failed", nativeFailure: { threadId: "thread-one", turns: [{ status: "completed" }, { id: "compact-1", status: "failed" }] } });
+    expect(readFileSync(log, "utf8").trim().split("\n")).toHaveLength(3);
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 

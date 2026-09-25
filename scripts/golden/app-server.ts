@@ -20,6 +20,11 @@ interface ActiveCompaction {
   reject(error: Error): void;
 }
 export interface NativeCompaction { threadId: string; turnId: string; itemId: string; turn: NativeTurn }
+export class NativeCompactionTerminalError extends NativeRpcError {
+  constructor(readonly threadId: string, readonly turn: NativeTurn) {
+    super("The native compaction turn ended without a completed compaction item", "native_compaction_failed");
+  }
+}
 const invalid = (message: string) => new NativeRpcError(message, "native_protocol_invalid", true);
 export function readNativeTurn(value: unknown): NativeTurn {
   if (!object(value) || typeof value.id !== "string" || !value.id || !["inProgress", "completed", "interrupted", "failed"].includes(String(value.status)) || !Array.isArray(value.items)) throw invalid("Native turn response is missing its identity, status or items");
@@ -70,6 +75,12 @@ export class GoldenAppServer {
         else {
           if (turn.status === "inProgress") throw invalid("Native compaction completion is not terminal");
           observed.terminal = turn;
+          // A failed turn may have no contextCompaction item. Only a started, uniquely
+          // observed turn (or the item-bound turn) can settle this compaction owner.
+          if (turn.status !== "completed" && observed.started
+            && (compaction.turnId === turn.id || !compaction.turnId && compaction.turns.size === 1)) {
+            compaction.reject(new NativeCompactionTerminalError(this.threadId, turn));
+          }
         }
       }
       if (compaction && (method === "item/started" || method === "item/completed") && object(params.item) && params.item.type === "contextCompaction") {
@@ -184,7 +195,8 @@ export class GoldenAppServer {
       this.compacting = undefined;
       return result;
     } catch (error) {
-      if (error instanceof NativeRpcError && error.code === "native_rpc_rejected" && !operation.turnId && !operation.turns.size) this.compacting = undefined;
+      if (error instanceof NativeCompactionTerminalError
+        || error instanceof NativeRpcError && error.code === "native_rpc_rejected" && !operation.turnId && !operation.turns.size) this.compacting = undefined;
       else operation.submission = "uncertain";
       throw error;
     }

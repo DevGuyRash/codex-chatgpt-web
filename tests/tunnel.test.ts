@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { TUNNEL_VERSION, parseTunnelStatus, tunnelClientInstallAction, tunnelCommandOutput, tunnelConnectLaunchError } from "../src/tunnel";
+import { TUNNEL_VERSION, parseTunnelStatus, tunnelClientInstallAction, tunnelCommandOutput, tunnelConnectLaunchError, tunnelConnectFailureCategory } from "../src/tunnel";
 
 test("pins the fixed tunnel-client and migrates only the previously shipped version", () => {
   expect(TUNNEL_VERSION).toBe("0.0.12");
@@ -55,6 +55,16 @@ describe("tunnel status boundary", () => {
     expect(detail).toBe(
       "running=false; healthy=false; ready=false; exit_code=1; runtime_log=403 for [tunnel-id] using [redacted-key]",
     );
+  });
+
+  test("classifies failed tunnel connection without retaining remote output or credentials", () => {
+    const secret = "sk-secretsecretsecret";
+    const category = tunnelConnectFailureCategory(JSON.stringify({ running: false, healthy: false, ready: false,
+      exit_code: 1, remote_error: `403 forbidden ${secret}`, launch_diagnostics: { log_tail: `private ${secret}` } }));
+    expect(category).toBe("category=authentication; structured=true; running=false; healthy=false; ready=false; exitCode=1");
+    expect(category).not.toContain(secret);
+    expect(tunnelConnectFailureCategory("not-json", "network unreachable"))
+      .toBe("category=network; structured=false; running=false; healthy=false; ready=false; exitCode=unknown");
   });
 
   test("accepts a healthy managed launch while setup waits for control-plane readiness", () => {

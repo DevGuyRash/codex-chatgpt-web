@@ -5,6 +5,7 @@ import { unzipSync } from "fflate";
 import type { AppConfig, BrowserInteractionMode, TunnelConfig } from "./config";
 import { atomicWriteFile, getConfigDir } from "./config";
 import { runCommand, runChecked } from "./process";
+import { DiagnosticError } from "./diagnostics/problems";
 
 export const TUNNEL_VERSION = "0.0.12";
 const MIGRATABLE_TUNNEL_VERSIONS = new Set(["0.0.10"]);
@@ -258,12 +259,36 @@ export function connectTunnel(config: AppConfig): void {
     ? tunnelConnectLaunchError(structuredOutput)
     : undefined;
   if (result.status !== 0) {
-    const detail = launchError && launchError !== "tunnel-client returned non-JSON connect output"
-      ? launchError
-      : safeTunnelDetail(tunnelCommandOutput(result) || `exit ${result.status}`);
-    throw new Error(`Tunnel managed startup failed: ${detail}`);
+    throw new DiagnosticError({ code: "tunnel_connect_failed", message: "The configured tunnel runtime could not start",
+      origin: "tunnel-client", stage: "tunnel.connect", retryable: false,
+      ...(Number.isInteger(result.status) ? { exitCode: result.status } : {}),
+      findings: [{ message: tunnelConnectFailureCategory(result.stdout, result.stderr) }],
+      evidenceMissing: "The tunnel client's raw output is excluded from diagnostics; inspect its local runtime status before another attempt.",
+    });
   }
-  if (launchError) throw new Error(`Tunnel runtime exited during launch: ${launchError}`);
+  if (launchError) throw new DiagnosticError({ code: "tunnel_launch_unhealthy", message: "The configured tunnel process exited or reported unhealthy during launch",
+    origin: "tunnel-client", stage: "tunnel.connect", retryable: false,
+    findings: [{ message: tunnelConnectFailureCategory(result.stdout, result.stderr) }],
+    evidenceMissing: "The tunnel client's raw output is excluded from diagnostics; inspect its local runtime status before another attempt.",
+  });
+}
+
+/** Preserve only bounded structural connect evidence; remote errors and log tails are untrusted. */
+export function tunnelConnectFailureCategory(stdout: string, stderr = ""): string {
+  let parsed: Record<string, unknown> | undefined;
+  try {
+    const value: unknown = JSON.parse(stdout);
+    if (value && typeof value === "object" && !Array.isArray(value)) parsed = value as Record<string, unknown>;
+  } catch { /* A non-JSON failure still has a useful structural category. */ }
+  const remote = typeof parsed?.remote_error === "string" ? parsed.remote_error : "";
+  const tail = runtimeLogTail(parsed ?? {});
+  const text = `${remote} ${tail ?? ""} ${stderr}`.toLowerCase();
+  const category = /\b(?:401|403|unauthoriz|forbidden|invalid.?key|authenticat)/.test(text) ? "authentication"
+    : /\b(?:timeout|timed out|deadline)/.test(text) ? "timeout"
+      : /\b(?:connect|network|dns|resolve|refused|unreachable)/.test(text) ? "network"
+        : /\b(?:already running|in use|busy)/.test(text) ? "ownership" : "unknown";
+  const exit = typeof parsed?.exit_code === "number" ? parsed.exit_code : nestedRecord(parsed, "launch_diagnostics")?.exit_code;
+  return `category=${category}; structured=${Boolean(parsed)}; running=${parsed?.running === true}; healthy=${parsed?.healthy === true}; ready=${parsed?.ready === true}; exitCode=${Number.isInteger(exit) ? exit : "unknown"}`;
 }
 
 export function stopTunnel(config: AppConfig): void {

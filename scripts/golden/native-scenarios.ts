@@ -42,6 +42,7 @@ export async function runNativeScenario(options: {
   onRecord(category: "prompt" | "transport", text: string, progress?: ProgressPhase, receivedAtMs?: number): Promise<unknown>;
   checkpoint(input: NativeScenarioCheckpoint): void | Promise<void>;
   observeQueue?: Parameters<typeof runStructuredScenario>[0]["observeQueue"];
+  beforeGeneration?: (signal: AbortSignal) => Promise<void>;
 }) {
   options.signal.throwIfAborted();
   if (!["fresh", "formats", "unicode", "tool-image", "large-history", "continued", "compaction", "resumed", "archived-history", "model-switch", "plan-revise-execute", "plan-stream-interrupt", "plan-tui-execute"].includes(options.variant) && !/^(?:steer|stop)-(?:reasoning|generation|tools|queue)(?:-image|-continue)?$/.test(options.variant)) throw new Error(`No native scenario implementation for ${options.variant}`);
@@ -66,6 +67,7 @@ export async function runNativeScenario(options: {
   };
   if (options.variant === "fresh" || options.variant === "formats" || options.variant === "unicode" || options.variant === "tool-image" || options.variant === "large-history" || options.variant === "resumed" || options.variant === "archived-history") {
     const execute = async (prompt: string, resumeId?: string, phase: "preparation" | "execution" = "execution") => {
+      await options.beforeGeneration?.(options.signal);
       const outcome = await runNativeExec({ ...options, resumeId, artifactRepository: options.cwd, prompt,
       ...(attachedImageSha256 ? { images: [options.imagePath!] } : {}),
       onInput: text => options.onRecord("prompt", text).then(() => {}),

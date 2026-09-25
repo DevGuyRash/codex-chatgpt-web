@@ -3,11 +3,40 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { GoldenQueue } from "../scripts/golden/queue";
+import { paceGoldenGeneration } from "../scripts/golden/pacing";
 import type { CapabilitySnapshot } from "../scripts/golden/catalog";
 import { Database } from "bun:sqlite";
 import { createHash } from "node:crypto";
 
 const snapshot: CapabilitySnapshot = { inspectedAt: "2026-09-08T00:00:00Z", source: "launcher-session-inspection", capabilities: { solAvailable: true, proAvailable: true }, nativeCodexVersion: "fixture", nativeCatalogSha256: "a".repeat(64) };
+
+test("top-level generation reservations survive runner reopening and stop under an account hold", () => {
+  const root = mkdtempSync(join(tmpdir(), "golden-pacing-")), path = join(root, "campaign.sqlite");
+  const first = new GoldenQueue(path, { snapshot, implementationSha256: "b".repeat(64) });
+  const second = new GoldenQueue(path);
+  try {
+    expect(first.reserveGenerationNotBefore(180_000, 1_000)).toBe(1_000);
+    expect(second.reserveGenerationNotBefore(180_000, 1_001)).toBe(181_000);
+    expect(first.reserveGenerationNotBefore(180_000, 1_002)).toBe(361_000);
+    expect(() => first.reserveGenerationNotBefore(-1, 1_003)).toThrow("bounded");
+    first.suspendAdmission({ code: "rate_limit_exceeded", reason: "Observed account hold", evidence: "/fixture/hold.json", threadId: "owned-thread", turnId: "owned-turn" });
+    expect(() => second.reserveGenerationNotBefore(180_000, 1_003)).toThrow("suspended");
+  } finally { second.close(); first.close(); rmSync(root, { recursive: true, force: true }); }
+});
+
+test("paced generation waits are cancellable and a new account hold fences later submissions", async () => {
+  const root = mkdtempSync(join(tmpdir(), "golden-paced-wait-")), path = join(root, "campaign.sqlite");
+  const queue = new GoldenQueue(path, { snapshot, implementationSha256: "b".repeat(64) });
+  try {
+    await paceGoldenGeneration(root, new AbortController().signal);
+    const controller = new AbortController();
+    const waiting = paceGoldenGeneration(root, controller.signal);
+    setTimeout(() => controller.abort(), 20);
+    await expect(waiting).rejects.toMatchObject({ name: "AbortError" });
+    queue.suspendAdmission({ code: "rate_limit_exceeded", reason: "Observed account hold", evidence: "/fixture/hold.json", threadId: "owned-thread", turnId: "owned-turn" });
+    await expect(paceGoldenGeneration(root, new AbortController().signal)).rejects.toMatchObject({ code: "rate_limit_exceeded" });
+  } finally { queue.close(); rmSync(root, { recursive: true, force: true }); }
+}, 10000);
 
 test("reviewed implementation reconciliation preserves attempts, refuses unresolved work and fences stale schedulers", () => {
   const root = mkdtempSync(join(tmpdir(), "golden-revision-")), path = join(root, "campaign.sqlite");

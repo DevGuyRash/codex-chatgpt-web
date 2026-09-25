@@ -49,6 +49,7 @@ export async function runStructuredScenario(options: {
   modelSwitch?: { from: ChatGptWebModelRoute; to: ChatGptWebModelRoute };
   observeQueue?(input: { threadId: string; signal: AbortSignal; timeoutMs: number }): Promise<PhaseObservation>;
   checkpoint(input: { threadId: string; turnId: string }): void | Promise<void>;
+  beforeGeneration?: (signal: AbortSignal) => Promise<void>;
 }) {
   const { app, workload, variant, signal, timeoutMs } = options;
   signal.throwIfAborted();
@@ -61,6 +62,7 @@ export async function runStructuredScenario(options: {
   };
   const start = async (text: string, mode: "plan" | "default" = "default", route?: ChatGptWebModelRoute) => {
     signal.throwIfAborted();
+    await options.beforeGeneration?.(signal);
     const turn = await app.startTurn({ text, mode, ...(route ? { route } : {}) });
     await options.checkpoint({ threadId, turnId: turn.id });
     return turn;
@@ -85,6 +87,7 @@ export async function runStructuredScenario(options: {
     const witness = largeHistoryWitness(workload);
     completed(await finish(await start(`${prompts.prepare}\n\nRetain this exact runner-owned fact for the continuation: ${witness}. Do not write files or commit during preparation.`)));
     signal.throwIfAborted();
+    await options.beforeGeneration?.(signal);
     const compaction = await app.compact({ signal, timeoutMs }).catch(error => {
       if (error instanceof NativeCompactionTerminalError && error.threadId === threadId) throw new NativeScenarioFailure(threadId, [...turns, error.turn]);
       throw error;

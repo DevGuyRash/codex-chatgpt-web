@@ -81,6 +81,21 @@ export class GoldenQueue {
   private meta(key: string): string | undefined { return (this.db.query("SELECT value FROM metadata WHERE key=?").get(key) as { value: string } | null)?.value; }
   private assertImplementation(): void { if (this.meta("implementation") !== this.implementation) throw new Error("Campaign implementation changed; reopen and review before admission"); }
   private cell(id: string): GoldenCell { const cell = this.cells.get(id); if (!cell) throw new Error("Unknown golden cell"); return cell; }
+  /** Reserve top-level native submissions across runner restarts without claiming provider capacity. */
+  reserveGenerationNotBefore(spacingMs: number, now = Date.now()): number {
+    if (!Number.isSafeInteger(spacingMs) || spacingMs < 0 || spacingMs > 10 * 60_000
+      || !Number.isSafeInteger(now) || now < 0) throw new Error("Golden generation spacing requires bounded time values");
+    return this.db.transaction(() => {
+      this.assertImplementation();
+      if (this.admissionHold()) throw new Error("Golden account admission is suspended");
+      const previousText = this.meta("last_generation_reservation");
+      const previous = Number(previousText ?? 0);
+      if (!Number.isSafeInteger(previous) || previous < 0) throw new Error("Golden generation reservation is invalid");
+      const notBefore = previousText === undefined ? now : Math.max(now, previous + spacingMs);
+      this.db.query("INSERT INTO metadata(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value").run("last_generation_reservation", String(notBefore));
+      return notBefore;
+    }).immediate();
+  }
   acquireRunner(): string {
     return this.db.transaction(() => {
       this.assertImplementation();

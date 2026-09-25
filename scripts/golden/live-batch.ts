@@ -30,6 +30,7 @@ import { ownedProcessIdentity, ownsProcess, restartGoldenLauncher, type GoldenWo
 import type { Protocol, WorkloadLevel } from "./catalog";
 import { verifyGoldenBrowserHelper } from "./implementation";
 import { GoldenQueue } from "./queue";
+import { paceGoldenGeneration } from "./pacing";
 import { GoldenAdmissionSuspended, nativeAdmissionObservation, diagnosticAdmissionObservation, type AdmissionObservation } from "./admission";
 
 /** Checkpoint admission before optional capture/export can fail; this does not settle the producer. */
@@ -188,6 +189,7 @@ export async function runLiveBatch(options: {
             await evidence.bind(item.traceId);
             await evidence.capture(item.traceId, "oracle", JSON.stringify({ workload: cell.workload, baseline: cell.baseline, nativeCatalogSha256, cellId: cell.request.id }));
             const terminal = await cellOperation.run(() => runNativeScenario({ executable: options.executable, cwd: cell.task, env: nativeEnv, route: cell.request.route, modelProvider: "golden", workload: cell.workload, variant: cell.request.variant, signal: options.signal, timeoutMs: options.turnTimeoutMs,
+              beforeGeneration: signal => paceGoldenGeneration(root, signal),
               modelSwitch: switches.get(cell.request.id),
               ...(cell.request.variant === "tool-image" ? { imagePath: join(cell.task, "input/label.png") } : {}),
               onRecord: (category, text, phase, receivedAtMs) => captureLane.record(category, text, phase, receivedAtMs),

@@ -105,8 +105,11 @@ process.stdin.on("end",()=>process.exit(0));
 `, { mode: 0o700 });
   const workload = createWorkload({ level: 1, seed: "native-compaction", batch: 0 });
   try {
+    let generationReservations = 0;
     const result = await runNativeScenario({ executable: peer, cwd: root, env: {}, route: CHATGPT_WEB_MODEL_ROUTES[0]!, workload, variant: "compaction", signal: new AbortController().signal, timeoutMs: 2000,
+      beforeGeneration: async () => { generationReservations++; },
       onRecord: async () => {}, checkpoint: () => {} });
+    expect(generationReservations).toBe(3);
     expect(result).toMatchObject({ status: "completed", threadId: "thread-one", scenario: { turns: [{ id: "turn-1" }, { id: "turn-2" }], compaction: { turnId: "compact-1", itemId: "compaction-item-1", turn: { status: "completed" } } } });
     const prompts = readFileSync(log, "utf8").trim().split("\n").map(line => JSON.parse(line) as { text: string });
     expect(prompts).toHaveLength(2);

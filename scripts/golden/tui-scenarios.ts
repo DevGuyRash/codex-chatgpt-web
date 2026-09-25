@@ -32,6 +32,7 @@ export async function runTuiScenario(input: {
   modelProvider?: string; signal: AbortSignal; timeoutMs: number;
   onRecord(category: "prompt" | "transport", text: string): Promise<unknown>;
   checkpoint(input: NativeScenarioCheckpoint): void | Promise<void>;
+  beforeGeneration?: (signal: AbortSignal) => Promise<void>;
 }) {
   const transportControl = new AbortController();
   const options = { ...input, signal: AbortSignal.any([input.signal, transportControl.signal]) };
@@ -122,6 +123,7 @@ export async function runTuiScenario(input: {
     if ((await list()).length) throw missing("TUI scenario requires a fresh disposable task directory");
     await tui.submit("/plan");
     await tui.waitForView(text => text.includes("Plan mode") && !text.includes("switch to Plan mode"), { timeoutMs: options.timeoutMs, signal: options.signal });
+    await options.beforeGeneration?.(options.signal);
     await tui.submit(structuredScenarioPrompts(options.workload).plan);
     threadId = await poll(async () => {
       const threads = (await list()).filter(thread => thread.ephemeral === false);
@@ -138,6 +140,7 @@ export async function runTuiScenario(input: {
     await tui.waitForView(text => text.includes("Implement this plan") && text.includes("› 1. Yes, implement this plan"), { timeoutMs: options.timeoutMs, signal: options.signal });
     options.signal.throwIfAborted();
     await options.onRecord("prompt", JSON.stringify({ tuiKey: "Enter", action: "accept-plan", threadId, planTurnId: plan.id }));
+    await options.beforeGeneration?.(options.signal);
     options.signal.throwIfAborted(); tui.key("Enter");
     await finish(1);
     const titleTasks = await poll(async () => titles.size && [...titles.values()].every(title => title.active && title.idle) ? [...titles.values()] : undefined, "TUI ancillary title work did not expose its active-to-idle lifecycle");

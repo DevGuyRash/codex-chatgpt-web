@@ -690,6 +690,35 @@ test("submission observation recovery resumes with rebound locators and is stric
   expect(boundedRecoveries).toBe(2);
 });
 
+test("post-Send observation rebinds a disconnected CDP lease but does not replay a connected-page failure", async () => {
+  const worker = ChatGptBrowserWorker.forProvider({
+    adapter: "chatgpt-web", baseUrl: `browser://disconnected-submission-${Date.now()}`,
+    chatgptWeb: { localToolsEnabled: false, solAvailable: true, proAvailable: true },
+  }) as unknown as {
+    waitForSubmissionAcceptedWithRecovery(page: Page, baseline: unknown, signal?: AbortSignal, progress?: unknown,
+      revision?: number, tracker?: unknown, recover?: (attempt: number, cause: Error, baseline: unknown) => Promise<{ page: Page; baseline: unknown }>,
+      disconnected?: () => boolean): Promise<string>;
+    waitForSubmissionAccepted(page: Page): Promise<string>;
+  };
+  const firstPage = { name: "first" } as unknown as Page;
+  const reboundPage = { name: "same-owned-surface" } as unknown as Page;
+  const disconnectedError = new Error("CDP transport closed");
+  let disconnected = true, observations = 0, recoveries = 0;
+  worker.waitForSubmissionAccepted = async page => {
+    observations += 1;
+    if (page === firstPage) throw disconnectedError;
+    return "user_turn";
+  };
+  expect(await worker.waitForSubmissionAcceptedWithRecovery(firstPage, {}, undefined, undefined, 0, undefined,
+    async (attempt, cause) => { expect(attempt).toBe(1); expect(cause).toBe(disconnectedError); recoveries++; disconnected = false; return { page: reboundPage, baseline: {} }; },
+    () => disconnected)).toBe("user_turn");
+  expect({ observations, recoveries }).toEqual({ observations: 2, recoveries: 1 });
+  await expect(worker.waitForSubmissionAcceptedWithRecovery(firstPage, {}, undefined, undefined, 0, undefined,
+    async () => { recoveries++; return { page: reboundPage, baseline: {} }; },
+    () => false)).rejects.toBe(disconnectedError);
+  expect(recoveries).toBe(1);
+});
+
 test("an accepted turn rebinds the missing assistant observation and acknowledges a tool batch that arrives during recovery", async () => {
   const provider: CodexProviderConfig = {
     adapter: "chatgpt-web",
@@ -787,6 +816,67 @@ test("an accepted turn rebinds the missing assistant observation and acknowledge
   }
 });
 
+test("assistant observation distinguishes a disconnected lease from a user-closed tab", async () => {
+  const worker = ChatGptBrowserWorker.forProvider({
+    adapter: "chatgpt-web", baseUrl: `browser://disconnected-assistant-${Date.now()}`,
+    chatgptWeb: { localToolsEnabled: false, solAvailable: true, proAvailable: true },
+  }) as unknown as {
+    waitForNewAssistantTurn(page: Page, baseline: { initialResponseTurnIdentities: string[]; domCache: object },
+      deadline: number | undefined, signal?: AbortSignal, progress?: unknown, graceMs?: number, tracker?: unknown,
+      recover?: (attempt: number, cause: Error, baseline: unknown) => Promise<{ page: Page; baseline: { initialResponseTurnIdentities: string[]; domCache: object } }>,
+      disconnected?: () => boolean): Promise<{ identity: string }>;
+    submissionDomState(): Promise<{ userIdentities: string[]; responseIdentities: string[] }>;
+  };
+  const firstPage = { isClosed: () => true } as unknown as Page;
+  const hiddenLocator = { filter() { return this; }, last() { return this; }, isVisible: async () => false };
+  const reboundPage = { isClosed: () => false, locator: (selector: string) => selector.startsWith("[data-testid=") ? { id: "assistant" } : hiddenLocator } as unknown as Page;
+  worker.submissionDomState = async () => ({ userIdentities: ["user"], responseIdentities: ["assistant"] });
+  let recoveries = 0;
+  const baseline = { initialResponseTurnIdentities: [], domCache: {} };
+  expect(await worker.waitForNewAssistantTurn(firstPage, baseline, undefined, undefined, undefined, 60_000, undefined,
+    async (attempt, _cause, seen) => { expect(attempt).toBe(1); expect(seen).toBe(baseline); recoveries++; return { page: reboundPage, baseline }; },
+    () => true)).toMatchObject({ identity: "assistant" });
+  await expect(worker.waitForNewAssistantTurn(firstPage, baseline, undefined, undefined, undefined, 60_000, undefined,
+    async () => { recoveries++; return { page: reboundPage, baseline }; },
+    () => false)).rejects.toMatchObject({ code: "client_cancelled" });
+  expect(recoveries).toBe(1);
+});
+
+test("multipart acknowledgement resumes on the same leased tab after CDP disconnect without resending a part", async () => {
+  const worker = ChatGptBrowserWorker.forProvider({
+    adapter: "chatgpt-web", baseUrl: `browser://disconnected-multipart-${Date.now()}`,
+    chatgptWeb: { localToolsEnabled: false, solAvailable: true, proAvailable: true },
+  }) as unknown as {
+    waitForMultipartAcknowledgement(page: Page, response: { identity: string; locator: unknown }, baseline: unknown,
+      stage: { acknowledgement: string }, deadline: number | undefined, signal?: AbortSignal, progress?: unknown,
+      tracker?: unknown, recover?: (attempt: number, cause: Error, baseline: unknown) => Promise<{ page: Page; baseline: unknown }>,
+      disconnected?: () => boolean): Promise<void>;
+    responseDomSnapshot(): Promise<Record<string, unknown>>;
+  };
+  const firstPage = { isClosed: () => true } as unknown as Page;
+  const hidden = { filter() { return this; }, last() { return this; }, isVisible: async () => false,
+    getByText() { return this; }, count: async () => 1 };
+  const reboundPage = { isClosed: () => false, locator: () => hidden } as unknown as Page;
+  const baseline = { domCache: {} };
+  let observations = 0, recoveries = 0;
+  worker.responseDomSnapshot = async () => { observations++; return {
+    responsePresent: true, visibleText: "stage accepted", stoppedThinkingVisible: false,
+    completionActionVisible: true, fullHtml: "stage accepted",
+  }; };
+  await worker.waitForMultipartAcknowledgement(firstPage, { identity: "assistant", locator: hidden }, baseline,
+    { acknowledgement: "stage accepted" }, undefined, undefined, undefined,
+    { needsToolBatchObservation: () => false, update: () => true },
+    async (attempt, _cause, seen) => { expect(attempt).toBe(1); expect(seen).toBe(baseline); recoveries++; return { page: reboundPage, baseline }; },
+    () => true);
+  expect({ observations, recoveries }).toEqual({ observations: 1, recoveries: 1 });
+  await expect(worker.waitForMultipartAcknowledgement(firstPage, { identity: "assistant", locator: hidden }, baseline,
+    { acknowledgement: "stage accepted" }, undefined, undefined, undefined,
+    { needsToolBatchObservation: () => false, update: () => true },
+    async () => { recoveries++; return { page: reboundPage, baseline }; },
+    () => false)).rejects.toMatchObject({ code: "client_cancelled" });
+  expect(recoveries).toBe(1);
+});
+
 test("missing-assistant expiry checks fresh DOM after a delayed wake while preserving the turn deadline", async () => {
   type Baseline = { initialResponseTurnIdentities: string[]; domCache: Record<string, unknown> };
   type State = { userIdentities: string[]; responseIdentities: string[] };
@@ -865,10 +955,33 @@ test("a failed stale-browser disconnect prevents the replacement connection", as
   expect(replacementAttempts).toBe(0);
 });
 
+test("a confirmed dead CDP transport may rebind the same owned page without closing it twice", async () => {
+  let closeCalls = 0, replacementCalls = 0;
+  const replacement = async () => { replacementCalls += 1; return "same-owned-surface"; };
+  expect(await connectAfterClosingBrowserConnection(
+    { isConnected: () => false, close: async () => { closeCalls += 1; throw new Error("dead transport"); } },
+    replacement,
+  )).toBe("same-owned-surface");
+  expect(closeCalls).toBe(0);
+  let connected = true;
+  expect(await connectAfterClosingBrowserConnection(
+    { isConnected: () => connected, close: async () => { closeCalls += 1; connected = false; throw new Error("closed during disconnect"); } },
+    replacement,
+  )).toBe("same-owned-surface");
+  expect(closeCalls).toBe(1);
+  expect(replacementCalls).toBe(2);
+});
+
 test("a rebound transport is released when its viewport validation fails", () => {
   const result = Bun.spawnSync([process.execPath, join(import.meta.dir, "fixtures/browser-rebind-ownership.ts")], { stdout: "pipe", stderr: "pipe" });
   expect({ exitCode: result.exitCode, errors: result.exitCode === 0 ? "" : result.stderr.toString() }).toEqual({ exitCode: 0, errors: "" });
   expect(result.stdout.toString()).toContain("REBIND_OWNERSHIP_OK");
+});
+
+test("a disconnected response stream rebinds the exact leased tab without resending", () => {
+  const result = Bun.spawnSync([process.execPath, join(import.meta.dir, "fixtures/browser-disconnect-continuation.ts")], { stdout: "pipe", stderr: "pipe" });
+  expect({ exitCode: result.exitCode, errors: result.exitCode === 0 ? "" : result.stderr.toString() }).toEqual({ exitCode: 0, errors: "" });
+  expect(result.stdout.toString()).toContain("DISCONNECTED_CONTINUATION_OWNERSHIP_OK");
 });
 
 test("closing the launcher page is an immediate terminal turn error", async () => {

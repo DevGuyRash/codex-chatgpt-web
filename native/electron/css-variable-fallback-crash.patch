@@ -1,0 +1,47 @@
+diff --git a/third_party/blink/renderer/core/css/parser/css_variable_parser.cc b/third_party/blink/renderer/core/css/parser/css_variable_parser.cc
+--- a/third_party/blink/renderer/core/css/parser/css_variable_parser.cc
++++ b/third_party/blink/renderer/core/css/parser/css_variable_parser.cc
+@@ -731,6 +731,12 @@ CSSVariableData* CSSVariableParser::ConsumeUnparsedDeclaration(
+   original_text =
+       CSSVariableParser::StripTrailingWhitespaceAndComments(original_text);
+ 
++  // We consumed the leading whitespace before taking `value_start_offset`, and
++  // just stripped the trailing one. (The test needs to be after the trailing
++  // strip, or we could look at trailing space believing it was leading.)
++  DCHECK(original_text.empty() ||
++         original_text.Find(IsNotHTMLSpace<UChar>) == 0u);
++
+   return CSSVariableData::Create(original_text, is_animation_tainted, false,
+                                  features);
+ }
+@@ -848,15 +854,7 @@ StringView CSSVariableParser::StripTrailingWhitespaceAndComments(
+     }
+   }
+ 
+-  StringView ret = StringView(text, 0, string_len);
+-
+-  // Leading whitespace should already have been stripped.
+-  // (This test needs to be after we stripped trailing spaces,
+-  // or we could look at trailing space believing it was leading.)
+-  // SAFETY: ret is checked for emptiness before access.
+-  DCHECK(ret.empty() || !IsHTMLSpace(UNSAFE_BUFFERS(ret[0])));
+-
+-  return ret;
++  return StringView(text, 0, string_len);
+ }
+ 
+ void CSSVariableParser::CollectDashedFunctions(CSSParserTokenStream& stream,
+diff --git a/third_party/blink/renderer/core/css/parser/css_variable_parser.h b/third_party/blink/renderer/core/css/parser/css_variable_parser.h
+--- a/third_party/blink/renderer/core/css/parser/css_variable_parser.h
++++ b/third_party/blink/renderer/core/css/parser/css_variable_parser.h
+@@ -89,6 +89,10 @@ class CORE_EXPORT CSSVariableParser {
+   // NOTE: We have to strip both leading and trailing whitespace (and comments)
+   // from values as per spec, but we assume the tokenizer has already done the
+   // leading ones for us; see comment on CSSPropertyParser::ParseValue().
++  //
++  // Note that this does not hold for values we have substituted into, which
++  // may well begin with whitespace; the fallback of
++  // var(--a, var(--empty) 1px) substitutes as " 1px".
+   static StringView StripTrailingWhitespaceAndComments(StringView);
+ 
+   // Collect any instances of <dashed-function> anywhere in the stream.

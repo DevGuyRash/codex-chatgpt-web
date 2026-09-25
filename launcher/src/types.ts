@@ -111,7 +111,7 @@ export interface LauncherSnapshot {
   extensions?: BrowserExtensionState | null;
   browserPartition?: string;
   nativeWebAuthn?: boolean;
-  nativeRuntime?: { patched: true; version: string; electronCommit: string; patchSha256: string; chromiumPatchSha256: string } | null;
+  nativeRuntime?: { patched: true; version: string; electronCommit: string; patchSha256: string; chromiumPatchSha256: string; chromiumCssPatchSha256?: string } | null;
   connectorName: string;
   connectorNames: Record<BrowserInteractionMode, string>;
   mcpCredentialsConfigured: boolean;

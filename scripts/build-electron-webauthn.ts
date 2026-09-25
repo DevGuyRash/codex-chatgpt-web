@@ -6,7 +6,7 @@ import { createHash } from "node:crypto";
 const root = resolve(import.meta.dir, "..");
 const manifest = JSON.parse(readFileSync(resolve(root, "native/electron/manifest.json"), "utf8")) as {
   electronCommit: string; chromiumCommit: string; buildToolsCommit: string; buildConfig: string;
-  gnArgs: string[]; patch: string; chromiumPatch: string;
+  gnArgs: string[]; patch: string; chromiumPatch: string; chromiumCssPatch: string;
   libnotifyHeaders: { version: string; sha256: Record<string, string> };
 };
 const sha256 = (file: string) => createHash("sha256").update(readFileSync(file)).digest("hex");
@@ -17,6 +17,7 @@ if (!source || !tools || !source.startsWith("/") || !tools.startsWith("/")) {
 }
 const patch = resolve(root, "native/electron", manifest.patch);
 const chromiumPatch = resolve(root, "native/electron", manifest.chromiumPatch);
+const chromiumCssPatch = resolve(root, "native/electron", manifest.chromiumCssPatch);
 const chromiumRoot = resolve(source, "..");
 // Electron's npm preflight must use the native npm. Workspace PATH interceptors can route
 // npm into unrelated read-only caches before the selected build root is reached.
@@ -49,6 +50,12 @@ if (result("git", ["apply", "--reverse", "--check", chromiumPatch], chromiumRoot
   if (result("git", ["apply", "--check", chromiumPatch], chromiumRoot).status !== 0
     || result("git", ["apply", chromiumPatch], chromiumRoot).status !== 0) {
     throw new Error("The reviewed Chromium hybrid-discovery patch did not apply cleanly");
+  }
+}
+if (result("git", ["apply", "--reverse", "--check", chromiumCssPatch], chromiumRoot, true).status !== 0) {
+  if (result("git", ["apply", "--check", chromiumCssPatch], chromiumRoot).status !== 0
+    || result("git", ["apply", chromiumCssPatch], chromiumRoot).status !== 0) {
+    throw new Error("The reviewed Chromium CSS fallback patch did not apply cleanly");
   }
 }
 const configPath = resolve(tools, "configs", "evm." + manifest.buildConfig + ".json");
@@ -118,6 +125,7 @@ writeFileSync(resolve(config.root, "src/out/Release/codex-web-gpt-webauthn-build
   buildToolsCommit: manifest.buildToolsCommit,
   patchSha256: sha256(patch),
   chromiumPatchSha256: sha256(chromiumPatch),
+  chromiumCssPatchSha256: sha256(chromiumCssPatch),
   libnotifyHeaders: manifest.libnotifyHeaders,
   distSha256: sha256(dist),
   binarySha256: sha256(binary),

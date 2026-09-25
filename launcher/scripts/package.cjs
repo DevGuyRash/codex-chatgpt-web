@@ -50,10 +50,12 @@ if (launcherManifest.codexWebGptElectronPatch === "webauthn-v44.4.4") {
   const sha256 = file => createHash("sha256").update(fs.readFileSync(file)).digest("hex");
   const patchSha256 = sha256(path.join(root, "..", "native", "electron", manifest.patch));
   const chromiumPatchSha256 = sha256(path.join(root, "..", "native", "electron", manifest.chromiumPatch));
+  const chromiumCssPatchSha256 = sha256(path.join(root, "..", "native", "electron", manifest.chromiumCssPatch));
   if (record.version !== 1 || record.electronCommit !== manifest.electronCommit
     || record.chromiumCommit !== manifest.chromiumCommit
     || record.buildToolsCommit !== manifest.buildToolsCommit || record.patchSha256 !== patchSha256
     || record.chromiumPatchSha256 !== chromiumPatchSha256
+    || record.chromiumCssPatchSha256 !== chromiumCssPatchSha256
     || JSON.stringify(record.libnotifyHeaders) !== JSON.stringify(manifest.libnotifyHeaders)
     || !/^[a-f0-9]{64}$/.test(record.binarySha256)
     || record.distSha256 !== sha256(dist)) {
@@ -65,6 +67,7 @@ if (launcherManifest.codexWebGptElectronPatch === "webauthn-v44.4.4") {
     electronCommit: record.electronCommit,
     patchSha256: record.patchSha256,
     chromiumPatchSha256: record.chromiumPatchSha256,
+    chromiumCssPatchSha256: record.chromiumCssPatchSha256,
     binarySha256: record.binarySha256,
   })}\n`, { mode: 0o600 });
   builderArgs.push(`--config.electronDist=${dist}`);

@@ -156,13 +156,15 @@ function verifyNativeRuntimeIdentity() {
   if (record.version !== 1 || !/^[a-f0-9]{40}$/.test(record.electronCommit)
     || !/^[a-f0-9]{64}$/.test(record.patchSha256)
     || !/^[a-f0-9]{64}$/.test(record.chromiumPatchSha256)
+    || (record.chromiumCssPatchSha256 !== undefined && !/^[a-f0-9]{64}$/.test(record.chromiumCssPatchSha256))
     || !/^[a-f0-9]{64}$/.test(record.binarySha256)
     || patchIdentity !== "webauthn-v44.4.4"
     || (process.platform === "linux" && fileSha256(process.execPath) !== record.binarySha256)) {
     throw new Error("The launcher is not running the reviewed WebAuthn-enabled Electron binary");
   }
   return { patched: true, version: process.versions.electron, electronCommit: record.electronCommit,
-    patchSha256: record.patchSha256, chromiumPatchSha256: record.chromiumPatchSha256 };
+    patchSha256: record.patchSha256, chromiumPatchSha256: record.chromiumPatchSha256,
+    ...(record.chromiumCssPatchSha256 ? { chromiumCssPatchSha256: record.chromiumCssPatchSha256 } : {}) };
 }
 
 function findFreePort() {

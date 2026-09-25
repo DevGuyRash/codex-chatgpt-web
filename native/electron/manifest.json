@@ -15,6 +15,7 @@
   ],
   "patch": "webauthn-v44.4.4.patch",
   "chromiumPatch": "hybrid-discovery-retry.patch",
+  "chromiumCssPatch": "css-variable-fallback-crash.patch",
   "libnotifyHeaders": {
     "version": "0.8.8",
     "sha256": {

@@ -2805,6 +2805,13 @@ export class ChatGptBrowserWorker {
     };
   }
 
+  private async reportToolApproval(phase: "approval" | "approval-settled", traceId: string): Promise<boolean> {
+    if (this.config.autoApproveToolCalls || this.config.browserHost !== "launcher"
+      || !this.config.browserHostDescriptorPath) return false;
+    await notifyLauncherTurn(this.config.browserHostDescriptorPath, { phase, traceId, helperPid: process.pid });
+    return true;
+  }
+
   private async waitForNewAssistantTurn(
     page: Page,
     baseline: ChatGptSubmissionBaseline,
@@ -2816,6 +2823,7 @@ export class ChatGptBrowserWorker {
     recoverObservation?: ChatGptObservationRecovery,
     transportDisconnected?: () => boolean,
     handleToolConfirmation = false,
+    approvalTraceId?: string,
   ): Promise<ChatGptAssistantTurnBinding> {
     let observationPage = page;
     let observationBaseline = baseline;
@@ -2851,14 +2859,19 @@ export class ChatGptBrowserWorker {
       }
       await throwIfChatGptSessionFailureAlert(observationPage);
       await handleChatGptRequestFrequencyNotice(observationPage);
+      let approvalNotified = false;
       if (handleToolConfirmation && await resolveChatGptToolConfirmation(
         observationPage,
         this.config.appName,
         this.config.autoApproveToolCalls,
         signal,
         CHATGPT_TOOL_CONFIRMATION_TIMEOUT_MS,
-        () => captureBrowserCheckpoint(observationPage, "tool-confirmation-visible", false),
+        async () => {
+          if (approvalTraceId) approvalNotified = await this.reportToolApproval("approval", approvalTraceId);
+          await captureBrowserCheckpoint(observationPage, "tool-confirmation-visible", false);
+        },
       )) {
+        if (approvalNotified && approvalTraceId) await this.reportToolApproval("approval-settled", approvalTraceId);
         // A human approval can outlast the ordinary first-answer grace. The resolved card,
         // not elapsed wall time during approval, starts the next response observation window.
         responseDeadline = Math.min(deadline ?? Number.POSITIVE_INFINITY, Date.now() + graceMs);
@@ -4872,6 +4885,7 @@ export class ChatGptBrowserWorker {
           : undefined,
         launcherTransportDisconnected,
         mode.localTools,
+        turn.traceId,
       );
       await diagnostics.capture(page, "send-accepted");
 
@@ -4954,15 +4968,20 @@ export class ChatGptBrowserWorker {
 
         if (mode.localTools) {
           sideEffectBoundaryReached = true;
+          let approvalNotified = false;
           const confirmationResolved = await resolveChatGptToolConfirmation(
             page,
             this.config.appName,
             this.config.autoApproveToolCalls,
             turn.abortSignal,
             CHATGPT_TOOL_CONFIRMATION_TIMEOUT_MS,
-            () => diagnostics.capture(page, "tool-confirmation-visible"),
+            async () => {
+              approvalNotified = await this.reportToolApproval("approval", turn.traceId);
+              await diagnostics.capture(page, "tool-confirmation-visible");
+            },
           );
           if (confirmationResolved) {
+            if (approvalNotified) await this.reportToolApproval("approval-settled", turn.traceId);
             internalObservationFaults = 0;
             await new Promise(resolveSleep => setTimeout(resolveSleep, 250));
             continue;

@@ -2160,6 +2160,7 @@ test("image attachment readiness uses exact file tiles and not localized remove-
       };
     },
     locator: (selector: string) => {
+      if (selector.includes('[data-composer-attachments]')) return { count: async () => 0 };
       expect(selector).toBe('[data-testid="send-button"], button[type="submit"]');
       return send;
     },
@@ -2171,6 +2172,7 @@ test("image attachment readiness uses exact file tiles and not localized remove-
     },
   };
   const input = {
+    count: async () => 1,
     waitFor: async (state: { state: string; timeout: number }) => {
       expect(state).toEqual({ state: "attached", timeout: 20_000 });
       calls.push(["inputReady"]);
@@ -2181,7 +2183,7 @@ test("image attachment readiness uses exact file tiles and not localized remove-
   };
   const page = {
     locator: (selector: string) => {
-      if (selector === 'input[data-testid="upload-photos-input"]') return input;
+      if (selector === 'input[data-testid="upload-photos-input"], form[data-chatgpt-composer] input[type="file"][accept="image/*"]') return input;
       if (selector === '[role="alert"]') {
         return { allInnerTexts: async () => [] };
       }

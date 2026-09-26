@@ -3760,13 +3760,23 @@ export class ChatGptBrowserWorker {
     if (files.length === 0) return;
     const composer = await this.activeComposer(page);
     const composerForm = composer.locator("xpath=ancestor::form[1]");
-    const input = page.locator('input[data-testid="upload-photos-input"]');
+    const input = page.locator('input[data-testid="upload-photos-input"], form[data-chatgpt-composer] input[type="file"][accept="image/*"]');
     await input.waitFor({ state: "attached", timeout: 20_000 });
+    if (await input.count() !== 1) throw new Error("ChatGPT exposed ambiguous image upload inputs");
     await input.setInputFiles(files);
     try {
       await Promise.all(files.map(file => (
-        composerForm.getByRole("group", { name: file.name, exact: true })
-          .waitFor({ state: "visible", timeout: 60_000 })
+        (async () => {
+          const modernTile = composerForm.locator(
+            `[data-composer-attachments] [role="button"][aria-label=${JSON.stringify(file.name)}]:has(img[alt=${JSON.stringify(file.name)}])`,
+          );
+          if (await modernTile.count() === 1) {
+            await modernTile.waitFor({ state: "visible", timeout: 60_000 });
+          } else {
+            await composerForm.getByRole("group", { name: file.name, exact: true })
+              .waitFor({ state: "visible", timeout: 60_000 });
+          }
+        })()
       )));
     } catch {
       const alerts = (await page.locator('[role="alert"]').allInnerTexts().catch(() => []))

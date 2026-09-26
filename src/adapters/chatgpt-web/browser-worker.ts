@@ -748,17 +748,32 @@ export function classifyChatGptUiBlockedBeforeSend(error: unknown, sendActivated
   );
 }
 
-/** Preserve structural evidence for unfamiliar ChatGPT alerts without reading their content. */
-export async function visibleChatGptErrorAlertCount(page: Page): Promise<number> {
+/** Classify visible ChatGPT alerts in the page; only fixed categories leave the browser. */
+export async function visibleChatGptAlertSummary(page: Page): Promise<{
+  count: number;
+  categories: Array<"session" | "frequency" | "service" | "other">;
+}> {
   try {
-    return await page.locator('[role="alert"]').evaluateAll(elements => elements.filter(element => {
-      const candidate = element as HTMLElement;
-      const style = getComputedStyle(candidate);
-      return style.visibility !== "hidden" && style.display !== "none"
-        && !candidate.querySelector("input,textarea,[contenteditable=true]")
-        && Boolean((candidate.innerText ?? candidate.textContent ?? "").trim());
-    }).length);
-  } catch { return 0; }
+    return await page.locator('[role="alert"]').evaluateAll(elements => {
+      const categories = elements.flatMap(element => {
+        const candidate = element as HTMLElement;
+        const style = getComputedStyle(candidate);
+        const text = (candidate.innerText ?? candidate.textContent ?? "").trim();
+        if (style.visibility === "hidden" || style.display === "none"
+          || candidate.querySelector("input,textarea,[contenteditable=true]") || !text) return [];
+        const kind = /session.{0,40}expir|sign in again|log in again/i.test(text) ? "session"
+          : /too many requests|rate limit|usage limit|cooldown/i.test(text) ? "frequency"
+          : /something went wrong|error|failed|unable|try again|problem/i.test(text) ? "service"
+          : "other";
+        return [kind] as const;
+      });
+      return { count: categories.length, categories: [...new Set(categories)] };
+    });
+  } catch { return { count: 0, categories: [] }; }
+}
+
+export async function visibleChatGptErrorAlertCount(page: Page): Promise<number> {
+  return (await visibleChatGptAlertSummary(page)).count;
 }
 
 const chatGptTemporaryChatOnboardingDialog = (page: Page): Locator => page
@@ -2881,7 +2896,15 @@ export class ChatGptBrowserWorker {
       // A delayed wake can cross the grace while the assistant appears. Observe before
       // declaring it missing; the explicit overall turn deadline remains authoritative above.
       if (Date.now() >= responseDeadline
+        && state.visibleStopButtonCount === 0
         && !chatGptExternalProgressSuppressesDomHealth(progress, Date.now())) {
+        const alerts = await visibleChatGptAlertSummary(observationPage);
+        if (alerts.count > 0) {
+          throw new ChatGptWebAdapterError(
+            "ChatGPT displayed an alert after accepting the message and did not return an assistant answer. Inspect the ChatGPT tab before continuing; this turn will not be replayed automatically.",
+            { status: 502, errorType: "server_error", code: "chatgpt_ui_alert_after_send", retryable: false, source: "chatgpt-ui" },
+          );
+        }
         throw new Error("ChatGPT accepted the message but did not expose its assistant turn in the DOM");
       }
       await this.waitForTurnDomOrExternalProgress(
@@ -5134,9 +5157,10 @@ export class ChatGptBrowserWorker {
         + ` ${redactChatGptUiDiagnostic(error instanceof Error ? error.message : String(error))}`,
       );
       if (diagnosticPage && !diagnosticPage.isClosed()) {
-        const alertCount = await visibleChatGptErrorAlertCount(diagnosticPage);
-        if (alertCount) runtimeDiagnostics()?.event("browser.chatgpt_ui_alert", "A visible ChatGPT alert accompanied the turn failure", {
-          alertCount,
+        const alerts = await visibleChatGptAlertSummary(diagnosticPage);
+        if (alerts.count) runtimeDiagnostics()?.event("browser.chatgpt_ui_alert", "A visible ChatGPT alert accompanied the turn failure", {
+          alertCount: alerts.count,
+          categories: alerts.categories,
           sendActivated: browserSendActivated,
           errorCode: error instanceof ChatGptWebAdapterError ? error.code : "unclassified",
         }, "warning");

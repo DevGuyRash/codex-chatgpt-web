@@ -883,7 +883,7 @@ test("multipart acknowledgement resumes on the same leased tab after CDP disconn
 
 test("missing-assistant expiry checks fresh DOM after a delayed wake while preserving the turn deadline", async () => {
   type Baseline = { initialResponseTurnIdentities: string[]; domCache: Record<string, unknown> };
-  type State = { userIdentities: string[]; responseIdentities: string[] };
+  type State = { userIdentities: string[]; responseIdentities: string[]; visibleStopButtonCount: number };
   const hiddenLocator = {
     filter() { return this; },
     last() { return this; },
@@ -917,6 +917,7 @@ test("missing-assistant expiry checks fresh DOM after a delayed wake while prese
         return {
           userIdentities: ["conversation-turn-user"],
           responseIdentities: waits > 0 && scenario !== "missing" ? ["conversation-turn-assistant"] : [],
+          visibleStopButtonCount: 0,
         };
       };
       worker.waitForTurnDomOrExternalProgress = async () => {

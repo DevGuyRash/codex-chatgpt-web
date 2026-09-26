@@ -2993,6 +2993,10 @@ class BrowserHost {
     if (detectCapabilities && inspected.proAvailable && !inspected.solAvailable) {
       throw new Error("Browser helper returned contradictory ChatGPT capability evidence");
     }
+    // Capability inspection refreshes the owned page and can leave its status at "loading".
+    // A validated helper result is the terminal state for that refresh; without publishing it,
+    // Setup keeps smoke and installation actions disabled after a successful inspection.
+    this.setState({ authenticated: true, status: "ready", message: "ChatGPT is ready", loading: false });
     if (startedIdle) await this.returnToIdle();
     return inspected;
   }

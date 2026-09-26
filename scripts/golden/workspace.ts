@@ -319,7 +319,7 @@ if (import.meta.main) {
   const resume = process.argv.includes("--resume");
   const rootArgument = process.argv.slice(2).find(argument => argument !== "--json" && argument !== "--resume");
   const root = rootArgument ? resolve(rootArgument) : join(repository, "context/golden/live");
-  const state = resume ? await resumeGoldenWorkspace(root) : await startGoldenWorkspace(root);
+  const state = resume ? await resumeGoldenWorkspace(root, reviewedElectronBinary()) : await startGoldenWorkspace(root);
   // Authentication UI is intentionally excluded from diagnostics and screenshots.
   process.stdout.write(process.argv.includes("--json") ? `${JSON.stringify({ root: state.root, display: state.display, signInUrl: state.signInUrl, viewerUrl: state.viewerUrl, descriptorPath: state.descriptorPath })}\n`
     : resume ? `Resumed the owned hidden launcher on ${state.display}. Use the golden-viewer-url command to open its private viewer.\n`

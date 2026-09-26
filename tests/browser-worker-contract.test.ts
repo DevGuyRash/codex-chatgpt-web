@@ -2753,6 +2753,8 @@ function toolConfirmationPage(options: {
     ));
     return {
       last: () => button(name),
+      filter: () => button(name),
+      count: async () => actualName ? 1 : 0,
       waitFor: async () => {
         if (actualName && actualName !== "Deny" && options.dismissDuringAllowWait) { visible = false; throw new Error("Allow disappeared with its card"); }
         if (actualName && actualName !== "Deny" && options.allowUnavailable) throw new Error("Allow once is unavailable while approval remains visible");

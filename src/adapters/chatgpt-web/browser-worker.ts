@@ -938,13 +938,32 @@ export async function resolveChatGptToolConfirmation(
   await onVisible?.();
   if (!await dialog.isVisible()) return true;
 
+  const ownedAction = async (name: string | RegExp): Promise<{ button: Locator; depth: number }> => {
+    let scope = dialog;
+    for (let depth = 0; depth <= 4; depth += 1) {
+      const button = scope.getByRole("button", { name }).filter({ visible: true });
+      const count = await button.count();
+      if (count > 1) throw new ChatGptWebAdapterError(
+        "ChatGPT exposed ambiguous connector approval actions; no action was taken.",
+        { status: 502, errorType: "server_error", code: "chatgpt_connector_approval_ambiguous", retryable: false, source: "chatgpt-ui" },
+      );
+      if (count === 1) return { button, depth };
+      const tag = await scope.evaluate(element => element.tagName).catch(() => "");
+      if (tag === "BODY" || tag === "HTML") break;
+      scope = scope.locator("xpath=..");
+    }
+    throw new ChatGptWebAdapterError(
+      "ChatGPT connector approval is visible but its exact action is unavailable; no action was taken.",
+      { status: 502, errorType: "server_error", code: "chatgpt_connector_approval_action_missing", retryable: false, source: "chatgpt-ui" },
+    );
+  };
+
   if (autoApprove) {
     // ChatGPT exposes either "Allow once" or the shorter "Allow" for the
     // current one-shot approval. Keep the matcher anchored so persistent
     // actions such as "Always allow" cannot match.
-    const allowCurrentAction = dialog
-      .getByRole("button", { name: /^Allow(?: once)?$/ })
-      .last();
+    const { button: allowCurrentAction, depth } = await ownedAction(/^Allow(?: once)?$/);
+    runtimeDiagnostics()?.event("browser.connector_approval_action", "Exact one-time connector approval action located", { surfaceDepth: depth, action: "allow-once" }, "info");
     try { await allowCurrentAction.waitFor({ state: "visible", timeout: 10_000 }); }
     catch (error) {
       if (!await dialog.isVisible()) return true;
@@ -966,7 +985,8 @@ export async function resolveChatGptToolConfirmation(
   }
 
   if (!await dialog.isVisible().catch(() => false)) return true;
-  const deny = dialog.getByRole("button", { name: "Deny", exact: true }).last();
+  const { button: deny, depth } = await ownedAction("Deny");
+  runtimeDiagnostics()?.event("browser.connector_approval_action", "Exact connector denial action located", { surfaceDepth: depth, action: "deny" }, "info");
   try { await deny.waitFor({ state: "visible", timeout: 5_000 }); }
   catch (error) {
     // The user or ChatGPT may settle the card between the visibility check and button lookup.

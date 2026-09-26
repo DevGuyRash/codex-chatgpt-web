@@ -41,7 +41,7 @@ test.skipIf(!process.env.CHATGPT_TEST_CHROME_EXECUTABLE)("connector lookup exclu
     expect(await page.locator('body').getAttribute('data-approved')).toBe('once');
     await page.setContent('<div role="alert">Unrelated ChatGPT notice</div>');
     expect(await resolveChatGptToolConfirmation(page, "Codex Native2 DEV", true)).toBe(false);
-    await page.setContent('<div role="alert">Allow ChatGPT to use Codex Native2 DEV?<button onclick="document.body.dataset.approved=\'once\';this.parentElement.remove();document.body.insertAdjacentHTML(\'beforeend\',\'<div data-testid=&quot;conversation-turn-assistant&quot;></div>\')">Allow once</button><button>Always allow</button></div>');
+    await page.setContent('<div id="approval-root"><div role="alert">Allow ChatGPT to use Codex Native2 DEV?</div><div><button onclick="document.body.dataset.approved=\'once\';document.getElementById(\'approval-root\').remove();document.body.insertAdjacentHTML(\'beforeend\',\'<div data-testid=&quot;conversation-turn-assistant&quot;></div>\')">Allow once</button><button>Always allow</button></div></div>');
     const worker = ChatGptBrowserWorker.forProvider({ adapter: "chatgpt-web", baseUrl: "https://chatgpt.com", chatgptWeb: { appName: "Codex Native2 DEV", autoApproveToolCalls: true } }) as unknown as {
       waitForNewAssistantTurn(page: Page, baseline: unknown, deadline: undefined, signal: undefined, progress: undefined, graceMs: number, tracker: undefined, recovery: undefined, disconnected: undefined, handleToolConfirmation: boolean): Promise<{ identity: string }>;
       submissionDomState(page: Page): Promise<unknown>;

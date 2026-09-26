@@ -187,7 +187,10 @@ class BrowserControlServer {
           error.code = "manual_browser_inspection_disabled";
           throw error;
         }
-        const result = await host.inspectSession(body?.detectCapabilities === true);
+        const inspect = () => host.inspectSession(body?.detectCapabilities === true);
+        const result = diagnosticParent && this.logger.diagnostics?.withContext
+          ? await this.logger.diagnostics.withContext(diagnosticParent, inspect)
+          : await inspect();
         writeJson(response, 200, result);
         return;
       }

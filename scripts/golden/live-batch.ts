@@ -158,7 +158,8 @@ export async function runLiveBatch(options: {
           }
         }
         throw new DiagnosticError({ code: "golden_session_inspection_failed", message: "The restarted hidden launcher did not provide account capability evidence", origin: "golden", stage: "session_inspection", retryable: false,
-          findings: [{ message: `Two read-only inspections failed; last failure class=${lastFailure instanceof Error ? lastFailure.name : "unknown"}` }],
+          findings: [{ message: `Two read-only inspections failed; last failure code=${lastFailure instanceof DiagnosticError ? lastFailure.code : "unknown"}` }],
+          causes: lastFailure instanceof DiagnosticError ? [{ code: lastFailure.code, message: lastFailure.problem.message }] : [],
           evidenceMissing: "The account capability selector did not return a validated result; no native task or model request was admitted.",
         });
       });

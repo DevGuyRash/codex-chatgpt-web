@@ -6,6 +6,7 @@ import { expandUserPath } from "./config";
 import { processRunning } from "./process";
 import { runtimeDiagnostics } from "./diagnostics/runtime";
 import { traceparent } from "./diagnostics/instrumentation";
+import { DiagnosticError } from "./diagnostics/problems";
 
 export const LAUNCHER_BROWSER_HOST_KIND = "codex-web-gpt-launcher";
 export const LAUNCHER_BROWSER_IDLE_URL = "data:text/html;charset=utf-8,%3C!doctype%20html%3E%3Chtml%3E%3Chead%3E%3Cmeta%20charset%3D%22utf-8%22%3E%3Ctitle%3ECodex%20Web%20GPT%3C%2Ftitle%3E%3C%2Fhead%3E%3Cbody%3E%3C%2Fbody%3E%3C%2Fhtml%3E#codex-web-gpt-browser-host";
@@ -326,31 +327,39 @@ export async function inspectLauncherBrowserHost(
     : LAUNCHER_SESSION_INSPECTION_TIMEOUT_MS);
   const controller = new AbortController();
   let timedOut = false;
+  const inspectionFailure = (code: string, message: string, httpStatus?: number) => new DiagnosticError({
+    code, message, origin: "launcher", stage: "session_inspection",
+    retryable: code === "launcher_session_inspection_timeout" || code === "launcher_session_inspection_transport_failed",
+    ...(httpStatus ? { httpStatus } : {}),
+    evidenceMissing: "The launcher did not return validated ChatGPT session and capability evidence.",
+  });
   const timer = setTimeout(() => {
     timedOut = true;
     controller.abort();
   }, timeoutMs);
+  const parent = traceparent(runtimeDiagnostics()?.context());
   try {
     const response = await fetch(`${descriptor.control.endpoint}/v1/session/inspect`, {
       method: "POST",
       headers: {
         authorization: `Bearer ${descriptor.control.token}`,
         "content-type": "application/json",
+        ...(parent ? { traceparent: parent } : {}),
       },
       body: JSON.stringify({ detectCapabilities: options.detectCapabilities === true }),
       signal: controller.signal,
     });
     const body = await response.json().catch(() => ({})) as Record<string, unknown>;
-    if (!response.ok) throw new Error(typeof body.error === "string" ? body.error : `HTTP ${response.status}`);
+    if (!response.ok) throw inspectionFailure("launcher_session_inspection_rejected", `Launcher rejected ChatGPT session inspection (HTTP ${response.status})`, response.status);
     if (body.authenticated !== true || body.temporary !== true || typeof body.url !== "string") {
-      throw new Error("Launcher returned invalid ChatGPT session evidence");
+      throw inspectionFailure("launcher_session_evidence_invalid", "Launcher returned invalid ChatGPT session evidence");
     }
     if (options.detectCapabilities
       && (typeof body.solAvailable !== "boolean" || typeof body.proAvailable !== "boolean")) {
-      throw new Error("Launcher did not return complete ChatGPT account capability evidence");
+      throw inspectionFailure("launcher_session_capability_missing", "Launcher did not return complete ChatGPT account capability evidence");
     }
     if (options.detectCapabilities && body.proAvailable === true && body.solAvailable !== true) {
-      throw new Error("Launcher returned contradictory ChatGPT account capability evidence");
+      throw inspectionFailure("launcher_session_capability_contradictory", "Launcher returned contradictory ChatGPT account capability evidence");
     }
     return {
       url: body.url,
@@ -360,10 +369,9 @@ export async function inspectLauncherBrowserHost(
       } : {}),
     };
   } catch (error) {
-    const detail = timedOut
-      ? `session inspection timed out after ${timeoutMs}ms`
-      : error instanceof Error ? error.message : String(error);
-    throw new Error(`Launcher ChatGPT session could not be verified: ${detail}`);
+    if (timedOut) throw inspectionFailure("launcher_session_inspection_timeout", `Launcher ChatGPT session inspection timed out after ${timeoutMs}ms`);
+    if (error instanceof DiagnosticError) throw error;
+    throw inspectionFailure("launcher_session_inspection_transport_failed", "Launcher ChatGPT session inspection could not reach its owned browser control");
   } finally {
     clearTimeout(timer);
   }

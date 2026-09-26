@@ -119,7 +119,7 @@ export async function runLiveBatch(options: {
   const nativeCatalogSha256 = createHash("sha256").update(bundled.stdout).digest("hex");
   writeFileSync(join(work, "native-catalog.json"), bundled.stdout, { mode: 0o600 });
   process.env.CODEX_CHATGPT_WEB_HOME = workspace.runtimeHome;
-  const invocation = { executable: process.execPath, args: [resolve(import.meta.dir, "../../src/cli.ts"), "--home", workspace.runtimeHome, "diagnostics", "worker"] };
+  const invocation = { executable: process.execPath, args: [resolve(import.meta.dir, "../../src/diagnostics/worker-main.ts"), "--home", workspace.runtimeHome] };
   process.env.CODEX_CHATGPT_WEB_DIAGNOSTICS_WORKER = JSON.stringify(invocation);
   const client = new DiagnosticsClient(invocation);
   try {

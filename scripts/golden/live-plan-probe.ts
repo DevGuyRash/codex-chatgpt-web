@@ -32,7 +32,7 @@ export async function probeLivePlan(rootInput: string, executable: string, promp
   writeFileSync(join(work, "native-catalog.json"), bundled.stdout, { mode: 0o600 });
   process.env.CODEX_CHATGPT_WEB_HOME = workspace.runtimeHome;
   process.env.CODEX_WEB_GPT_CAPTURE_CAMPAIGN_ID = workspace.campaignId;
-  const invocation = { executable: process.execPath, args: [resolve(import.meta.dir, "../../src/cli.ts"), "--home", workspace.runtimeHome, "diagnostics", "worker"] };
+  const invocation = { executable: process.execPath, args: [resolve(import.meta.dir, "../../src/diagnostics/worker-main.ts"), "--home", workspace.runtimeHome] };
   process.env.CODEX_CHATGPT_WEB_DIAGNOSTICS_WORKER = JSON.stringify(invocation);
   const client = new DiagnosticsClient(invocation);
   try {

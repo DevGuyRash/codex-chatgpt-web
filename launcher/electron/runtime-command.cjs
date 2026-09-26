@@ -13,14 +13,30 @@ function packagedRuntimePaths(resourcesPath, platform = process.platform) {
   return runtimeBundlePaths(path.join(resourcesPath, "runtime"), platform);
 }
 
-function sourceRuntimeInvocation(sourceRoot, args) {
+function sourceRuntimeInvocation(sourceRoot, args, entrypoint = path.join(sourceRoot, "src", "cli.ts")) {
   return {
     executable: process.env.CODEX_CHATGPT_WEB_BUN?.trim()
       || process.env.CODEX_WEB_GPT_BUN?.trim()
       || "bun",
-    args: ["run", path.join(sourceRoot, "src", "cli.ts"), ...args],
+    args: ["run", entrypoint, ...args],
     cwd: sourceRoot,
   };
+}
+
+function embeddedDiagnosticsWorkerInvocation({ app, sourceRoot, home }) {
+  if (typeof home !== "string" || !path.isAbsolute(home)) {
+    throw new Error("Diagnostics worker requires an absolute owned home");
+  }
+  if (!app.isPackaged) {
+    return sourceRuntimeInvocation(sourceRoot, ["--home", home],
+      path.join(sourceRoot, "src", "diagnostics", "worker-main.ts"));
+  }
+  const { runtimeRoot, executable } = packagedRuntimePaths(process.resourcesPath);
+  const entrypoint = path.join(runtimeRoot, "app", "diagnostics-worker.js");
+  if (!fs.existsSync(executable) || !fs.existsSync(entrypoint)) {
+    throw new Error("The packaged diagnostics-only worker is missing");
+  }
+  return { executable, args: [entrypoint, "--home", home], cwd: runtimeRoot };
 }
 
 function runtimeInvocation({ app, sourceRoot, installedRuntimeRoot, args }) {
@@ -54,6 +70,7 @@ function embeddedRuntimeInvocation({ app, sourceRoot, args }) {
 }
 
 module.exports = {
+  embeddedDiagnosticsWorkerInvocation,
   embeddedRuntimeInvocation,
   packagedRuntimePaths,
   runtimeBundlePaths,

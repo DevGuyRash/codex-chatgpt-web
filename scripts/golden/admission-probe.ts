@@ -58,7 +58,7 @@ export async function probeGoldenAdmission(options: { root: string; routeSlug: s
     if (workspace.root !== root || !workspace.processes.launcher || !ownsProcess(workspace.processes.launcher)) throw new Error("The admission probe requires its owned isolated launcher");
     const helperBuild = verifyGoldenBrowserHelper(resolve(import.meta.dir, "../.."), readLauncherBrowserHostDescriptor(workspace.descriptorPath).helper.script);
     process.env.CODEX_CHATGPT_WEB_HOME = workspace.runtimeHome;
-    const invocation = { executable: process.execPath, args: [resolve(import.meta.dir, "../../src/cli.ts"), "--home", workspace.runtimeHome, "diagnostics", "worker"] };
+    const invocation = { executable: process.execPath, args: [resolve(import.meta.dir, "../../src/diagnostics/worker-main.ts"), "--home", workspace.runtimeHome] };
     process.env.CODEX_CHATGPT_WEB_DIAGNOSTICS_WORKER = JSON.stringify(invocation);
     client = new DiagnosticsClient(invocation);
     const previous = ContentManifestSchema.parse(await client.contentCapture({ action: "manifest", campaignId: workspace.campaignId }));

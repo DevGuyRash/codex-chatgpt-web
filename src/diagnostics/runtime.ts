@@ -1,5 +1,5 @@
-import { createWriteStream, fstatSync } from "node:fs";
-import { join } from "node:path";
+import { createWriteStream, existsSync, fstatSync } from "node:fs";
+import { dirname, join, resolve } from "node:path";
 import { getConfigDir } from "../config";
 import { VERSION } from "../version";
 import { DiagnosticsClient, type WorkerInvocation } from "./client";
@@ -10,6 +10,15 @@ let diagnostics: Diagnostics | undefined;
 let client: DiagnosticsClient | undefined;
 let closeSink: (() => Promise<void>) | undefined;
 let controlInvocation: WorkerInvocation | undefined;
+function standaloneWorkerEntrypoint(): string {
+  const current = process.argv[1];
+  if (!current) throw new Error("The diagnostics worker owner has no runtime entrypoint");
+  const worker = current.endsWith(".js")
+    ? join(dirname(current), "diagnostics-worker.js")
+    : resolve(import.meta.dir, "worker-main.ts");
+  if (!existsSync(worker)) throw new Error("The diagnostics-only worker entrypoint is missing");
+  return worker;
+}
 export function runtimeCaptureClient(): DiagnosticsClient | undefined {
   if (client) return client;
   if (!controlInvocation) return;
@@ -49,7 +58,7 @@ export function initializeRuntimeDiagnostics(options: { component: string; targe
     } catch { return; }
   }
   if (!sink && options.standalone && typeof Bun !== "undefined") {
-    controlInvocation = { executable: process.execPath, args: [process.argv[1], "--home", getConfigDir(), "diagnostics", "worker"] };
+    controlInvocation = { executable: process.execPath, args: [standaloneWorkerEntrypoint(), "--home", getConfigDir()] };
     process.env.CODEX_CHATGPT_WEB_DIAGNOSTICS_WORKER = JSON.stringify(controlInvocation);
     client = new DiagnosticsClient(controlInvocation);
     sink = client;

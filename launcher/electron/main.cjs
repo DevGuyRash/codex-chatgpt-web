@@ -1271,7 +1271,7 @@ async function start() {
   }
   const logger = createLogger({
     filePath: path.join(app.getPath("logs"), "launcher.jsonl"),
-    invocation: require("./runtime-command.cjs").embeddedRuntimeInvocation({ app, sourceRoot: SOURCE_ROOT, args: ["--home", CORE_HOME, "diagnostics", "worker"] }),
+    invocation: require("./runtime-command.cjs").embeddedDiagnosticsWorkerInvocation({ app, sourceRoot: SOURCE_ROOT, home: CORE_HOME }),
     target: LAUNCHER_PROFILE.integrationTarget?.id || "base",
     environment: IS_DEV_PROFILE ? "development" : "production",
     version: app.getVersion(),

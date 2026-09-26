@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
@@ -7,7 +7,7 @@ const root = resolve(import.meta.dir, "..");
 const manifest = JSON.parse(readFileSync(resolve(root, "native/electron/manifest.json"), "utf8")) as {
   electronCommit: string; chromiumCommit: string; buildToolsCommit: string; buildConfig: string;
   gnArgs: string[]; patch: string; chromiumPatch: string; chromiumCssPatch: string;
-  libnotifyHeaders: { version: string; sha256: Record<string, string> };
+  libnotifyHeaders: { version: string; pkgConfigSha256: string; sha256: Record<string, string> };
 };
 const sha256 = (file: string) => createHash("sha256").update(readFileSync(file)).digest("hex");
 const source = process.env.CODEX_WEB_GPT_ELECTRON_SOURCE;
@@ -73,14 +73,8 @@ if (resolve(config.root, "src/electron") !== resolve(source) || config.gen.out !
   throw new Error("Electron release build configuration points outside the pinned source");
 }
 const headerFiles = Object.entries(manifest.libnotifyHeaders.sha256);
-if (process.platform === "linux" && (manifest.libnotifyHeaders.version !== "0.8.8" || headerFiles.length !== 5)) {
+if (process.platform === "linux" && (manifest.libnotifyHeaders.version !== "0.7.9" || headerFiles.length !== 4)) {
   throw new Error("The pinned Linux libnotify header set is incomplete");
-}
-for (const [name, expectedHash] of process.platform === "linux" ? headerFiles : []) {
-  if (!/^[a-z-]+\.h$/.test(name) || !/^[a-f0-9]{64}$/.test(expectedHash)
-    || sha256(resolve(root, "native/electron/libnotify-headers/libnotify", name)) !== expectedHash) {
-    throw new Error(`The reviewed libnotify header is missing or changed: ${name}`);
-  }
 }
 if (process.argv.includes("--prepare-only")) {
   console.log("Pinned Electron source, build tools, and WebAuthn patch are ready.");
@@ -99,16 +93,17 @@ if (process.platform === "linux") {
   const output = resolve(chromiumRoot, "out/Release");
   const gn = resolve(chromiumRoot, "buildtools/linux64/gn");
   const sysrootHeaders = resolve(chromiumRoot, "build/linux/debian_bullseye_amd64-sysroot/usr/include/libnotify");
-  mkdirSync(sysrootHeaders, { recursive: true });
+  const pkgConfig = resolve(chromiumRoot, "build/linux/debian_bullseye_amd64-sysroot/usr/lib/pkgconfig/libnotify.pc");
+  if (sha256(pkgConfig) !== manifest.libnotifyHeaders.pkgConfigSha256) {
+    throw new Error("The pinned Electron sysroot has an unexpected libnotify package");
+  }
   for (const [name, expectedHash] of headerFiles) {
-    const destination = resolve(sysrootHeaders, name);
-    if (existsSync(destination) && sha256(destination) !== expectedHash) {
-      throw new Error(`The Electron sysroot has a conflicting libnotify header: ${name}`);
-    }
-    if (!existsSync(destination)) {
-      writeFileSync(destination, readFileSync(resolve(root, "native/electron/libnotify-headers/libnotify", name)), { mode: 0o644 });
+    if (!/^[a-z-]+\.h$/.test(name) || !/^[a-f0-9]{64}$/.test(expectedHash)
+      || sha256(resolve(sysrootHeaders, name)) !== expectedHash) {
+      throw new Error(`The pinned Electron sysroot has an unexpected libnotify header: ${name}`);
     }
   }
+  mkdirSync(output, { recursive: true });
   writeFileSync(resolve(output, "args.gn"), `${manifest.gnArgs.join("\n")}\n`);
   if (result(gn, ["gen", "out/Release"], chromiumRoot).status !== 0) {
     throw new Error("Could not generate the reviewed Electron release configuration");

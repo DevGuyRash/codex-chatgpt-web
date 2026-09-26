@@ -10,7 +10,7 @@ Create a build-tools checkout at the manifest's commit and install its locked de
 
 The explicit `is_debug=false` in `gnArgs` is required: overriding `is_official_build=false` otherwise restores GN's debug default even under an output directory named `Release`, enabling V8 checks that the pinned Node integration cannot compile. The `symbol_level=0` setting keeps this functional release build within the owned build volume. Verify the resolved values with the pinned `src/buildtools/linux64/gn args out/Release --list --short` before rebuilding.
 
-The Linux build needs libnotify public headers that the pinned Debian sysroot omits. `scripts/build-electron-webauthn.ts` verifies the five vendored 0.8.8 headers under `libnotify-headers/` against the manifest and copies them only into that owned sysroot; a different existing header fails closed. This is a build input, not a copied personal configuration or a replacement for the runtime's optional libnotify loader.
+The Linux build verifies the pinned Debian sysroot's libnotify 0.7.9 pkg-config file and four public headers against the manifest. It uses those headers directly and does not overwrite the sysroot. A changed sysroot fails closed until its build input is reviewed. This does not replace the runtime's optional libnotify loader.
 
 Electron's dependency patch hooks are not safe to reapply after a late Yarn hook failure. If only that hook failed, finish its pinned Yarn install in the Electron checkout with `SENTRYCLI_SKIP_DOWNLOAD=1` instead of repeating the whole sync. An owned checkout left inside `git am` by a repeated hook must be inspected before clearing that state.
 

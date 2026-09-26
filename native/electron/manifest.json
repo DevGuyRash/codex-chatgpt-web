@@ -17,13 +17,13 @@
   "chromiumPatch": "hybrid-discovery-retry.patch",
   "chromiumCssPatch": "css-variable-fallback-crash.patch",
   "libnotifyHeaders": {
-    "version": "0.8.8",
+    "version": "0.7.9",
+    "pkgConfigSha256": "4ece4aca84d7f2f7f09082a73d791f66dfe5f0869544930135733446384c0a02",
     "sha256": {
-      "notification.h": "8f2d583016288355e9049daacfdb8edf0a799471e5f1d4b7f5dadfe05d54b465",
-      "notification-hints.h": "a9f39a4992af40566a3077ea6978d72320827b549ad00ef460b647fda902c0ba",
-      "notify-enum-types.h": "845968effe31796eb1eb11a89a31e98748d455638218271d57219583e1ffc068",
-      "notify-features.h": "f2f5c7a41c63cd9c4e094e9e49f7bd336006a4288b7e65cfd978e78e60cb5641",
-      "notify.h": "c02c1c54c1857346b157e300b055453f87a98d452d5867160d6b58a6eeb44dd3"
+      "notification.h": "158b95e43da9c61f9c0709b0dd09729cfec869c6011d35b763893ec57d649dd4",
+      "notify-enum-types.h": "441a0f303c2b0de89177db8b56201d99c3a1a74bf2fd895e3f1ee636b38e671b",
+      "notify-features.h": "a20063793673cc75da94ef457ad72839cc7f3b887f19d2ed03460c1e96ac1a8d",
+      "notify.h": "64ff9670d78e0f3d981784bf3da9b925a54e3eb583df08cdcc303d0b26f41371"
     }
   },
   "purpose": "Embedded security-key PIN, hybrid phone passkeys, and compatible extension permission features"

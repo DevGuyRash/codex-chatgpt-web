@@ -58,9 +58,11 @@ import {
   CHATGPT_COMPOSER_SELECTOR,
   CHATGPT_EFFORT_CONTROL_SELECTOR,
   CHATGPT_EFFORT_ITEM_SELECTOR,
+  CHATGPT_SEND_BUTTON_SELECTOR,
   CHATGPT_STOP_BUTTON_SELECTOR,
   CHATGPT_TEMPORARY_CHAT_URL,
   CHATGPT_USER_TURN_SELECTOR,
+  chatGptAssistantTurnSelector,
   activateChatGptEffortMenu,
   detectChatGptAccountCapabilities,
   readChatGptEffortSliderState,
@@ -152,10 +154,13 @@ const CHATGPT_DOM_REVISION_ATTRIBUTES = [
   "data-item-anchor",
   "data-is-last-node",
   "data-message-author-role",
+  "data-conversation-role",
+  "data-markdown-text-style",
   "data-state",
   "data-streaming-response-status",
   "data-testid",
   "data-turn",
+  "data-turn-key",
   "disabled",
   "hidden",
   "inert",
@@ -1374,6 +1379,7 @@ interface ChatGptSubmissionDomState {
   visibleStopButtonCount: number;
   userIdentities: string[];
   responseIdentities: string[];
+  groupKeys?: string[];
 }
 
 interface ChatGptSubmissionDomCache {
@@ -2650,16 +2656,22 @@ export class ChatGptBrowserWorker {
       })();
       const observerKey = `${observerState.id}:${observerState.revision}`;
       if (options.knownKey === observerKey) return { key: observerKey };
-      const identities = (selector: string): string[] => {
-        const values = [...document.querySelectorAll(selector)].map(element => element.getAttribute("data-testid"));
-        if (values.some(value => typeof value !== "string" || !value.startsWith("conversation-turn-"))) {
-          throw new Error("ChatGPT conversation turn has no stable data-testid identity");
-        }
-        const typed = values as string[];
-        if (new Set(typed).size !== typed.length) {
+      const identities = (selector: string, role: "user" | "assistant"): string[] => {
+        const elements = [...document.querySelectorAll(selector)]
+          .filter(element => element.hasAttribute("data-turn-key") || !element.closest("[data-turn-key]"));
+        const values = elements.map(element => {
+          const groupKey = element.getAttribute("data-turn-key");
+          if (groupKey) return `group:${role}:${groupKey}`;
+          const testId = element.getAttribute("data-testid");
+          if (!testId?.startsWith("conversation-turn-")) {
+            throw new Error("ChatGPT conversation turn has no stable owned identity");
+          }
+          return testId;
+        });
+        if (new Set(values).size !== values.length) {
           throw new Error("ChatGPT exposed duplicate conversation turn identities");
         }
-        return typed;
+        return values;
       };
       const visible = (element: Element): boolean => {
         const candidate = element as HTMLElement;
@@ -2669,8 +2681,14 @@ export class ChatGptBrowserWorker {
           && style.visibility !== "hidden"
           && (bounds.width > 0 || bounds.height > 0);
       };
-      const userIdentities = identities(options.userTurnSelector);
-      const responseIdentities = identities(options.assistantTurnSelector);
+      const groupKeys = [...document.querySelectorAll("[data-turn-key]")]
+        .filter(element => !element.parentElement?.closest("[data-turn-key]"))
+        .map(element => element.getAttribute("data-turn-key"));
+      if (groupKeys.some(key => !key) || new Set(groupKeys).size !== groupKeys.length) {
+        throw new Error("ChatGPT exposed invalid grouped turn identities");
+      }
+      const userIdentities = identities(options.userTurnSelector, "user");
+      const responseIdentities = identities(options.assistantTurnSelector, "assistant");
       return {
         key: observerKey,
         snapshot: {
@@ -2679,6 +2697,7 @@ export class ChatGptBrowserWorker {
           visibleStopButtonCount: [...document.querySelectorAll(options.stopButtonSelector)].filter(visible).length,
           userIdentities,
           responseIdentities,
+          groupKeys: groupKeys as string[],
         },
       };
     }, {
@@ -2728,7 +2747,7 @@ export class ChatGptBrowserWorker {
       state.responseIdentities,
     );
     if (!identity) return "";
-    const locator = page.locator(`[data-testid=${JSON.stringify(identity)}]`);
+    const locator = page.locator(chatGptAssistantTurnSelector(identity));
     return (await this.responseDomSnapshot(locator, {})).visibleText;
   }
 
@@ -2742,8 +2761,10 @@ export class ChatGptBrowserWorker {
       responseTurns,
       initialUserTurnCount: state.userTurnCount,
       initialResponseTurnCount: state.assistantTurnCount,
-      initialUserTurnIdentities: state.userIdentities,
-      initialResponseTurnIdentities: state.responseIdentities,
+      // A prior group can remount a role after virtualization. Include both logical roles for
+      // every group already present, even when one role's content is currently unmounted.
+      initialUserTurnIdentities: [...new Set([...state.userIdentities, ...(state.groupKeys ?? []).map(key => `group:user:${key}`)])],
+      initialResponseTurnIdentities: [...new Set([...state.responseIdentities, ...(state.groupKeys ?? []).map(key => `group:assistant:${key}`)])],
       domCache,
     };
   }
@@ -2845,7 +2866,7 @@ export class ChatGptBrowserWorker {
         && completionTracker?.needsToolBatchObservation(progress.lastToolBatchRevision)) {
         const boundaryText = identity
           ? (await this.responseDomSnapshot(
-            observationPage.locator(`[data-testid=${JSON.stringify(identity)}]`),
+            observationPage.locator(chatGptAssistantTurnSelector(identity)),
             {},
           )).visibleText
           : "";
@@ -2854,7 +2875,7 @@ export class ChatGptBrowserWorker {
       }
       if (identity) return {
         identity,
-        locator: observationPage.locator(`[data-testid=${JSON.stringify(identity)}]`),
+        locator: observationPage.locator(chatGptAssistantTurnSelector(identity)),
         acceptedUserTurnIdentities: state.userIdentities,
       };
       // A delayed wake can cross the grace while the assistant appears. Observe before
@@ -2890,6 +2911,9 @@ export class ChatGptBrowserWorker {
     if (state.userIdentities.some(identity => !acceptedUsers.has(identity))) {
       throw new Error("ChatGPT opened another user turn while the bound assistant response was detached");
     }
+    // A grouped key is stable across role hydration. A different key belongs to another turn;
+    // wait for this exact group to remount instead of attributing foreign output to Codex.
+    if (binding.identity.startsWith("group:assistant:")) return binding;
     const identity = chatGptReboundTurnIdentity(
       baseline.initialResponseTurnIdentities,
       binding.identity,
@@ -2898,7 +2922,7 @@ export class ChatGptBrowserWorker {
     if (!identity || identity === binding.identity) return binding;
     return {
       identity,
-      locator: page.locator(`[data-testid=${JSON.stringify(identity)}]`),
+      locator: page.locator(chatGptAssistantTurnSelector(identity)),
       acceptedUserTurnIdentities: state.userIdentities,
     };
   }
@@ -3354,7 +3378,10 @@ export class ChatGptBrowserWorker {
     const composer = await this.activeComposer(page);
     const sendButton = composer
       .locator("xpath=ancestor::form[1]")
-      .getByTestId("send-button");
+      .locator(CHATGPT_SEND_BUTTON_SELECTOR);
+    if (await sendButton.count() !== 1) {
+      throw new Error("ChatGPT composer did not expose exactly one owned Send control");
+    }
     await sendButton.waitFor({ state: "visible", timeout: browserStageTimeouts.send });
     await settleChatGptUi();
     const sendEnableDeadline = Date.now() + CHATGPT_SEND_ENABLE_GRACE_MS;
@@ -3521,7 +3548,7 @@ export class ChatGptBrowserWorker {
         const recovered = await recoverObservation(recoveryAttempts, error, submissionBaseline, abortSignal);
         page = recovered.page;
         submissionBaseline = recovered.baseline;
-        responseTurn = { ...responseTurn, locator: page.locator(`[data-testid=${JSON.stringify(responseTurn.identity)}]`) };
+        responseTurn = { ...responseTurn, locator: page.locator(chatGptAssistantTurnSelector(responseTurn.identity)) };
         responseDomCache.key = undefined;
         responseDomCache.snapshot = undefined;
       }
@@ -3721,7 +3748,10 @@ export class ChatGptBrowserWorker {
         + (alerts.length > 0 ? `: ${alerts.join(" | ")}` : ""),
       );
     }
-    const send = composerForm.getByTestId("send-button");
+    const send = composerForm.locator(CHATGPT_SEND_BUTTON_SELECTOR);
+    if (await send.count() !== 1) {
+      throw new Error("ChatGPT composer did not expose exactly one owned Send control");
+    }
     const deadline = Date.now() + 60_000;
     while (Date.now() < deadline) {
       if (await send.isEnabled().catch(() => false)) return;
@@ -3803,7 +3833,7 @@ export class ChatGptBrowserWorker {
       // boundary without relying on localized labels such as "Pro thinking".
       // ChatGPT also renders completed assistant text in a DIL response root without .markdown.
       // Keep it inside an assistant-owned container so nearby controls cannot become answer text.
-      const answerRootSelector = '.markdown, [data-message-author-role="assistant"] .puik-root.not-markdown > [class*="_DilResponseRoot"]';
+      const answerRootSelector = '.markdown, [data-message-author-role="assistant"] .puik-root.not-markdown > [class*="_DilResponseRoot"], [data-markdown-text-style="assistant-message"]';
       const allMarkdownRoots = [...root.querySelectorAll<HTMLElement>(answerRootSelector)]
         .filter(candidate => !candidate.parentElement?.closest(answerRootSelector))
         .filter(renderedInDom);
@@ -4816,7 +4846,7 @@ export class ChatGptBrowserWorker {
         };
         responseTurn = {
           ...responseTurn,
-          locator: page.locator(`[data-testid=${JSON.stringify(responseTurn.identity)}]`),
+          locator: page.locator(chatGptAssistantTurnSelector(responseTurn.identity)),
         };
         responseDomCache.key = undefined;
         responseDomCache.snapshot = undefined;

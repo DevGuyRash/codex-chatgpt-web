@@ -474,12 +474,13 @@ test("an accepted Full-mode send survives one stalled DOM probe and a later MCP 
   } as unknown as Page;
   let sendPresses = 0;
   const sendButton = {
+    count: async () => 1,
     waitFor: async () => {},
     isEnabled: async () => true,
     press: async () => { sendPresses += 1; },
   };
   const composer = {
-    locator: () => ({ getByTestId: () => sendButton }),
+    locator: () => ({ locator: () => sendButton }),
   };
   worker.activeComposer = async () => composer;
 
@@ -592,6 +593,7 @@ test("Bigger Context send activation keeps the outer stage budget instead of res
   } as unknown as Page;
   let pressOptions: { noWaitAfter?: boolean; signal?: AbortSignal; timeout?: number } | undefined;
   const sendButton = {
+    count: async () => 1,
     waitFor: async () => {},
     isEnabled: async () => true,
     press: async (
@@ -603,7 +605,7 @@ test("Bigger Context send activation keeps the outer stage budget instead of res
     },
   };
   worker.activeComposer = async () => ({
-    locator: () => ({ getByTestId: () => sendButton }),
+    locator: () => ({ locator: () => sendButton }),
   });
   worker.waitForSubmissionAcceptedWithRecovery = async () => "user_turn";
 
@@ -2139,6 +2141,7 @@ test("image attachment readiness uses exact file tiles and not localized remove-
   const imageUrl = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==";
   const calls: Array<[string, string?]> = [];
   const send = {
+    count: async () => 1,
     isEnabled: async () => {
       calls.push(["sendEnabled"]);
       return true;
@@ -2155,8 +2158,8 @@ test("image attachment readiness uses exact file tiles and not localized remove-
         },
       };
     },
-    getByTestId: (testId: string) => {
-      expect(testId).toBe("send-button");
+    locator: (selector: string) => {
+      expect(selector).toBe('[data-testid="send-button"], button[type="submit"]');
       return send;
     },
   };
@@ -3910,7 +3913,7 @@ test("rejected Send acknowledgement cannot activate the browser button", async (
   const hidden = { filter() { return this; }, last() { return this; }, getByText() { return this; }, isVisible: async () => false };
   const page = { isClosed: () => false, locator: () => hidden } as unknown as Page;
   let presses = 0, submitted = false;
-  worker.activeComposer = async () => ({ locator: () => ({ getByTestId: () => ({ waitFor: async () => {}, isEnabled: async () => true, press: async () => { presses++; } }) }) });
+  worker.activeComposer = async () => ({ locator: () => ({ locator: () => ({ count: async () => 1, waitFor: async () => {}, isEnabled: async () => true, press: async () => { presses++; } }) }) });
   const veto = new DOMException("Synthetic draft remains unsent", "AbortError");
   await expect(worker.sendAttachedPrompt(page, {}, undefined, new AbortController().signal, undefined, { onSendActivated: async () => { throw veto; }, onSubmitted: () => { submitted = true; } })).rejects.toBe(veto);
   expect(presses).toBe(0);

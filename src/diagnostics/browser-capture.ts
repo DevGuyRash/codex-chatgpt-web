@@ -1,4 +1,5 @@
 import type { Page } from "playwright-core";
+import { CHATGPT_COMPOSER_SELECTOR } from "../chatgpt-session";
 import { runtimeCaptureClient, runtimeDiagnostics } from "./runtime";
 import { campaignCaptureId, captureCampaignContent, omitCampaignCapture } from "./campaign-capture";
 
@@ -21,7 +22,7 @@ export async function inspectCaptureSurface(page: Page): Promise<{ allowed: bool
       try { if (await element.isVisible()) return { allowed: false, reason: "visible-embedded-frame", blockedKinds: ["iframe"] }; }
       finally { await element.dispose(); }
     }
-    return await page.evaluate(() => {
+    return await page.evaluate((composerSelector) => {
       const visible = (element: Element) => {
         const rect = element.getBoundingClientRect(); const style = getComputedStyle(element);
         return rect.width > 0 && rect.height > 0 && style.visibility !== "hidden" && style.display !== "none";
@@ -38,16 +39,16 @@ export async function inspectCaptureSurface(page: Page): Promise<{ allowed: bool
         return ["text", "email", "tel", "url", "search", "number"].includes(type) ? "text-input" : "other-input";
       }))];
       if (blockedKinds.length) return { allowed: false, reason: "visible-sensitive-control", blockedKinds };
-      const allowed = [...document.querySelectorAll('#prompt-textarea[contenteditable="true"],textarea#prompt-textarea')].some(visible);
+      const allowed = [...document.querySelectorAll(composerSelector)].some(visible);
       return { allowed, reason: allowed ? "conversation" : "composer-unavailable" };
-    });
+    }, CHATGPT_COMPOSER_SELECTOR);
   } catch { return { allowed: false, reason: "inspection-failed" }; }
 }
 
 /** Capture the current viewport intersection without scrolling or waiting for layout stability. */
 export async function captureVisibleConversationImage(page: Page): Promise<Buffer> {
-  const clip = await page.locator("main").evaluate(main => {
-    const regions = [main, ...main.querySelectorAll('[data-message-author-role="user"],[data-message-author-role="assistant"],[data-message-author-role="tool"],#prompt-textarea')].flatMap(element => {
+  const clip = await page.locator("main").evaluate((main, composerSelector) => {
+    const regions = [main, ...main.querySelectorAll(`[data-message-author-role="user"],[data-message-author-role="assistant"],[data-message-author-role="tool"],[data-turn-key] [data-user-message-bubble],[data-turn-key] [data-markdown-text-style="assistant-message"],${composerSelector}`)].flatMap(element => {
       const style = getComputedStyle(element);
       if (style.display === "none" || style.visibility === "hidden") return [];
       const rect = element.getBoundingClientRect();
@@ -60,7 +61,7 @@ export async function captureVisibleConversationImage(page: Page): Promise<Buffe
     if (!regions.length) return { x: 0, y: 0, width: 0, height: 0 };
     const x = Math.min(...regions.map(rect => rect.left)), y = Math.min(...regions.map(rect => rect.top));
     return { x, y, width: Math.max(...regions.map(rect => rect.right)) - x, height: Math.max(...regions.map(rect => rect.bottom)) - y };
-  }, { timeout: 3000 });
+  }, CHATGPT_COMPOSER_SELECTOR, { timeout: 3000 });
   if (!Object.values(clip).every(Number.isFinite) || clip.width <= 0 || clip.height <= 0) throw new Error("Conversation is outside the visible viewport");
   // Disabling animations fast-forwards finite animations and dispatches their finish handlers.
   // Evidence collection must observe the app, not trigger its pending UI transitions.
@@ -81,14 +82,31 @@ export async function visibleConversationState(page: Page): Promise<string> {
       });
       return children.length ? { tag: element.tagName.toLowerCase(), children } : null;
     };
-    return JSON.stringify([...main.querySelectorAll('[data-message-author-role]')].flatMap(message => {
-      for (let ancestor = message.parentElement; ancestor; ancestor = ancestor.parentElement) {
+    const exposed = (message: Element): boolean => {
+      for (let ancestor: Element | null = message; ancestor; ancestor = ancestor.parentElement) {
         const style = getComputedStyle(ancestor);
-        if (ancestor.hasAttribute("hidden") || ancestor.getAttribute("aria-hidden") === "true" || style.display === "none" || style.visibility === "hidden") return [];
+        if (ancestor.hasAttribute("hidden") || ancestor.getAttribute("aria-hidden") === "true" || style.display === "none" || style.visibility === "hidden") return false;
       }
+      return true;
+    };
+    const legacy = [...main.querySelectorAll('[data-message-author-role]')].flatMap(message => {
+      if (!exposed(message)) return [];
       const content = read(message), role = message.getAttribute("data-message-author-role");
       return content && ["user", "assistant", "tool"].includes(role ?? "") ? [{ role, content }] : [];
-    }));
+    });
+    const grouped = [...main.querySelectorAll('[data-turn-key]')].flatMap(group => {
+      if (!exposed(group)) return [];
+      const user = group.querySelector('[data-user-message-bubble]');
+      const assistantLabel = group.querySelector('[data-conversation-role="assistant"]');
+      const assistant = assistantLabel?.closest('[data-content-search-unit-key]');
+      const userContent = user && exposed(user) ? read(user) : null;
+      const assistantContent = assistant && exposed(assistant) ? read(assistant) : null;
+      return [
+        ...(userContent ? [{ role: "user", content: userContent }] : []),
+        ...(assistantContent ? [{ role: "assistant", content: assistantContent }] : []),
+      ];
+    });
+    return JSON.stringify([...legacy, ...grouped]);
   }, { timeout: 3000 });
 }
 

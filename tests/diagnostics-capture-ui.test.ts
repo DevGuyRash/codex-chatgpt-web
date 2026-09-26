@@ -16,6 +16,12 @@ test("rendered capture gate excludes credential controls even when their input t
     expect(await inspectCaptureSurface(page)).toMatchObject({ allowed: false, reason: "visible-embedded-frame" });
     await page.setContent('<main><div id="prompt-textarea" contenteditable="true"></div><input type="file" multiple><input type="file" accept="image/*"></main>');
     expect(await isPrivateCaptureSurface(page)).toBe(true);
+    await page.setContent('<main><div data-turn-key="fixture-turn"><div data-user-message-bubble>Modern user request</div><div data-content-search-unit-key="fixture:assistant"><h4 data-conversation-role="assistant">Assistant</h4><div data-markdown-text-style="assistant-message">Modern answer</div></div></div><div data-turn-key="hidden-turn" hidden><div data-user-message-bubble>hidden user secret</div></div><form data-chatgpt-composer><div data-composer-markdown contenteditable="true" role="textbox"></div><input type="file"></form></main>');
+    expect(await inspectCaptureSurface(page)).toMatchObject({ allowed: true, reason: "conversation" });
+    const modern = JSON.parse(await visibleConversationState(page));
+    expect(modern.map((entry: { role: string }) => entry.role)).toEqual(["user", "assistant"]);
+    expect(JSON.stringify(modern)).toContain("Modern answer");
+    expect(JSON.stringify(modern)).not.toContain("hidden user secret");
     await page.setContent('<aside>unrelated conversation</aside><main><div data-message-author-role="assistant" data-secret="attribute secret"><p>Visible result: 42</p><pre><code>retained code</code></pre><span hidden>hidden secret</span><span style="display:none">invisible secret</span><script type="application/json">{"token":"script secret"}</script><input value="input secret"></div><nav>unrelated navigation</nav></main><textarea id="prompt-textarea"></textarea>');
     const state = await visibleConversationState(page);
     expect(state).toContain("Visible result: 42");

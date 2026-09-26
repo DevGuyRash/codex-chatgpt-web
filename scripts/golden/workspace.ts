@@ -1,7 +1,7 @@
 import { spawn, type ChildProcess } from "node:child_process";
-import { randomBytes, randomUUID } from "node:crypto";
-import { closeSync, cpSync, existsSync, mkdirSync, openSync, readFileSync, realpathSync, statfsSync, writeFileSync } from "node:fs";
-import { createServer } from "node:net";
+import { createHash, randomBytes, randomUUID } from "node:crypto";
+import { closeSync, cpSync, existsSync, lstatSync, mkdirSync, openSync, readFileSync, realpathSync, rmSync, statfsSync, writeFileSync } from "node:fs";
+import { createConnection, createServer } from "node:net";
 import { dirname, join, resolve } from "node:path";
 import { setTimeout as wait } from "node:timers/promises";
 import { createRequire } from "node:module";
@@ -199,10 +199,129 @@ export async function restartGoldenLauncher(rootInput: string): Promise<GoldenWo
   return state;
 }
 
+/** Restore only owned GUI processes after a full host restart; retain profile, campaign and queue evidence. */
+export async function resumeGoldenWorkspace(rootInput: string, selection?: { executable: string; recordPath: string }): Promise<GoldenWorkspace> {
+  if (process.platform !== "linux") throw new Error("Hidden workspace recovery requires Linux");
+  const ownerUid = process.getuid?.();
+  if (ownerUid === undefined) throw new Error("Hidden workspace recovery requires a local user identity");
+  const root = resolve(rootInput), statePath = join(root, "workspace.json");
+  if (realpathSync(root) !== root) throw new Error("The golden workspace path is not canonical");
+  const state = JSON.parse(readFileSync(statePath, "utf8")) as GoldenWorkspace;
+  if (state.version !== 1 || state.root !== root || state.codexHome !== join(root, "codex")
+    || state.runtimeHome !== join(root, "runtime") || state.launcherData !== join(root, "launcher")
+    || state.descriptorPath !== join(root, "runtime/runtime/launcher-browser.json")
+    || !/^:\d+$/.test(state.display) || !state.processes?.display || !state.processes?.launcher) {
+    throw new Error("The retained golden workspace identity is invalid");
+  }
+  if (Object.values(state.processes).some(owns)) throw new Error("An owned workspace process is still running; use its normal lifecycle");
+  const displayNumber = Number(state.display.slice(1));
+  if (existsSync(`/tmp/.X11-unix/X${displayNumber}`) || existsSync(`/tmp/.X${displayNumber}-lock`)) {
+    throw new Error("The retained hidden display number is occupied by another owner");
+  }
+  const socket = join(root, "viewer.sock");
+  if (Buffer.byteLength(socket) >= 104) throw new Error("The retained viewer socket path is too long");
+  const viewer = new URL(state.viewerUrl);
+  const tokenPath = viewer.searchParams.get("path");
+  const token = tokenPath?.startsWith("websockify?token=") ? tokenPath.slice("websockify?token=".length) : undefined;
+  const tokenFile = join(root, "viewer-tokens");
+  const tokenInfo = lstatSync(tokenFile);
+  if (!tokenInfo.isFile() || tokenInfo.uid !== ownerUid || (tokenInfo.mode & 0o077) !== 0) {
+    throw new Error("The retained private viewer token is not owned and private");
+  }
+  if (viewer.protocol !== "http:" || viewer.hostname !== "127.0.0.1" || !viewer.port
+    || viewer.username || viewer.password || viewer.hash || viewer.pathname !== "/vnc.html"
+    || viewer.searchParams.get("autoconnect") !== "true" || viewer.searchParams.get("resize") !== "scale"
+    || viewer.searchParams.size !== 3 || !token || !/^[a-f0-9]{64}$/.test(token)
+    || readFileSync(tokenFile, "utf8") !== `${token}: unix_socket:${socket}\n`) {
+    throw new Error("The retained private viewer identity is invalid");
+  }
+  const xauthority = join(root, "xauthority"), viewerWeb = join(root, "viewer-web");
+  const authorityInfo = lstatSync(xauthority);
+  if (!authorityInfo.isFile() || authorityInfo.uid !== ownerUid || (authorityInfo.mode & 0o077) !== 0
+    || !existsSync(join(viewerWeb, "vnc.html")) || !lstatSync(join(viewerWeb, "vnc.html")).isFile()) {
+    throw new Error("The retained hidden display or viewer assets are incomplete");
+  }
+  const reviewedElectron = reviewedElectronBinary(selection ?? state.nativeRuntime);
+  const buildRecord = JSON.parse(readFileSync(reviewedElectron.recordPath, "utf8")) as { chromiumCssPatchSha256?: string };
+  const cssPatchSha256 = createHash("sha256").update(readFileSync(join(repository, "native/electron/css-variable-fallback-crash.patch"))).digest("hex");
+  if (buildRecord.chromiumCssPatchSha256 !== cssPatchSha256) {
+    throw new Error("Golden recovery requires the reviewed Chromium CSS crash fix");
+  }
+  if (existsSync(socket)) {
+    if (!lstatSync(socket).isSocket()) throw new Error("The retained viewer socket path is not a socket");
+    const acceptsConnections = await new Promise<boolean>(resolveSocket => {
+      const client = createConnection(socket);
+      const timer = setTimeout(() => { client.destroy(); resolveSocket(true); }, 1000);
+      const settle = (active: boolean) => { clearTimeout(timer); client.destroy(); resolveSocket(active); };
+      client.once("connect", () => settle(true));
+      client.once("error", (error: NodeJS.ErrnoException) => settle(!["ECONNREFUSED", "ENOENT"].includes(error.code ?? "")));
+    });
+    if (acceptsConnections) throw new Error("Another process owns the retained viewer socket");
+    rmSync(socket);
+  }
+  const tools = join(repository, "context/tools");
+  const xvfb = binary("Xvfb"), xdpyinfo = binary("xdpyinfo");
+  const vnc = binary("x11vnc", join(tools, "x11vnc/usr/bin/x11vnc"));
+  const python = binary("python", join(tools, "viewer-env/bin/python"));
+  const env: NodeJS.ProcessEnv = { ...process.env, DISPLAY: state.display, XAUTHORITY: xauthority, XDG_SESSION_TYPE: "x11" };
+  for (const key of Object.keys(env)) if (/^(?:CODEX_|OPENAI_|CHATGPT_|ELECTRON_RUN_AS_NODE$|VITE_DEV_SERVER_URL$|WAYLAND_DISPLAY$)/.test(key)) delete env[key];
+  const processes: Record<string, OwnedProcess> = {};
+  const children: ChildProcess[] = [];
+  const start = async (name: string, executable: string, args: string[], childEnv: NodeJS.ProcessEnv = env, discardLog = false) => {
+    const log = openSync(discardLog ? "/dev/null" : join(root, "logs", `${name}.log`), "a", 0o600);
+    const child = spawn(executable, args, { cwd: repository, env: childEnv, detached: true, stdio: ["ignore", log, log] });
+    children.push(child);
+    closeSync(log);
+    await new Promise<void>((resolve, reject) => { child.once("spawn", resolve); child.once("error", reject); });
+    await until(() => Boolean(child.pid && identity(child.pid)), child);
+    processes[name] = identity(child.pid!)!;
+    child.unref();
+    return child;
+  };
+  try {
+    const desktop = await start("display", xvfb, [state.display, "-screen", "0", "1440x960x24", "-nolisten", "tcp", "-auth", xauthority]);
+    await until(() => Bun.spawnSync([xdpyinfo, "-display", state.display], { env, stdout: "ignore", stderr: "ignore" }).exitCode === 0, desktop);
+    const exporter = await start("viewer-socket", vnc, ["-norc", "-display", state.display, "-auth", xauthority, "-unixsock", socket, "-rfbport", "0", "-no6", "-forever", "-shared", "-nopw", "-noxdamage", "-nosel", "-quiet"], env, true);
+    await until(() => existsSync(socket), exporter);
+    const requestedPort = Number(viewer.port);
+    const server = createServer();
+    const originalPortFree = await new Promise<boolean>(resolvePort => {
+      server.once("error", () => resolvePort(false));
+      server.listen(requestedPort, "127.0.0.1", () => server.close(() => resolvePort(true)));
+    });
+    const port = originalPortFree ? requestedPort : await availablePort();
+    const viewerUrl = `http://127.0.0.1:${port}/vnc.html?${new URLSearchParams({ autoconnect: "true", resize: "scale", path: `websockify?token=${token}` })}`;
+    const signInUrl = `http://127.0.0.1:${port}/sign-in-${token}.html`;
+    writeFileSync(join(viewerWeb, `sign-in-${token}.html`), signInPage(viewerUrl), { mode: 0o600 });
+    const web = await start("viewer", python, ["-m", "websockify", "--web", viewerWeb, "--token-plugin", "TokenFile", "--token-source", join(root, "viewer-tokens"), "--log-file", "/dev/null", `127.0.0.1:${port}`], env, true);
+    await until(async () => { try { return (await fetch(`http://127.0.0.1:${port}/vnc.html`)).ok; } catch { return false; } }, web);
+    const bun = process.execPath;
+    const launcher = await start("launcher", reviewedElectron.executable, [join(repository, "launcher"), "--codex-home", state.codexHome, "--ozone-platform=x11"], {
+      ...env, CODEX_WEB_GPT_CAPTURE_CAMPAIGN_ID: state.campaignId, CODEX_CHATGPT_WEB_HOME: state.runtimeHome,
+      CODEX_WEB_GPT_LAUNCHER_DATA_DIR: state.launcherData, CODEX_WEB_GPT_ELECTRON_BUILD_RECORD: reviewedElectron.recordPath,
+      CODEX_WEB_GPT_BUN: bun, CODEX_CHATGPT_WEB_BUN: bun,
+    });
+    await until(() => { try { return readLauncherBrowserHostDescriptor(state.descriptorPath).pid === launcher.pid; } catch { return false; } }, launcher);
+    state.processes = processes;
+    state.nativeRuntime = reviewedElectron;
+    state.viewerUrl = viewerUrl;
+    state.signInUrl = signInUrl;
+    writeFileSync(statePath, JSON.stringify(state, null, 2), { mode: 0o600 });
+    return state;
+  } catch (error) {
+    for (const entry of Object.values(processes).reverse()) if (owns(entry)) process.kill(-entry.pid, "SIGTERM");
+    for (const child of children) child.unref();
+    throw error;
+  }
+}
+
 if (import.meta.main) {
-  const rootArgument = process.argv.slice(2).find(argument => argument !== "--json");
+  const resume = process.argv.includes("--resume");
+  const rootArgument = process.argv.slice(2).find(argument => argument !== "--json" && argument !== "--resume");
   const root = rootArgument ? resolve(rootArgument) : join(repository, "context/golden/live");
-  const state = await startGoldenWorkspace(root);
+  const state = resume ? await resumeGoldenWorkspace(root) : await startGoldenWorkspace(root);
   // Authentication UI is intentionally excluded from diagnostics and screenshots.
-  process.stdout.write(process.argv.includes("--json") ? `${JSON.stringify({ root: state.root, display: state.display, signInUrl: state.signInUrl, viewerUrl: state.viewerUrl, descriptorPath: state.descriptorPath })}\n` : signInMessage({ signInUrl: state.signInUrl!, viewerUrl: state.viewerUrl }));
+  process.stdout.write(process.argv.includes("--json") ? `${JSON.stringify({ root: state.root, display: state.display, signInUrl: state.signInUrl, viewerUrl: state.viewerUrl, descriptorPath: state.descriptorPath })}\n`
+    : resume ? `Resumed the owned hidden launcher on ${state.display}. Use the golden-viewer-url command to open its private viewer.\n`
+      : signInMessage({ signInUrl: state.signInUrl!, viewerUrl: state.viewerUrl }));
 }

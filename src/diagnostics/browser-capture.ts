@@ -68,6 +68,27 @@ export async function captureVisibleConversationImage(page: Page): Promise<Buffe
   return await page.screenshot({ clip, animations: "allow", caret: "hide", timeout: 3000, type: "png" });
 }
 
+/** Capture only visible alert rectangles after a failed owned turn; never scroll or include the sidebar. */
+export async function captureVisibleChatGptAlertImages(page: Page): Promise<Buffer[]> {
+  const regions = await page.locator('[role="alert"]').evaluateAll(elements => elements.flatMap(element => {
+    const candidate = element as HTMLElement;
+    const style = getComputedStyle(candidate);
+    if (style.display === "none" || style.visibility === "hidden"
+      || !(candidate.innerText ?? candidate.textContent ?? "").trim()
+      || candidate.querySelector("input,textarea,[contenteditable=true]")) return [];
+    const rect = candidate.getBoundingClientRect();
+    const left = Math.max(0, rect.left), top = Math.max(0, rect.top);
+    const right = Math.min(innerWidth, rect.right), bottom = Math.min(innerHeight, rect.bottom);
+    if (right <= left || bottom <= top || (right - left) * (bottom - top) > 400_000) return [];
+    return [{ x: left, y: top, width: right - left, height: bottom - top }];
+  }).slice(0, 3));
+  const images: Buffer[] = [];
+  for (const clip of regions) {
+    images.push(await page.screenshot({ clip, animations: "allow", caret: "hide", timeout: 3000, type: "png" }));
+  }
+  return images;
+}
+
 /** Retain exposed conversation content, never raw app HTML, attributes, or hidden state. */
 export async function visibleConversationState(page: Page): Promise<string> {
   return page.locator("main").evaluate(main => {
@@ -142,6 +163,15 @@ export async function captureBrowserCheckpoint(page: Page, checkpoint: string, f
       }, "warning");
       return false;
     };
+    if (campaign && failed) {
+      collectionStage = "alert-screenshot";
+      const alerts = await captureVisibleChatGptAlertImages(page);
+      for (const [index, image] of alerts.entries()) {
+        if (!await validateCapturedSurface("alert-validation")) return;
+        await captureCampaignContent("screenshot", image.toString("base64"), context);
+        diagnostics.event("capture.chatgpt_alert_image", "A visible ChatGPT alert was retained only in private campaign evidence", { checkpoint, index, total: alerts.length }, "info", context);
+      }
+    }
     collectionStage = "screenshot";
     const png = campaign ? await captureVisibleConversationImage(page) : await page.screenshot({ animations: "allow", caret: "hide", timeout: 3000, type: "png" });
     if (!await validateCapturedSurface("screenshot-validation")) return;

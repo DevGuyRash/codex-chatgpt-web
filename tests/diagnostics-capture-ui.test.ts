@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import { chromium } from "playwright-core";
-import { isPrivateCaptureSurface, visibleConversationState, captureVisibleConversationImage, inspectCaptureSurface } from "../src/diagnostics/browser-capture";
+import { isPrivateCaptureSurface, visibleConversationState, captureVisibleConversationImage, captureVisibleChatGptAlertImages, inspectCaptureSurface } from "../src/diagnostics/browser-capture";
 
 test("rendered capture gate excludes credential controls even when their input type is generic", async () => {
   const browser = await chromium.launch({ executablePath: process.env.CHATGPT_TEST_CHROME_EXECUTABLE, headless: true });
@@ -87,5 +87,18 @@ test("conversation evidence capture does not complete the application's pending 
     await captureVisibleConversationImage(page);
     expect(await page.locator("main").getAttribute("data-animation-finished")).toBeNull();
     expect(await page.locator("#prompt-textarea").count()).toBe(1);
+  } finally { await browser.close(); }
+});
+
+test("failed-turn alert capture clips only visible alert regions without scrolling", async () => {
+  const browser = await chromium.launch({ executablePath: process.env.CHATGPT_TEST_CHROME_EXECUTABLE, headless: true });
+  try {
+    const page = await browser.newPage({ viewport: { width: 800, height: 600 } });
+    await page.setContent('<style>body{margin:0}aside{position:absolute;left:0;top:0;width:200px;height:600px;background:red}.alert{position:absolute;left:600px;top:20px;width:180px;height:80px;background:blue}</style><aside>Unrelated sidebar</aside><main><div role="alert" class="alert">Synthetic ChatGPT failure</div><div role="alert" hidden>Hidden alert</div><div role="alert"><input value="credential content"></div></main>');
+    const images = await captureVisibleChatGptAlertImages(page);
+    expect(images).toHaveLength(1);
+    expect(images[0]!.readUInt32BE(16)).toBe(180);
+    expect(images[0]!.readUInt32BE(20)).toBe(80);
+    expect(await page.evaluate(() => scrollY)).toBe(0);
   } finally { await browser.close(); }
 });

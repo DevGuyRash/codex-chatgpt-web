@@ -23,5 +23,16 @@ test.skipIf(!process.env.CHATGPT_TEST_CHROME_EXECUTABLE)("connector lookup exclu
     await expect(menu.exact.getAttribute("data-highlighted", { timeout: 500 })).rejects.toThrow("strict mode violation");
     await page.locator('[data-fixture="intended"]').evaluateAll(elements => elements.forEach(element => element.remove()));
     expect(await menu.exact.count()).toBe(0);
+    await page.setContent(`
+      <aside><button data-list-navigation-item="true">Codex Native2 DEV</button></aside>
+      <div data-mention-list-scroll-area>
+        <button data-list-navigation-item="true" hidden><span>Codex Native2 DEV</span></button>
+        <button data-list-navigation-item="true" aria-current="true" data-fixture="modern"><span>Codex Native2 DEV</span><span>Connector description</span></button>
+      </div>
+    `);
+    const modern = chatGptConnectorMenu(page, "Codex Native2 DEV");
+    expect(await modern.exact.count()).toBe(1);
+    expect(await modern.exact.getAttribute("data-fixture")).toBe("modern");
+    expect(await modern.exact.getAttribute("aria-current")).toBe("true");
   } finally { await browser.close(); }
 }, 15_000);

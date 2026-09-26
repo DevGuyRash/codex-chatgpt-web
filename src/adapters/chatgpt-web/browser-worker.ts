@@ -763,7 +763,7 @@ export async function visibleChatGptAlertSummary(page: Page): Promise<{
           || candidate.querySelector("input,textarea,[contenteditable=true]") || !text) return [];
         const kind = /session.{0,40}expir|sign in again|log in again/i.test(text) ? "session"
           : /too many requests|rate limit|usage limit|cooldown/i.test(text) ? "frequency"
-          : /something went wrong|error|failed|unable|try again|problem/i.test(text) ? "service"
+          : /something went wrong|error|fail(?:ed|ure)?|unable|try again|problem/i.test(text) ? "service"
           : "other";
         return [kind] as const;
       });

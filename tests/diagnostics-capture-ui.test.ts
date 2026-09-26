@@ -1,6 +1,7 @@
 import { expect, test } from "bun:test";
 import { chromium } from "playwright-core";
 import { isPrivateCaptureSurface, visibleConversationState, captureVisibleConversationImage, captureVisibleChatGptAlertImages, inspectCaptureSurface } from "../src/diagnostics/browser-capture";
+import { visibleChatGptAlertSummary } from "../src/adapters/chatgpt-web/browser-worker";
 
 test("rendered capture gate excludes credential controls even when their input type is generic", async () => {
   const browser = await chromium.launch({ executablePath: process.env.CHATGPT_TEST_CHROME_EXECUTABLE, headless: true });
@@ -100,5 +101,8 @@ test("failed-turn alert capture clips only visible alert regions without scrolli
     expect(images[0]!.readUInt32BE(16)).toBe(180);
     expect(images[0]!.readUInt32BE(20)).toBe(80);
     expect(await page.evaluate(() => scrollY)).toBe(0);
+    expect(await visibleChatGptAlertSummary(page)).toEqual({ count: 1, categories: ["service"] });
+    await page.locator('.alert').evaluate(element => { element.textContent = 'Too many requests'; });
+    expect(await visibleChatGptAlertSummary(page)).toEqual({ count: 1, categories: ["frequency"] });
   } finally { await browser.close(); }
 });

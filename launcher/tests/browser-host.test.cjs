@@ -1689,6 +1689,33 @@ test("a live turn heartbeat refreshes its lease and rejects another helper", () 
   );
 });
 
+test("connector approval reveals only the exact live automatic turn and clears on settlement", () => {
+  const tab = { id: "tab-approval", traceId: "trace_approval", helperPid: 444, status: "running", interactionMode: "automatic", lastHeartbeatAt: 0 };
+  const calls = [];
+  const fixture = Object.assign(Object.create(BrowserHost.prototype), {
+    turnTabs: new Map([[tab.id, tab]]),
+    closedTurnOwners: new Map(),
+    selectedTabId: "home",
+    showWindow: () => calls.push("window"),
+    show: () => calls.push("browser"),
+    publishState: () => calls.push("publish"),
+    logger: { info: (event) => calls.push(event) },
+    snapshot() { return { tabs: [BrowserHost.prototype.tabSnapshot.call(this, tab)] }; },
+  });
+  assert.deepEqual(BrowserHost.prototype.setTurnApprovalPending.call(fixture, tab.traceId, 444, true), { tabId: tab.id });
+  assert.equal(fixture.selectedTabId, tab.id);
+  assert.equal(tab.approvalPending, true);
+  assert.equal(fixture.snapshot().tabs[0].approvalPending, true);
+  assert.deepEqual(calls.slice(0, 2), ["window", "browser"]);
+  assert.throws(() => BrowserHost.prototype.setTurnApprovalPending.call(fixture, tab.traceId, 445, false), /ownership mismatch/);
+  assert.equal(tab.approvalPending, true);
+  assert.deepEqual(BrowserHost.prototype.setTurnApprovalPending.call(fixture, tab.traceId, 444, false), { tabId: tab.id });
+  assert.equal(tab.approvalPending, false);
+  assert.equal(fixture.snapshot().tabs[0].approvalPending, undefined);
+  tab.status = "ready";
+  assert.throws(() => BrowserHost.prototype.setTurnApprovalPending.call(fixture, tab.traceId, 444, true), /no longer running/);
+});
+
 test("a viewport-refresh heartbeat reapplies hidden emulation before CDP reconnect", () => {
   const events = [];
   const tab = {

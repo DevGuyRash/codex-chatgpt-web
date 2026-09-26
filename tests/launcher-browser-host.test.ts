@@ -105,6 +105,8 @@ test("launcher turn control sends authenticated lifecycle events", async () => {
       ? '{"ok":true,"surfaceId":"launcher_surface_id_0123456789AB","reused":true,"connectorBound":true}\n'
       : request.url === "/v1/turn/end"
         ? '{"ok":true,"cancelledByUser":false}\n'
+        : request.url === "/v1/turn/approval" || request.url === "/v1/turn/approval-settled"
+          ? '{"ok":true,"tabId":"tab-approval-1234"}\n'
         : '{"ok":true}\n');
   });
   await new Promise<void>((resolve, reject) => {
@@ -148,6 +150,10 @@ test("launcher turn control sends authenticated lifecycle events", async () => {
       helperPid: process.pid,
       refreshViewport: true,
     });
+    for (const phase of ["approval", "approval-settled"] as const) {
+      await expect(notifyLauncherTurn(path, { phase, traceId: "abc123def456", helperPid: process.pid })).resolves.toEqual({});
+      expect(received.body).toEqual({ phase, traceId: "abc123def456", helperPid: process.pid });
+    }
     await expect(notifyLauncherTurn(path, {
       phase: "end",
       traceId: "abc123def456",

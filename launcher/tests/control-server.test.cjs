@@ -55,6 +55,7 @@ test("browser control server authenticates and owns turn visibility", async () =
       };
     },
     heartbeatTurn: (...args) => calls.push(["heartbeat", ...args]),
+    setTurnApprovalPending: (...args) => { calls.push(["approval", ...args]); return { tabId: "tab-1" }; },
     endTurn: (...args) => {
       calls.push(["end", ...args]);
       return { cancelledByUser: false };
@@ -122,6 +123,18 @@ test("browser control server authenticates and owns turn visibility", async () =
     });
     assert.equal(invalidRefresh.status, 400);
 
+    for (const [phase, pending] of [["approval", true], ["approval-settled", false]]) {
+      const approval = await fetch(`${descriptor.endpoint}/v1/turn/${phase}`, {
+        method: "POST",
+        headers: { authorization: `Bearer ${descriptor.token}`, "content-type": "application/json" },
+        body: JSON.stringify({ phase, traceId: "abcdef123456", helperPid: process.pid }),
+      });
+      assert.equal(approval.status, 200);
+      assert.deepEqual(await approval.json(), { ok: true, tabId: "tab-1" });
+      assert.equal(calls.at(-1)[2], process.pid);
+      assert.equal(calls.at(-1)[3], pending);
+    }
+
     const ownerlessEnd = await fetch(`${descriptor.endpoint}/v1/turn/end`, {
       method: "POST",
       headers: { authorization: `Bearer ${descriptor.token}`, "content-type": "application/json" },
@@ -153,6 +166,8 @@ test("browser control server authenticates and owns turn visibility", async () =
         true,
       ],
       ["heartbeat", "abcdef123456", process.pid, true],
+      ["approval", "abcdef123456", process.pid, true],
+      ["approval", "abcdef123456", process.pid, false],
       ["end", "abcdef123456", process.pid, "completed", true, undefined, true, true],
     ]);
     assert.equal(logs.some(([, event]) => event === "browser.turn_started"), true);

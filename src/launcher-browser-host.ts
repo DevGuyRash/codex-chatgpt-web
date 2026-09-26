@@ -382,6 +382,7 @@ export const LAUNCHER_CAPABILITY_INSPECTION_TIMEOUT_MS = 120_000;
 
 export type LauncherTurnActivity =
   | { phase: "park" | "resume"; traceId: string; helperPid: number; revision: number }
+  | { phase: "approval" | "approval-settled"; traceId: string; helperPid: number }
   | {
       phase: "start";
       traceId: string;
@@ -710,6 +711,12 @@ export async function notifyLauncherTurn(
         throw new Error("Launcher browser control channel returned an invalid turn release result");
       }
       return { cancelledByUser: body.cancelledByUser };
+    }
+    if (activity.phase === "approval" || activity.phase === "approval-settled") {
+      if (body.ok !== true || typeof body.tabId !== "string" || !/^[A-Za-z0-9_-]{8,64}$/.test(body.tabId)) {
+        throw new Error("Launcher returned invalid connector approval ownership evidence");
+      }
+      return {};
     }
     return {};
   } catch (error) {

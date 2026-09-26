@@ -75,6 +75,7 @@ export interface BrowserTabState {
   loading: boolean;
   active: boolean;
   closable: boolean;
+  approvalPending?: boolean;
   interactionMode?: BrowserInteractionMode;
   manualState?: "awaiting-user" | "sent" | "running" | "completed" | "timed-out" | "cancelled" | "failed";
   manualDeadlineAt?: string;

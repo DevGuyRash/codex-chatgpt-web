@@ -573,6 +573,7 @@ class BrowserHost {
       loading: tab.loading === true,
       active: this.selectedTabId === tab.id,
       closable: tab.cancellationPending !== true,
+      ...(tab.approvalPending === true ? { approvalPending: true } : {}),
     };
     if (tab.interactionMode === "manual") {
       Object.assign(snapshot, {
@@ -1405,6 +1406,25 @@ class BrowserHost {
       this.syncViewVisibility();
     }
     return this.snapshot();
+  }
+
+  setTurnApprovalPending(traceId, helperPid, pending) {
+    if (typeof pending !== "boolean") throw new Error("Connector approval state is invalid");
+    this.heartbeatTurn(traceId, helperPid, false);
+    const tab = [...this.turnTabs.values()].find(candidate => candidate.traceId === traceId);
+    if (!tab || tab.interactionMode !== "automatic" || tab.status !== "running") {
+      throw new Error("Connector approval no longer belongs to an active automatic turn");
+    }
+    tab.approvalPending = pending;
+    tab.message = pending ? "Approve the connector request in this ChatGPT tab" : "ChatGPT is working";
+    if (pending) {
+      this.selectedTabId = tab.id;
+      this.showWindow();
+      this.show();
+    }
+    this.publishState?.(this.snapshot());
+    this.logger.info(pending ? "browser.turn_approval_visible" : "browser.turn_approval_settled", { tabId: tab.id, traceId });
+    return { tabId: tab.id };
   }
 
   refreshTurnLeases(reason, now = Date.now()) {

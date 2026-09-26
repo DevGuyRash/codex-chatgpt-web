@@ -142,6 +142,8 @@ class BrowserControlServer {
       || request.url === "/v1/turn/park"
       || request.url === "/v1/turn/resume"
       || request.url === "/v1/turn/heartbeat"
+      || request.url === "/v1/turn/approval"
+      || request.url === "/v1/turn/approval-settled"
       || request.url === "/v1/turn/end";
     const isTurnRelease = request.url === "/v1/turn/release";
     const isSessionInspect = request.url === "/v1/session/inspect";
@@ -404,6 +406,11 @@ class BrowserControlServer {
         host.heartbeatTurn(body.traceId, body.helperPid, body.refreshViewport === true);
         this.logger.debug?.("browser.turn_heartbeat", { traceId: body.traceId });
         writeJson(response, 200, { ok: true });
+        return;
+      } else if (request.url === "/v1/turn/approval" || request.url === "/v1/turn/approval-settled") {
+        const pending = request.url === "/v1/turn/approval";
+        const result = host.setTurnApprovalPending(body.traceId, body.helperPid, pending);
+        writeJson(response, 200, { ok: true, ...result });
         return;
       } else {
         if (!['completed', 'failed', 'aborted'].includes(body.status)) throw new Error("turn status is invalid");

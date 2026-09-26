@@ -32,9 +32,17 @@ const revision = result("git", ["rev-parse", "HEAD"], source, true);
 if (revision.status !== 0 || revision.stdout.trim() !== manifest.electronCommit) {
   throw new Error("Electron source is not the pinned reviewed revision");
 }
-const chromiumRevision = result("git", ["rev-parse", "HEAD"], chromiumRoot, true);
-if (chromiumRevision.status !== 0 || chromiumRevision.stdout.trim() !== manifest.chromiumCommit) {
-  throw new Error("Chromium source is not the pinned reviewed revision");
+// Electron applies its pinned Chromium patch list as local commits during e sync. Their
+// commit IDs include local committer metadata, so verify the public base plus the exact
+// pinned patch-list length instead of treating a generated HEAD as a stable revision.
+const chromiumBase = result("git", ["merge-base", "--is-ancestor", manifest.chromiumCommit, "HEAD"], chromiumRoot, true);
+const patchList = resolve(source, "patches/chromium/.patches");
+const electronPatches = readFileSync(patchList, "utf8").trim().split("\n").filter(Boolean);
+const patchListClean = result("git", ["diff", "--quiet", "HEAD", "--", "patches/chromium"], source, true);
+const chromiumPatchCount = result("git", ["rev-list", "--count", `${manifest.chromiumCommit}..HEAD`], chromiumRoot, true);
+if (chromiumBase.status !== 0 || patchListClean.status !== 0
+  || chromiumPatchCount.status !== 0 || Number(chromiumPatchCount.stdout.trim()) !== electronPatches.length) {
+  throw new Error("Chromium source does not match the pinned base and Electron patch stack");
 }
 const toolRevision = result("git", ["rev-parse", "HEAD"], tools, true);
 if (toolRevision.status !== 0 || toolRevision.stdout.trim() !== manifest.buildToolsCommit) {

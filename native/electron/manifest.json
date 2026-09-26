@@ -2,7 +2,7 @@
   "electronTag": "v44.4.4",
   "electronCommit": "b2004823e907e9a8dd4aa2e7c078963000c04e2e",
   "chromiumVersion": "152.0.7977.130",
-  "chromiumCommit": "33132c03ce60a8ac280193cd6251e6faf0bb03d6",
+  "chromiumCommit": "2c592105bbcd9490a9894df48d0fe59b2c512651",
   "buildToolsCommit": "4fb8cc9d5e36080368e564aacb820195f94cf1d6",
   "buildConfig": "codex-web-gpt-v44-release",
   "gnArgs": [

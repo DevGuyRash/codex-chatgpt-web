@@ -760,7 +760,8 @@ export async function visibleChatGptAlertSummary(page: Page): Promise<{
         const style = getComputedStyle(candidate);
         const text = (candidate.innerText ?? candidate.textContent ?? "").trim();
         if (style.visibility === "hidden" || style.display === "none"
-          || candidate.querySelector("input,textarea,[contenteditable=true]") || !text) return [];
+          || candidate.querySelector("input,textarea,[contenteditable=true]") || !text
+          || /Allow ChatGPT to use [^?]{1,120}\?/i.test(text)) return [];
         const kind = /session.{0,40}expir|sign in again|log in again/i.test(text) ? "session"
           : /too many requests|rate limit|usage limit|cooldown/i.test(text) ? "frequency"
           : /something went wrong|error|fail(?:ed|ure)?|unable|try again|problem/i.test(text) ? "service"
@@ -930,7 +931,7 @@ export async function resolveChatGptToolConfirmation(
   timeoutMs = CHATGPT_TOOL_CONFIRMATION_TIMEOUT_MS,
   onVisible?: () => Promise<void>,
 ): Promise<boolean> {
-  const dialog = page.locator('[role="dialog"], [data-testid="tool-approval-card"]')
+  const dialog = page.locator('[role="dialog"], [data-testid="tool-approval-card"], [role="alert"]')
     .filter({ hasText: `Allow ChatGPT to use ${appName}?` })
     .last();
   if (!await dialog.isVisible().catch(() => false)) return false;
@@ -2794,6 +2795,7 @@ export class ChatGptBrowserWorker {
     completionTracker?: ChatGptCompletionTracker,
     recoverObservation?: ChatGptObservationRecovery,
     transportDisconnected?: () => boolean,
+    handleToolConfirmation = false,
   ): Promise<ChatGptAssistantTurnBinding> {
     let observationPage = page;
     let observationBaseline = baseline;
@@ -2829,6 +2831,20 @@ export class ChatGptBrowserWorker {
       }
       await throwIfChatGptSessionFailureAlert(observationPage);
       await handleChatGptRequestFrequencyNotice(observationPage);
+      if (handleToolConfirmation && await resolveChatGptToolConfirmation(
+        observationPage,
+        this.config.appName,
+        this.config.autoApproveToolCalls,
+        signal,
+        CHATGPT_TOOL_CONFIRMATION_TIMEOUT_MS,
+        () => captureBrowserCheckpoint(observationPage, "tool-confirmation-visible", false),
+      )) {
+        // A human approval can outlast the ordinary first-answer grace. The resolved card,
+        // not elapsed wall time during approval, starts the next response observation window.
+        responseDeadline = Math.min(deadline ?? Number.POSITIVE_INFINITY, Date.now() + graceMs);
+        await new Promise(resolveSleep => setTimeout(resolveSleep, 250));
+        continue;
+      }
       let state: ChatGptSubmissionDomState;
       try {
         state = await this.submissionDomState(
@@ -4835,6 +4851,7 @@ export class ChatGptBrowserWorker {
           }
           : undefined,
         launcherTransportDisconnected,
+        mode.localTools,
       );
       await diagnostics.capture(page, "send-accepted");
 

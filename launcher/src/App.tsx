@@ -441,6 +441,7 @@ function LauncherShell({
   const updateBusy = snapshot.update.status === "downloading" || snapshot.update.status === "installing";
   const updateVersion = "version" in snapshot.update ? snapshot.update.version : null;
   const selectedManualTab = browser?.tabs.find(tab => tab.active && tab.interactionMode === "manual");
+  const selectedApprovalTab = browser?.tabs.find(tab => tab.active && tab.approvalPending === true);
 
   useEffect(() => {
     if (snapshot.state.browserInteractionMode === "manual") {
@@ -455,6 +456,14 @@ function LauncherShell({
     setBiggerContextRecommendationOpen(false);
     void api!.setBrowserSurfaceActive(true).catch((cause) => setError(messageOf(cause)));
   }, [selectedManualTab?.id, selectedManualTab?.manualState, configurationReviewOpen, setError]);
+
+  useEffect(() => {
+    if (!selectedApprovalTab || configurationReviewOpen) return;
+    setSurface("browser");
+    setSidebarOpen(false);
+    setBiggerContextRecommendationOpen(false);
+    void api!.setBrowserSurfaceActive(true).catch((cause) => setError(messageOf(cause)));
+  }, [selectedApprovalTab?.id, selectedApprovalTab?.approvalPending, configurationReviewOpen, setError]);
 
   useLayoutEffect(() => {
     let cancelled = false;
@@ -906,6 +915,7 @@ function BrowserSurface({
     && platform === "darwin"
     && browser?.authenticated !== true;
   const selectedManualTab = browser?.tabs.find(tab => tab.active && tab.interactionMode === "manual");
+  const selectedApprovalTab = browser?.tabs.find(tab => tab.active && tab.approvalPending === true);
   const navigationLocked = browser?.status === "running" || browser?.status === "testing";
   const passkeyWaiting = passkeyAvailable
     && operation?.name === "passkey-login"
@@ -1092,6 +1102,7 @@ function BrowserSurface({
           tab={selectedManualTab}
         />
       ) : null}
+      {selectedApprovalTab ? <div className="browser-approval-notice" role="status">{copy.connectorApprovalNeeded}</div> : null}
       <div className="browser-viewport" ref={browserSlotRef}>
         {!visible ? (
           <div className="browser-empty">

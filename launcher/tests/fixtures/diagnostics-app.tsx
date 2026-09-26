@@ -4,7 +4,7 @@ import type { DiagnosticsApi } from "../../../src/diagnostics/contracts";
 import "../../src/tokens.css";
 import "../../src/styles.css";
 
-const fixture = (window as unknown as { fixture: { language: Language; problem: DiagnosticProblem; upstreamReview?: { verified: boolean } } }).fixture;
+const fixture = (window as unknown as { fixture: { language: Language; problem: DiagnosticProblem; upstreamReview?: { verified: boolean }; approvalReview?: boolean } }).fixture;
 const call = async (path: string, body?: unknown, signal?: AbortSignal) => {
   const response = await fetch(`/diagnostics/${path}`, { method: body === undefined ? "GET" : "POST", body: body === undefined ? undefined : JSON.stringify(body), headers: { "content-type": "application/json" }, signal });
   if (!response.ok) throw new Error("Synthetic diagnostic bridge failed");
@@ -30,6 +30,14 @@ if (fixture.upstreamReview) {
   snapshot.state.mcpSetupComplete = fixture.upstreamReview.verified;
   snapshot.browser = { status: "running", message: "Synthetic sent turn", url: "https://example.invalid", title: "Fixture", authenticated: true, visible: false, surfaceActive: true, loading: false, canGoBack: false, canGoForward: false, zoomFactor: 1, activeTabId: "manual-fixture", maxTabs: 5,
     tabs: [{ id: "manual-fixture", traceId: "fixture", title: "ChatGPT", status: "running", loading: false, active: true, closable: true, interactionMode: "manual", manualState: "sent", canCopyPrompt: false, canConfirmSent: false }] };
+}
+if (fixture.approvalReview) {
+  snapshot.operation = null;
+  snapshot.state.browserInteractionMode = "automatic";
+  snapshot.state.coreSetupComplete = false;
+  snapshot.state.codexCatalogVerified = false;
+  snapshot.browser = { status: "running", message: "Approve the connector request in this ChatGPT tab", url: "https://chatgpt.com/", title: "ChatGPT", authenticated: true, visible: true, surfaceActive: true, loading: false, canGoBack: false, canGoForward: false, zoomFactor: 1, activeTabId: "approval-fixture", maxTabs: 5,
+    tabs: [{ id: "approval-fixture", traceId: "fixture", title: "ChatGPT 1", status: "running", loading: false, active: true, closable: true, approvalPending: true }] };
 }
 // Only presentation seams exercised here are substituted. Missing mutation APIs fail if invoked.
 window.codexWebLauncher = {

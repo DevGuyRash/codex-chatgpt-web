@@ -789,6 +789,17 @@ code {
   box-shadow: inset 2px 0 0 var(--color-text-accent);
 }
 
+.browser-approval-notice {
+  flex: none;
+  padding: 10px 16px;
+  border-bottom: 1px solid var(--color-border);
+  color: var(--color-text-primary);
+  background: rgb(29 31 35 / 96%);
+  box-shadow: inset 2px 0 0 var(--color-text-accent);
+  font-size: 13px;
+  line-height: 1.5;
+}
+
 .manual-turn-guide > div:first-child {
   min-width: 0;
 }

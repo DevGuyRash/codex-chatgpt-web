@@ -17,7 +17,7 @@ test.skipIf(!process.env.CHATGPT_TEST_CHROME_EXECUTABLE)("sent handoffs have no 
       const url = new URL(request.url);
       if (url.pathname === "/app.js") return new Response(readFileSync(join(root, "diagnostics-app.js")), { headers: { "content-type": "text/javascript" } });
       if (url.pathname === "/app.css") return new Response(readFileSync(join(root, "diagnostics-app.css")), { headers: { "content-type": "text/css" } });
-      const fixture = { language: url.searchParams.get("language"), problem: { message: "Synthetic fixture" }, upstreamReview: { verified: url.searchParams.get("verified") === "true" } };
+      const fixture = { language: url.searchParams.get("language"), problem: { message: "Synthetic fixture" }, ...(url.searchParams.get("approval") === "true" ? { approvalReview: true } : { upstreamReview: { verified: url.searchParams.get("verified") === "true" } }) };
       return new Response(`<!doctype html><link rel="stylesheet" href="/app.css"><div id="root"></div><script>window.fixture=${JSON.stringify(fixture)}</script><script type="module" src="/app.js"></script>`, { headers: { "content-type": "text/html" } });
     } });
     for (const language of ["en", "zh-CN", "ja"] as const) for (const verified of [false, true]) {
@@ -36,6 +36,15 @@ test.skipIf(!process.env.CHATGPT_TEST_CHROME_EXECUTABLE)("sent handoffs have no 
       // is-complete is the visual completion treatment; this fixes its disagreement with the check icon.
       expect((await finalStep.getAttribute("class"))?.includes("is-complete")).toBe(verified);
       expect(errors).toEqual([]);
+      await page.close();
+    }
+    for (const language of ["en", "zh-CN", "ja"] as const) {
+      const page = await browser.newPage({ viewport: { width: 900, height: 700 }, reducedMotion: "reduce" });
+      await page.goto(`http://127.0.0.1:${server.port}/?language=${language}&approval=true`);
+      const notice = page.locator('.browser-approval-notice');
+      await notice.waitFor();
+      expect(await notice.innerText()).toBe(copyFor(language).connectorApprovalNeeded);
+      expect(await page.getByRole('button', { name: copyFor(language).browser, exact: true }).getAttribute('aria-current')).toBe('page');
       await page.close();
     }
   } finally { await browser.close(); server?.stop(true); rmSync(root, { recursive: true, force: true }); }

@@ -90,6 +90,24 @@ export async function captureVisibleChatGptAlertImages(page: Page): Promise<Buff
   return images;
 }
 
+/** Campaign-only alert text from a failed submitted turn; no auth notices or raw token-like values. */
+export async function visibleChatGptAlertTexts(page: Page): Promise<string[]> {
+  return page.locator('[role="alert"]').evaluateAll(elements => elements.flatMap(element => {
+    const candidate = element as HTMLElement;
+    const style = getComputedStyle(candidate);
+    const text = (candidate.innerText ?? candidate.textContent ?? "").replace(/\s+/g, " ").trim();
+    if (!text || style.display === "none" || style.visibility === "hidden"
+      || candidate.querySelector("input,textarea,[contenteditable=true]")
+      || /passkey|security key|yubikey|\bpin\b|password|sign[ -]?in|log[ -]?in|session.{0,40}expir|authenticat|verification|\b2fa\b|qr code/i.test(text)) return [];
+    if (text.length > 2_000) return ["[alert content omitted: too long]"];
+    return [text.replace(/<codex_context_json>[\s\S]*?<\/codex_context_json>/gi, "[redacted context]")
+      .replace(/https?:\/\/\S+/gi, "[redacted URL]")
+      .replace(/[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}/g, "[redacted email]")
+      .replace(/\b(?:[A-Za-z0-9_-]{24,}|\d{4,})\b/g, "[redacted value]")
+      .slice(0, 500)];
+  }).slice(0, 3));
+}
+
 /** Retain exposed conversation content, never raw app HTML, attributes, or hidden state. */
 export async function visibleConversationState(page: Page): Promise<string> {
   return page.locator("main").evaluate(main => {
@@ -165,6 +183,13 @@ export async function captureBrowserCheckpoint(page: Page, checkpoint: string, f
       return false;
     };
     if (campaign && failed && afterSend) {
+      collectionStage = "alert-text";
+      const alertTexts = await visibleChatGptAlertTexts(page);
+      if (alertTexts.length) {
+        if (!await validateCapturedSurface("alert-text-validation")) return;
+        await captureCampaignContent("browser-state", JSON.stringify({ kind: "chatgpt-alerts", alerts: alertTexts }), context);
+        diagnostics.event("capture.chatgpt_alert_text", "Visible ChatGPT alerts were retained only in private campaign evidence", { checkpoint, count: alertTexts.length }, "info", context);
+      }
       collectionStage = "alert-screenshot";
       const alerts = await captureVisibleChatGptAlertImages(page);
       for (const [index, image] of alerts.entries()) {

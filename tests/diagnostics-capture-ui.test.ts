@@ -104,5 +104,7 @@ test("failed-turn alert capture clips only visible alert regions without scrolli
     expect(await visibleChatGptAlertSummary(page)).toEqual({ count: 1, categories: ["service"] });
     await page.locator('.alert').evaluate(element => { element.textContent = 'Too many requests'; });
     expect(await visibleChatGptAlertSummary(page)).toEqual({ count: 1, categories: ["frequency"] });
+    await page.locator('main').evaluate(element => { element.insertAdjacentHTML('beforeend', '<div role="alert" style="position:absolute;left:300px;top:20px;width:180px;height:80px">Enter your YubiKey PIN</div>'); });
+    expect(await captureVisibleChatGptAlertImages(page)).toHaveLength(1);
   } finally { await browser.close(); }
 });

@@ -1888,9 +1888,9 @@ export function browserDiagnosticCheckpoint(value: string): string {
 
 class ChatGptBrowserDiagnostics {
   constructor(_traceId: string, _root: string, _appName: string) {}
-  async capture(page: Page, checkpoint: string, error?: unknown): Promise<void> {
+  async capture(page: Page, checkpoint: string, error?: unknown, afterSend = false): Promise<void> {
     const readiness = checkpoint === "browser-page-acquired" || checkpoint === "temporary-chat-navigation-complete" ? "preflight" : "conversation";
-    await captureBrowserCheckpoint(page, browserDiagnosticCheckpoint(checkpoint), error !== undefined, readiness);
+    await captureBrowserCheckpoint(page, browserDiagnosticCheckpoint(checkpoint), error !== undefined, readiness, afterSend);
   }
 }
 
@@ -5174,7 +5174,7 @@ export class ChatGptBrowserWorker {
           sendActivated: browserSendActivated,
           errorCode: error instanceof ChatGptWebAdapterError ? error.code : "unclassified",
         }, "warning");
-        await diagnostics.capture(diagnosticPage, "turn-failed", error);
+        await diagnostics.capture(diagnosticPage, "turn-failed", error, browserSendActivated);
       }
       throw error;
     } finally {

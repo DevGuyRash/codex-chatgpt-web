@@ -73,8 +73,9 @@ export async function captureVisibleChatGptAlertImages(page: Page): Promise<Buff
   const regions = await page.locator('[role="alert"]').evaluateAll(elements => elements.flatMap(element => {
     const candidate = element as HTMLElement;
     const style = getComputedStyle(candidate);
+    const text = (candidate.innerText ?? candidate.textContent ?? "").trim();
     if (style.display === "none" || style.visibility === "hidden"
-      || !(candidate.innerText ?? candidate.textContent ?? "").trim()
+      || !text || /passkey|security key|yubikey|\bpin\b|password|sign[ -]?in|log[ -]?in|session.{0,40}expir|authenticat|verification|\b2fa\b|qr code/i.test(text)
       || candidate.querySelector("input,textarea,[contenteditable=true]")) return [];
     const rect = candidate.getBoundingClientRect();
     const left = Math.max(0, rect.left), top = Math.max(0, rect.top);
@@ -131,7 +132,7 @@ export async function visibleConversationState(page: Page): Promise<string> {
   }, { timeout: 3000 });
 }
 
-export async function captureBrowserCheckpoint(page: Page, checkpoint: string, failed: boolean, readiness: "conversation" | "preflight" = "conversation"): Promise<void> {
+export async function captureBrowserCheckpoint(page: Page, checkpoint: string, failed: boolean, readiness: "conversation" | "preflight" = "conversation", afterSend = false): Promise<void> {
   const diagnostics = runtimeDiagnostics(); const context = diagnostics?.context();
   diagnostics?.event("browser.checkpoint", "Browser stage checkpoint", { checkpoint, failed }, failed ? "warning" : "debug");
   if (!diagnostics || !context) return;
@@ -163,7 +164,7 @@ export async function captureBrowserCheckpoint(page: Page, checkpoint: string, f
       }, "warning");
       return false;
     };
-    if (campaign && failed) {
+    if (campaign && failed && afterSend) {
       collectionStage = "alert-screenshot";
       const alerts = await captureVisibleChatGptAlertImages(page);
       for (const [index, image] of alerts.entries()) {

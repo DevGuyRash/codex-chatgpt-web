@@ -2932,7 +2932,7 @@ export class ChatGptBrowserWorker {
     return composer.evaluate(element => {
       const clone = element.cloneNode(true) as HTMLElement;
       clone.querySelectorAll(
-        '[data-id^="plugin:"][data-keyword], [data-inline-selection-pill-cursor-target]',
+        '[data-id^="plugin:"][data-keyword], [app-mention-display-name][app-mention-path^="app://asdk_app_"], [data-inline-selection-pill-cursor-target]',
       )
         .forEach(part => part.remove());
       return [...clone.childNodes]
@@ -2968,19 +2968,22 @@ export class ChatGptBrowserWorker {
 
   private selectedConnectorControl(composer: Locator): Locator {
     return composer
-      .locator(`[data-id^="plugin:"][data-keyword=${JSON.stringify(this.config.appName)}]`)
+      .locator([
+        `[data-id^="plugin:"][data-keyword=${JSON.stringify(this.config.appName)}]`,
+        `[app-mention-display-name=${JSON.stringify(this.config.appName)}][app-mention-path^="app://asdk_app_"]`,
+      ].join(", "))
       .filter({ visible: true });
   }
 
   private async connectorIsSelected(composer: Locator, abortSignal?: AbortSignal): Promise<boolean> {
     const selected = this.selectedConnectorControl(composer);
-    const keywords = await withBrowserTurnAbort(
+    const identities = await withBrowserTurnAbort(
       withChatGptBrowserObservationTimeout(selected.evaluateAll(elements => (
-        elements.map(element => element.getAttribute("data-keyword"))
+        elements.map(element => element.getAttribute("data-keyword") ?? element.getAttribute("app-mention-display-name"))
       ))),
       abortSignal,
     );
-    const exactMatches = keywords.filter(keyword => keyword === this.config.appName).length;
+    const exactMatches = identities.filter(identity => identity === this.config.appName).length;
     if (exactMatches > 1) {
       throw chatGptConnectorUnavailableError("ChatGPT composer exposed ambiguous connector selections");
     }
@@ -3212,7 +3215,10 @@ export class ChatGptBrowserWorker {
       const rowHighlighted = async () => await appResult.getAttribute("data-highlighted", {
         signal: abortSignal,
         timeout: CHATGPT_CONNECTOR_ACTION_TIMEOUT_MS,
-      }) !== null;
+      }) !== null || await appResult.getAttribute("aria-current", {
+        signal: abortSignal,
+        timeout: CHATGPT_CONNECTOR_ACTION_TIMEOUT_MS,
+      }) === "true";
       if (!await rowHighlighted()) {
         const visibleRowCount = await withBrowserTurnAbort(
           withChatGptBrowserObservationTimeout(menuRows.filter({ visible: true }).count()),

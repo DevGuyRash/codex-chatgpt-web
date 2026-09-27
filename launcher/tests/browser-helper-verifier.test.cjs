@@ -97,6 +97,35 @@ test("launcher verification preserves the helper error class and correlation id"
   );
 });
 
+test("browser maintenance retains a structured ChatGPT failure through launcher IPC", async (context) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-browser-helper-problem-"));
+  context.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const script = path.join(root, "helper.cjs");
+  fs.writeFileSync(script, `
+    const input = require("node:readline").createInterface({ input: process.stdin });
+    const send = value => process.stdout.write(JSON.stringify(value) + "\\n");
+    send({ type: "ready" });
+    input.on("line", line => {
+      const message = JSON.parse(line);
+      if (message.type === "shutdown") process.exit(0);
+      if (message.type !== "smoke") return;
+      send({ type: "error", id: message.id, name: "ChatGptWebAdapterError", message: "ChatGPT reported an error",
+        problem: { version: 1, code: "chatgpt_rate_limited", message: "ChatGPT reported a rate limit", stage: "browser.smoke", origin: "chatgpt-ui", httpStatus: 429, retryable: true } });
+    });
+  `);
+  await assert.rejects(
+    runBrowserHelperOperation({ helper: { executable: process.execPath, script }, descriptorPath: "/runtime/launcher-browser.json", appName: "Codex Native2", operation: "smoke", logger: { info() {} } }),
+    error => {
+      assert.equal(error.problem.code, "chatgpt_rate_limited");
+      assert.equal(error.problem.stage, "browser.smoke");
+      assert.equal(error.problem.httpStatus, 429);
+      assert.equal(error.problem.retryable, true);
+      assert.match(error.operationId, /^smoke-[a-f0-9]{24}$/);
+      return true;
+    },
+  );
+});
+
 test("a completed helper result survives stalled shutdown and the owned child is reaped", async (context) => {
   if (process.platform === "win32") return context.skip("SIGTERM interception is POSIX-only");
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-browser-helper-stall-"));

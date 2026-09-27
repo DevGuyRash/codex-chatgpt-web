@@ -350,6 +350,7 @@ async function verify(message: VerifyMessage): Promise<void> {
       id: message.id,
       name: error instanceof Error ? error.name : "Error",
       message: error instanceof Error ? error.message : String(error),
+      problem: problemFor(error, "Browser maintenance failed; inspect its stages", { stage: `browser.${message.type}` }),
     });
   }
 }
@@ -387,6 +388,7 @@ async function maintain(message: InspectMessage | SmokeMessage): Promise<void> {
       id: message.id,
       name: error instanceof Error ? error.name : "Error",
       message: error instanceof Error ? error.message : String(error),
+      problem: problemFor(error, "Browser maintenance failed; inspect its stages", { stage: `browser.${message.type}` }),
     });
   } finally {
     abortControllers.delete(message.id);

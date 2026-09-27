@@ -132,8 +132,12 @@ async function runBrowserHelperOperation({ helper, descriptorPath, appName, oper
         return;
       }
       if (message.type === "error" && typeof message.message === "string") {
-        const helperError = new Error(message.message);
-        if (typeof message.name === "string" && /^[A-Za-z][A-Za-z0-9]{0,79}$/.test(message.name)) {
+        let helperError;
+        if (message.problem !== undefined) {
+          try { helperError = new DiagnosticError(message.problem); }
+          catch { helperError = new DiagnosticError({ code: "unsupported_problem", message: "Browser helper returned an invalid failure record; inspect component versions", origin: "launcher", stage: `browser.${operation}` }); }
+        } else helperError = new Error(message.message);
+        if (message.problem === undefined && typeof message.name === "string" && /^[A-Za-z][A-Za-z0-9]{0,79}$/.test(message.name)) {
           helperError.name = message.name;
         }
         finish(helperError);

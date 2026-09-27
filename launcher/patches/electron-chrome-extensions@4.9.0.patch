@@ -1,27 +1,3 @@
-diff --git a/node_modules/electron-chrome-extensions/.bun-tag-194b868f08ab3d9b b/.bun-tag-194b868f08ab3d9b
-new file mode 100644
-index 0000000000000000000000000000000000000000..e69de29bb2d1d6434b8b29ae775ad8c2e48c5391
-diff --git a/node_modules/electron-chrome-extensions/.bun-tag-1a3a569f16a8d82c b/.bun-tag-1a3a569f16a8d82c
-new file mode 100644
-index 0000000000000000000000000000000000000000..e69de29bb2d1d6434b8b29ae775ad8c2e48c5391
-diff --git a/node_modules/electron-chrome-extensions/.bun-tag-5360e31731252b6b b/.bun-tag-5360e31731252b6b
-new file mode 100644
-index 0000000000000000000000000000000000000000..e69de29bb2d1d6434b8b29ae775ad8c2e48c5391
-diff --git a/node_modules/electron-chrome-extensions/.bun-tag-576eca2cdb12d132 b/.bun-tag-576eca2cdb12d132
-new file mode 100644
-index 0000000000000000000000000000000000000000..e69de29bb2d1d6434b8b29ae775ad8c2e48c5391
-diff --git a/node_modules/electron-chrome-extensions/.bun-tag-9b1c7fc9d98084d b/.bun-tag-9b1c7fc9d98084d
-new file mode 100644
-index 0000000000000000000000000000000000000000..e69de29bb2d1d6434b8b29ae775ad8c2e48c5391
-diff --git a/node_modules/electron-chrome-extensions/.bun-tag-a0b5899a46db21e4 b/.bun-tag-a0b5899a46db21e4
-new file mode 100644
-index 0000000000000000000000000000000000000000..e69de29bb2d1d6434b8b29ae775ad8c2e48c5391
-diff --git a/node_modules/electron-chrome-extensions/.bun-tag-acfcbf534b0ee7b6 b/.bun-tag-acfcbf534b0ee7b6
-new file mode 100644
-index 0000000000000000000000000000000000000000..e69de29bb2d1d6434b8b29ae775ad8c2e48c5391
-diff --git a/node_modules/electron-chrome-extensions/.bun-tag-fee31efe51b195d6 b/.bun-tag-fee31efe51b195d6
-new file mode 100644
-index 0000000000000000000000000000000000000000..e69de29bb2d1d6434b8b29ae775ad8c2e48c5391
 diff --git a/dist/chrome-extension-api.preload.js b/dist/chrome-extension-api.preload.js
 index 67d3be4b5026069ec4ae73c1fc6e661f8a19098e..0bcf78dec01e38533070b4c8ad7a9720fade3179 100644
 --- a/dist/chrome-extension-api.preload.js
@@ -113,7 +89,7 @@ index 67d3be4b5026069ec4ae73c1fc6e661f8a19098e..0bcf78dec01e38533070b4c8ad7a9720
    };
  
 diff --git a/dist/cjs/index.js b/dist/cjs/index.js
-index b4242b0b847d33d8544832bfb2d8723a884a3072..eaf9138d96e0c775e3555a44d289559a3905c98e 100644
+index b4242b0b847d33d8544832bfb2d8723a884a3072..597d514fb5ddf2533d7af30b70514103dcdc7607 100644
 --- a/dist/cjs/index.js
 +++ b/dist/cjs/index.js
 @@ -605,7 +605,7 @@ var BrowserActionAPI = class {
@@ -379,12 +355,22 @@ index b4242b0b847d33d8544832bfb2d8723a884a3072..eaf9138d96e0c775e3555a44d289559a
      });
    }
  };
-@@ -1948,19 +2042,25 @@ var RuntimeAPI = class extends import_node_events3.EventEmitter {
+@@ -1948,19 +2042,39 @@ var RuntimeAPI = class extends import_node_events3.EventEmitter {
    constructor(ctx) {
      super();
      this.ctx = ctx;
 +    this.onNativeLifecycle = (details) => this.ctx.emit("native-messaging-lifecycle", details);
      this.hostMap = {};
++    this.nativeHosts = /* @__PURE__ */ new Set();
++    this.ctx.session.serviceWorkers.on("running-status-changed", ({ runningStatus, versionId }) => {
++      if (runningStatus !== "stopped") return;
++      // ServiceWorkerMain does not reliably emit WebContents's destroyed event.
++      // A stopped worker must release its native host even when its port cannot
++      // deliver runtime.disconnectNative.
++      for (const host of this.nativeHosts) {
++        if (host.sender?.versionId === versionId) host.destroy();
++      }
++    });
      this.connectNative = async (event, connectionId, application) => {
        const host = new NativeMessagingHost(
          event.extension.id,
@@ -393,10 +379,14 @@ index b4242b0b847d33d8544832bfb2d8723a884a3072..eaf9138d96e0c775e3555a44d289559a
 -        application
 +        application,
 +        true,
-+        () => { if (this.hostMap[connectionId] === host) delete this.hostMap[connectionId]; },
++        () => {
++          this.nativeHosts.delete(host);
++          if (this.hostMap[connectionId] === host) delete this.hostMap[connectionId];
++        },
 +        this.onNativeLifecycle
        );
        this.hostMap[connectionId] = host;
++      this.nativeHosts.add(host);
 +      await host.ready.catch(() => host.destroy());
 +      if (host.closed && this.hostMap[connectionId] === host) delete this.hostMap[connectionId];
      };
@@ -407,17 +397,18 @@ index b4242b0b847d33d8544832bfb2d8723a884a3072..eaf9138d96e0c775e3555a44d289559a
      };
      this.sendNativeMessage = async (event, application, message) => {
        const connectionId = (0, import_node_crypto.randomUUID)();
-@@ -1969,10 +2069,16 @@ var RuntimeAPI = class extends import_node_events3.EventEmitter {
+@@ -1969,10 +2083,17 @@ var RuntimeAPI = class extends import_node_events3.EventEmitter {
          event.sender,
          connectionId,
          application,
 -        false
 +        false,
-+        void 0,
++        () => this.nativeHosts.delete(host),
 +        this.onNativeLifecycle
        );
 -      await host.ready;
 -      return await host.sendAndReceive(message);
++      this.nativeHosts.add(host);
 +      try {
 +        await host.ready;
 +        return await host.sendAndReceive(message);
@@ -427,7 +418,7 @@ index b4242b0b847d33d8544832bfb2d8723a884a3072..eaf9138d96e0c775e3555a44d289559a
      };
      this.openOptionsPage = async ({ extension }) => {
        const manifest = getExtensionManifest(extension);
-@@ -2266,12 +2372,12 @@ var RoutingDelegate = class _RoutingDelegate {
+@@ -2266,12 +2387,12 @@ var RoutingDelegate = class _RoutingDelegate {
      this.sessionMap = /* @__PURE__ */ new WeakMap();
      this.workers = /* @__PURE__ */ new WeakSet();
      this.onRouterMessage = async (event, extensionId, handlerName, ...args) => {
@@ -442,7 +433,7 @@ index b4242b0b847d33d8544832bfb2d8723a884a3072..eaf9138d96e0c775e3555a44d289559a
        const ses = sessionPartition === DEFAULT_SESSION ? getSessionFromEvent(event) : resolvePartition(sessionPartition);
        const observer = this.sessionMap.get(ses);
        return observer?.onExtensionMessage(event, void 0, handlerName, ...args);
-@@ -2363,7 +2469,7 @@ var ExtensionRouter = class {
+@@ -2363,13 +2484,19 @@ var ExtensionRouter = class {
      });
      import_electron9.app.on("web-contents-created", (event, webContents2) => {
        if (webContents2.session === this.session && webContents2.getType() === "backgroundPage") {
@@ -451,7 +442,19 @@ index b4242b0b847d33d8544832bfb2d8723a884a3072..eaf9138d96e0c775e3555a44d289559a
          this.extensionHosts.add(webContents2);
        }
      });
-@@ -2378,7 +2484,7 @@ var ExtensionRouter = class {
+     session2.serviceWorkers.on(
+       "running-status-changed",
+       ({ runningStatus, versionId }) => {
++        if (runningStatus === "stopped") {
++          for (const worker of this.extensionWorkers) {
++            if (worker.versionId === versionId) this.extensionWorkers.delete(worker);
++          }
++          return;
++        }
+         if (runningStatus !== "starting") return;
+         const serviceWorker = session2.serviceWorkers.getWorkerFromVersionID(versionId);
+         if (!serviceWorker) return;
+@@ -2378,7 +2505,7 @@ var ExtensionRouter = class {
          if (this.extensionHosts.has(serviceWorker)) {
            d8("%s running status changed to %s", scope, runningStatus);
          } else {
@@ -460,7 +463,7 @@ index b4242b0b847d33d8544832bfb2d8723a884a3072..eaf9138d96e0c775e3555a44d289559a
            this.extensionWorkers.add(serviceWorker);
          }
        }
-@@ -2400,7 +2506,7 @@ var ExtensionRouter = class {
+@@ -2400,7 +2527,7 @@ var ExtensionRouter = class {
    }
    observeListenerHost(host) {
      const hostId = getHostId(host);
@@ -469,7 +472,7 @@ index b4242b0b847d33d8544832bfb2d8723a884a3072..eaf9138d96e0c775e3555a44d289559a
      host.once("destroyed", () => {
        d8(`extension host destroyed [id:${hostId}]`);
        this.filterListeners((listener) => listener.type !== "frame" || listener.host !== host);
-@@ -2473,7 +2579,7 @@ var ExtensionRouter = class {
+@@ -2473,7 +2600,7 @@ var ExtensionRouter = class {
      }
      const extEvent = event.type === "frame" ? { type: event.type, sender: event.sender, extension } : { type: event.type, sender: event.serviceWorker, extension };
      const result = await handler.callback(extEvent, ...args);

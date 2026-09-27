@@ -1,6 +1,7 @@
 const { spawn } = require("node:child_process");
 const { randomBytes } = require("node:crypto");
 const { createInterface } = require("node:readline");
+const { DiagnosticError } = require("./logging.cjs");
 
 const BROWSER_HELPER_OPERATION_TIMEOUT_MS = 90_000;
 
@@ -36,15 +37,22 @@ function writeMessage(child, message) {
 }
 
 async function stopChild(child) {
-  if (child.exitCode !== null || child.signalCode !== null) return;
+  if (child.exitCode !== null || child.signalCode !== null) return false;
   await writeMessage(child, { type: "shutdown" }).catch(() => {});
-  if (await waitForExit(child, 5_000)) return;
+  if (await waitForExit(child, 5_000)) return false;
   if (!child.kill("SIGTERM") && child.exitCode === null && child.signalCode === null) {
-    throw new Error("Browser helper verification process refused termination");
+    throw new DiagnosticError({ code: "browser_helper_shutdown_failed", message: "Browser helper refused termination after its shutdown deadline", origin: "launcher", stage: "browser-helper-cleanup" });
+  }
+  if (await waitForExit(child, 2_000)) return true;
+  // A helper can remain in Chromium or diagnostics cleanup after delivering its result.
+  // Reap that owned process rather than leaking it or failing a completed smoke test.
+  if (!child.kill("SIGKILL") && child.exitCode === null && child.signalCode === null) {
+    throw new DiagnosticError({ code: "browser_helper_shutdown_failed", message: "Browser helper refused forced termination", origin: "launcher", stage: "browser-helper-cleanup" });
   }
   if (!await waitForExit(child, 2_000)) {
-    throw new Error("Browser helper verification process did not exit after termination");
+    throw new DiagnosticError({ code: "browser_helper_shutdown_failed", message: "Browser helper did not exit after forced termination", origin: "launcher", stage: "browser-helper-cleanup" });
   }
+  return true;
 }
 
 async function runBrowserHelperOperation({ helper, descriptorPath, appName, operation, payload = {}, logger }) {
@@ -151,7 +159,8 @@ async function runBrowserHelperOperation({ helper, descriptorPath, appName, oper
     primaryError = error instanceof Error ? error : new Error(String(error));
   }
   try {
-    await stopChild(child);
+    const forced = await stopChild(child);
+    if (forced) logger?.info("browser.helper_forced_exit", { operation });
   } catch (cleanupError) {
     const cleanup = cleanupError instanceof Error ? cleanupError.message : String(cleanupError);
     if (primaryError) throw new Error(`${primaryError.message}; browser helper cleanup failed: ${cleanup}`);

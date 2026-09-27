@@ -84,13 +84,16 @@ export class DiagnosticStore {
     const database = new Database(this.file, { readonly: this.readonly, create: !this.readonly, strict: true });
     try {
       // A second owned worker can briefly hold the WAL writer lock during a large capture.
-      // Wait inside SQLite before BEGIN IMMEDIATE; the client keeps a separate five-second
-      // request boundary and never resubmits a capture with an uncertain outcome.
+      // Wait inside SQLite before BEGIN IMMEDIATE; the client keeps a separate bounded
+      // write deadline and never resubmits a capture with an uncertain outcome.
       database.exec("PRAGMA busy_timeout=3000; PRAGMA foreign_keys=ON");
       const version = (database.query("PRAGMA user_version").get() as { user_version: number }).user_version;
       if (version > SCHEMA_VERSION || this.readonly && version !== SCHEMA_VERSION) throw new Error("Diagnostics schema is not supported by this build; use the matching launcher");
       if (!this.readonly) {
-        database.exec("PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL; PRAGMA wal_autocheckpoint=256; PRAGMA journal_size_limit=1048576");
+        // Large campaign attachments and ordinary spans share this WAL across workers. A 1 MiB
+        // auto-checkpoint forced frequent disk syncs under sustained capture; keep a bounded
+        // 8 MiB interval and a 16 MiB reusable journal instead.
+        database.exec("PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL; PRAGMA wal_autocheckpoint=2048; PRAGMA journal_size_limit=16777216");
         if (process.platform !== "win32") chmodSync(this.file, 0o600);
         if (version === 0) database.transaction(() => {
           if ((database.query("PRAGMA user_version").get() as { user_version: number }).user_version !== 0) return;

@@ -14,9 +14,9 @@ type Pending = { resolve: (value: unknown) => void; reject: (error: Error) => vo
 const MAX_QUEUE_BYTES = 4 * 1024 * 1024;
 // SQLite may be waiting on host I/O after it reports commit progress. Grant one bounded
 // extension for the default write budget; explicit short caller deadlines stay authoritative.
-const COMMIT_PROGRESS_GRACE_MS = 15_000;
-const DEFAULT_WRITE_REQUEST_MS = 20_000;
-const MAX_COMMIT_REQUEST_MS = 35_000;
+const COMMIT_PROGRESS_GRACE_MS = 30_000;
+const DEFAULT_WRITE_REQUEST_MS = 60_000;
+const MAX_COMMIT_REQUEST_MS = 90_000;
 // Campaign documents and ordinary spans share one worker. Either can enter behind the other's
 // in-budget SQLite commit, so both write classes need bounded queue admission plus commit time.
 
@@ -208,7 +208,7 @@ export class DiagnosticsClient {
         ...(request.method === "content-capture" ? { action: request.command.action } : {}),
         requestedAt, deadlineAt: requestedAt + timeout, timeoutMs: timeout,
         inputWriteCompleted: false, cpuUsage: process.cpuUsage(), maxEventLoopLagMs: 0 };
-      if (timeout === DEFAULT_WRITE_REQUEST_MS && (request.method === "append" || request.method === "content-capture")) {
+      if ((timeout === 5000 || timeout === DEFAULT_WRITE_REQUEST_MS) && (request.method === "append" || request.method === "content-capture")) {
         let extended = false;
         pending.extendForCommit = () => {
           if (extended) return;

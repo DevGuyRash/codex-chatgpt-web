@@ -1197,6 +1197,10 @@ export const browserStageTimeouts = {
   promptAttachment: 60_000,
   fileAttachment: 120_000,
   send: 20_000,
+  // Native compaction carries a substantially larger retained history. Give its one owned Send
+  // the same acknowledgement budget as a staged context commit; timeout still leaves submission
+  // uncertain and never authorizes an automatic replay.
+  compactionSend: 180_000,
   // A Bigger Context stage posts a much larger payload onto a conversation that already holds the
   // earlier parts. This budget covers ChatGPT accepting the submission, not just the click.
   multipartStageSend: 180_000,
@@ -4873,7 +4877,8 @@ export class ChatGptBrowserWorker {
         "send",
         // A multipart commit lands on a conversation already carrying every staged part, so it
         // needs the same acceptance headroom the stages themselves get.
-        prepared.multipart ? browserStageTimeouts.multipartStageSend : browserStageTimeouts.send,
+        prepared.multipart ? browserStageTimeouts.multipartStageSend
+          : turn.compaction ? browserStageTimeouts.compactionSend : browserStageTimeouts.send,
         (stageSignal) => this.sendAttachedPrompt(
           page,
           submissionBaseline,

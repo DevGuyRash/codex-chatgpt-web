@@ -156,6 +156,31 @@ test("large-history campaign coverage requires preparation and its retained-cont
   expect(liveBatchOutcomes([cell], batch).get(cell.id)?.status).toBe("passed");
 });
 
+test("native compaction settlement accepts its full multipart preparation sequence only with matching turns", () => {
+  const cell = { ...cells[0]!, variant: { id: "compaction", driver: "app-server" as const } };
+  const batch = completedBatch(); batch.cells = [batch.cells[0]!];
+  const item = batch.cells[0]!;
+  item.variant = "compaction";
+  item.selections!.turns = 4;
+  const threadId = item.result!.terminal.threadId!;
+  const turns = [0, 1, 2, 3].map(index => ({ id: `turn-${index}`, status: "completed" as const, items: [] }));
+  item.result!.terminal = { status: "completed", threadId, variant: "compaction", toolItems: 1,
+    scenario: { variant: "compaction", turns, compaction: { threadId, turnId: "compact-turn", itemId: "compact-item", turn: { id: "compact-turn", status: "completed", items: [] } },
+      historyWitnessSha256: "c".repeat(64), multipartContext: { notes: 3_600, records: 3, sha256: "d".repeat(64) } } };
+  item.result!.oracle.artifacts.push({ path: "output/history-witness.txt", bytes: 41, sha256: "c".repeat(64) });
+  expect(liveBatchOutcomes([cell], batch).get(cell.id)?.status).toBe("passed");
+  item.selections!.turns = 2;
+  expect(() => liveBatchOutcomes([cell], batch)).toThrow("Compaction coverage");
+  item.selections!.turns = 4;
+  turns[3]!.id = turns[2]!.id;
+  expect(() => liveBatchOutcomes([cell], batch)).toThrow("Compaction coverage");
+  turns[3]!.id = "turn-3";
+  const scenario = item.result!.terminal.scenario;
+  if (!scenario || !("multipartContext" in scenario) || !scenario.multipartContext) throw new Error("Missing multipart fixture");
+  scenario.multipartContext.records = 2;
+  expect(() => liveBatchOutcomes([cell], batch)).toThrow("Compaction coverage");
+});
+
 test("native image campaign coverage requires the attached fixture and interpreted output", () => {
   const cell = { ...cells[0]!, variant: { id: "tool-image", driver: "exec" as const } };
   expect(canExecuteLiveCell(cell)).toBe(true);

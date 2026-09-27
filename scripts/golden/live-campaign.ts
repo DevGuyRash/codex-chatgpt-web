@@ -14,6 +14,9 @@ import { DiagnosticError } from "../../src/diagnostics/problems";
 type LiveBatchResult = Awaited<ReturnType<typeof runLiveBatch>>;
 type LiveCellResult = LiveBatchResult["cells"][number];
 type LiveBatchSettlement = Pick<LiveBatchResult, "cells" | "protocol" | "incomplete" | "evidenceExport" | "problem" | "bundleSha256" | "evidence" | "admission">;
+const multipartContext = (value: unknown): value is { records: number; notes: number; sha256: string } =>
+  value !== null && typeof value === "object" && "records" in value && typeof value.records === "number"
+  && "notes" in value && typeof value.notes === "number" && "sha256" in value && typeof value.sha256 === "string";
 
 /** Availability is separate from applicability: unavailable coordinators stay pending in the full matrix. */
 export function canExecuteLiveCell(cell: GoldenCell): boolean {
@@ -58,8 +61,14 @@ function finiteCellOutcome(cell: GoldenCell, result: LiveCellResult, batch: Live
     const scenario = "scenario" in proof.terminal ? proof.terminal.scenario : undefined;
     const compact = scenario && "compaction" in scenario ? scenario.compaction as NativeCompaction : undefined;
     const witnessSha256 = scenario && "historyWitnessSha256" in scenario ? scenario.historyWitnessSha256 : undefined;
+    const rawMultipart = scenario && "multipartContext" in scenario ? scenario.multipartContext : undefined;
+    const multipart = multipartContext(rawMultipart) ? rawMultipart : undefined;
+    const expectedTurns = multipart ? multipart.records + 1 : 2;
     if (!scenario || !compact || compact.threadId !== proof.terminal.threadId || compact.turn.status !== "completed" || compact.turn.id !== compact.turnId
-      || !compact.itemId || scenario.turns.length !== 2 || scenario.turns.some(turn => turn.status !== "completed" || turn.id === compact.turnId)
+      || !compact.itemId || rawMultipart !== undefined && (!multipart || multipart.records !== 3 || multipart.notes !== 3_600 || !/^[a-f\d]{64}$/.test(multipart.sha256))
+      || scenario.turns.length !== expectedTurns || result.selections.turns < expectedTurns
+      || new Set(scenario.turns.map(turn => turn.id)).size !== expectedTurns
+      || scenario.turns.some(turn => turn.status !== "completed" || turn.id === compact.turnId)
       || typeof witnessSha256 !== "string" || !/^[a-f\d]{64}$/.test(witnessSha256)
       || !proof.oracle.artifacts.some(artifact => artifact.path === "output/history-witness.txt" && artifact.sha256 === witnessSha256)) {
       throw new Error("Compaction coverage requires the exact native item and terminal between completed same-task turns, plus a committed retained-context witness");

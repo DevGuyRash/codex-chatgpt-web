@@ -166,8 +166,7 @@ async function runBrowserHelperOperation({ helper, descriptorPath, appName, oper
     const forced = await stopChild(child);
     if (forced) logger?.info("browser.helper_forced_exit", { operation });
   } catch (cleanupError) {
-    const cleanup = cleanupError instanceof Error ? cleanupError.message : String(cleanupError);
-    if (primaryError) throw new Error(`${primaryError.message}; browser helper cleanup failed: ${cleanup}`);
+    if (primaryError) throw new AggregateError([primaryError, cleanupError], "Browser helper operation and cleanup both failed");
     throw cleanupError;
   } finally {
     output.close();

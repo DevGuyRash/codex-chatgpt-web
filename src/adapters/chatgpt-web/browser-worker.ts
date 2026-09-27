@@ -941,6 +941,8 @@ export async function resolveChatGptToolConfirmation(
   const ownedAction = async (name: string | RegExp): Promise<{ button: Locator; depth: number }> => {
     let scope = dialog;
     for (let depth = 0; depth <= 4; depth += 1) {
+      const tag = await scope.evaluate(element => element.tagName).catch(() => "");
+      if (tag === "BODY" || tag === "HTML") break;
       const button = scope.getByRole("button", { name }).filter({ visible: true });
       const count = await button.count();
       if (count > 1) throw new ChatGptWebAdapterError(
@@ -948,8 +950,6 @@ export async function resolveChatGptToolConfirmation(
         { status: 502, errorType: "server_error", code: "chatgpt_connector_approval_ambiguous", retryable: false, source: "chatgpt-ui" },
       );
       if (count === 1) return { button, depth };
-      const tag = await scope.evaluate(element => element.tagName).catch(() => "");
-      if (tag === "BODY" || tag === "HTML") break;
       scope = scope.locator("xpath=..");
     }
     throw new ChatGptWebAdapterError(

@@ -2774,6 +2774,7 @@ function toolConfirmationPage(options: {
       expect(hasText).toBe("Allow ChatGPT to use Codex Native?");
       return dialog;
     },
+    evaluate: async () => "DIV",
     last: () => dialog,
     isVisible: async () => {
       reads += 1;

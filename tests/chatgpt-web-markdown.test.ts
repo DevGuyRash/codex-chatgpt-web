@@ -11,6 +11,16 @@ test("native plan delimiters survive rendered Markdown without escaping their pr
   expect(chatGptHtmlToMarkdown('<p>Discuss &lt;proposed_plan&gt; in prose.</p>')).not.toMatch(/^<proposed_plan>/);
 });
 
+test("native Plan delimiters survive the modern grouped response container and streamed inline segments", () => {
+  const grouped = '<div>&lt;proposed_plan&gt;\n# Synthetic plan\n\n<h2>Summary</h2><p>Reconcile the rows.</p>&lt;/proposed_plan&gt;</div>';
+  expect(chatGptHtmlToMarkdown(grouped)).toBe('<proposed_plan>\n# Synthetic plan\n\n## Summary\n\nReconcile the rows.\n</proposed_plan>');
+  expect(chatGptHtmlToMarkdown('<span>&lt;proposed_plan&gt;\n# Synthetic plan\n\n</span>'))
+    .toBe('<proposed_plan>\n# Synthetic plan');
+  expect(chatGptHtmlToMarkdown('<span>&lt;/proposed_plan&gt;</span>')).toBe('</proposed_plan>');
+  expect(chatGptHtmlToMarkdown('<blockquote><span>&lt;proposed_plan&gt;\nExample</span></blockquote>'))
+    .not.toMatch(/^<proposed_plan>/);
+});
+
 test("turns observed inline file path formats into Markdown links", () => {
   const cases = [
     {

@@ -13,14 +13,39 @@ const turndown = new TurndownService({
 
 turndown.use(gfm);
 turndown.remove(["button", "script", "style"]);
-// These standalone text delimiters are consumed by Codex's native plan parser.
-// Preserve only plain paragraph text: code, quoted examples and inline prose retain
-// their normal Markdown representation, and we never synthesize a closing tag.
+// ChatGPT renders a Plan delimiter either as its own paragraph/span or as direct
+// text before and after block children in one div. Turndown otherwise escapes the
+// underscore and joins the opening tag to the title, losing Codex's native Plan item.
+const planOpen = "<proposed_plan>";
+const planClose = "</proposed_plan>";
+const outsideExample = (node: Node) => {
+  for (let ancestor = node.parentNode; ancestor; ancestor = ancestor.parentNode) {
+    if (["CODE", "PRE", "BLOCKQUOTE"].includes(ancestor.nodeName)) return false;
+  }
+  return true;
+};
 turndown.addRule("nativePlanDelimiter", {
-  filter: node => node.nodeName === "P" && node.childNodes.length === 1
-    && node.firstChild?.nodeType === 3
-    && /^<\/?proposed_plan>$/.test((node.textContent ?? "").trim()),
-  replacement: (_content, node) => `\n\n${node.textContent!.trim()}\n\n`,
+  filter: node => ["P", "SPAN", "DIV"].includes(node.nodeName) && outsideExample(node) && (
+    node.childNodes.length === 1 && node.firstChild?.nodeType === 3 && (
+      /^<\/?proposed_plan>$/.test((node.textContent ?? "").trim())
+      || /^<proposed_plan>\s/.test(node.textContent ?? "")
+    )
+    || node.nodeName === "DIV" && node.childNodes.length > 1
+      && node.firstChild?.nodeType === 3 && node.lastChild?.nodeType === 3
+      && /^<proposed_plan>\s/.test(node.firstChild.textContent ?? "")
+      && (node.lastChild.textContent ?? "").trimEnd() === planClose
+  ),
+  replacement: (content, node) => {
+    const raw = node.textContent ?? "";
+    if (node.childNodes.length === 1 && raw.trim() === planClose) return `\n\n${planClose}\n\n`;
+    if (node.childNodes.length === 1 && raw.trim() === planOpen) return `\n\n${planOpen}\n\n`;
+    if (node.childNodes.length === 1) return `\n\n${planOpen}\n${raw.slice(planOpen.length).trimStart()}\n\n`;
+    const body = content.trim()
+      .replace(/^<proposed\\?_plan>\s*/, "")
+      .replace(/\s*<\/proposed\\?_plan>$/, "")
+      .trim();
+    return `\n\n${planOpen}\n${body}\n${planClose}\n\n`;
+  },
 });
 turndown.addRule("removeImages", {
   filter: node => ["IMG", "PICTURE", "SOURCE"].includes(node.nodeName),

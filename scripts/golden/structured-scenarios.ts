@@ -90,10 +90,10 @@ export async function runStructuredScenario(options: {
     // native messages instead of making one giant user record that no stage can carry. The
     // original source files and witness remain artifact authority.
     const notes = options.exerciseMultipartTransport
-      ? Array.from({ length: 3_000 }, (_, index) => `Background note ${index + 1}: ${createHash("sha256").update(`${workload.id}:multipart:${index}`).digest("hex")}. This is not an artifact input.`)
+      ? Array.from({ length: 3_600 }, (_, index) => `Background note ${index + 1}: ${createHash("sha256").update(`${workload.id}:multipart:${index}`).digest("hex")}. This is not an artifact input.`)
       : [];
-    completed(await finish(await start(`${prompts.prepare}\n\nRetain this exact runner-owned fact for the continuation: ${witness}. Do not write files or commit during preparation.${notes.length ? `\n\n${notes.slice(0, 1_500).join("\n")}` : ""}`)));
-    if (notes.length) completed(await finish(await start(`Continue preparing the same task without implementing it. Keep the earlier runner-owned fact for the later continuation. These further notes are background, not artifact inputs:\n\n${notes.slice(1_500).join("\n")}`)));
+    completed(await finish(await start(`${prompts.prepare}\n\nRetain this exact runner-owned fact for the continuation: ${witness}. Do not write files or commit during preparation.${notes.length ? `\n\n${notes.slice(0, 1_200).join("\n")}` : ""}`)));
+    for (let part = 1; part < (notes.length ? 3 : 1); part++) completed(await finish(await start(`Continue preparing the same task without implementing it. Keep the earlier runner-owned fact for the later continuation. These further notes are background, not artifact inputs:\n\n${notes.slice(part * 1_200, (part + 1) * 1_200).join("\n")}`)));
     signal.throwIfAborted();
     await options.beforeGeneration?.(signal);
     const compaction = await app.compact({ signal, timeoutMs }).catch(error => {
@@ -103,7 +103,7 @@ export async function runStructuredScenario(options: {
     if (compaction.threadId !== threadId || compaction.turn.status !== "completed" || compaction.turn.id !== compaction.turnId || turns.some(turn => turn.id === compaction.turnId)) throw new NativeScenarioFailure(threadId, [...turns, compaction.turn]);
     completed(await finish(await start(`${prompts.continue} Also write output/history-witness.txt with the exact fact retained through compaction followed by a newline; do not guess it from repository files.`)));
     return { variant, turns, compaction, historyWitnessSha256: createHash("sha256").update(`${witness}\n`).digest("hex"),
-      ...(notes.length ? { multipartContext: { notes: notes.length, records: 2, sha256: createHash("sha256").update(notes.join("\n")).digest("hex") } } : {}) };
+      ...(notes.length ? { multipartContext: { notes: notes.length, records: 3, sha256: createHash("sha256").update(notes.join("\n")).digest("hex") } } : {}) };
   }
   if (variant === "plan-revise-execute") {
     const planHashes: string[] = [];

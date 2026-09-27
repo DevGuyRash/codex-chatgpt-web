@@ -110,20 +110,21 @@ process.stdin.on("end",()=>process.exit(0));
       exerciseMultipartTransport: true,
       beforeGeneration: async () => { generationReservations++; },
       onRecord: async () => {}, checkpoint: () => {} });
-    expect(generationReservations).toBe(4);
-    expect(result).toMatchObject({ status: "completed", threadId: "thread-one", scenario: { turns: [{ id: "turn-1" }, { id: "turn-2" }, { id: "turn-3" }], compaction: { turnId: "compact-1", itemId: "compaction-item-1", turn: { status: "completed" } } } });
+    expect(generationReservations).toBe(5);
+    expect(result).toMatchObject({ status: "completed", threadId: "thread-one", scenario: { turns: [{ id: "turn-1" }, { id: "turn-2" }, { id: "turn-3" }, { id: "turn-4" }], compaction: { turnId: "compact-1", itemId: "compaction-item-1", turn: { status: "completed" } } } });
     const prompts = readFileSync(log, "utf8").trim().split("\n").map(line => JSON.parse(line) as { text: string });
-    expect(prompts).toHaveLength(3);
+    expect(prompts).toHaveLength(4);
     expect(prompts[0]!.text).toContain(largeHistoryWitness(workload));
-    expect(prompts[0]!.text).toContain("Background note 1500:");
-    expect(prompts[1]!.text).toContain("Background note 3000:");
+    expect(prompts[0]!.text).toContain("Background note 1200:");
+    expect(prompts[1]!.text).toContain("Background note 2400:");
     expect(prompts[1]!.text).not.toContain(largeHistoryWitness(workload));
-    expect(prompts[2]!.text).toContain("output/history-witness.txt");
-    expect(prompts[2]!.text).not.toContain("Background note 3000:");
-    expect(result).toMatchObject({ scenario: { multipartContext: { notes: 3000, records: 2 } } });
+    expect(prompts[2]!.text).toContain("Background note 3600:");
+    expect(prompts[3]!.text).toContain("output/history-witness.txt");
+    expect(prompts[3]!.text).not.toContain("Background note 3600:");
+    expect(result).toMatchObject({ scenario: { multipartContext: { notes: 3600, records: 3 } } });
     await expect(runNativeScenario({ executable: peer, cwd: root, env: { FAIL_COMPACT: "1" }, route: CHATGPT_WEB_MODEL_ROUTES[0]!, workload, variant: "compaction", signal: new AbortController().signal, timeoutMs: 2000,
       onRecord: async () => {}, checkpoint: () => {} })).rejects.toMatchObject({ code: "native_scenario_failed", nativeFailure: { threadId: "thread-one", turns: [{ status: "completed" }, { id: "compact-1", status: "failed" }] } });
-    expect(readFileSync(log, "utf8").trim().split("\n")).toHaveLength(4);
+    expect(readFileSync(log, "utf8").trim().split("\n")).toHaveLength(5);
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 

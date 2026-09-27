@@ -61,7 +61,7 @@ test("shared capture control admits only an explicitly scoped image and normal r
 test("campaign capture failures retain typed worker details through an independent collection worker", async () => {
   const root = mkdtempSync(join(tmpdir(), "campaign-capture-failure-"));
   const previousWorker = process.env.CODEX_CHATGPT_WEB_DIAGNOSTICS_WORKER, previousCampaign = process.env.CODEX_WEB_GPT_CAPTURE_CAMPAIGN_ID;
-  const script = `const { DiagnosticStore } = await import(${JSON.stringify(resolve("src/diagnostics/store.ts"))}); const original = DiagnosticStore.prototype.contentCapture; DiagnosticStore.prototype.contentCapture = function(command) { if (command.action === "write") Bun.sleepSync(6000); return original.call(this, command); }; const { runDiagnosticsWorker } = await import(${JSON.stringify(resolve("src/diagnostics/worker.ts"))}); await runDiagnosticsWorker(${JSON.stringify(join(root, "diagnostics", "observability"))});`;
+  const script = `const { DiagnosticStore } = await import(${JSON.stringify(resolve("src/diagnostics/store.ts"))}); const { DiagnosticRequestError } = await import(${JSON.stringify(resolve("src/diagnostics/request-error.ts"))}); const original = DiagnosticStore.prototype.contentCapture; DiagnosticStore.prototype.contentCapture = function(command) { if (command.action === "write") throw new DiagnosticRequestError("timeout", { method: "content-capture", action: "write", workerElapsedMs: 6000, inputWriteCompleted: true }); return original.call(this, command); }; const { runDiagnosticsWorker } = await import(${JSON.stringify(resolve("src/diagnostics/worker.ts"))}); await runDiagnosticsWorker(${JSON.stringify(join(root, "diagnostics", "observability"))});`;
   process.env.CODEX_CHATGPT_WEB_DIAGNOSTICS_WORKER = JSON.stringify({ executable: process.execPath, args: ["-e", script] });
   const campaignId = crypto.randomUUID(); process.env.CODEX_WEB_GPT_CAPTURE_CAMPAIGN_ID = campaignId;
   const sink = new DiagnosticsClient({ executable: process.execPath, args: [resolve("src/cli.ts"), "--home", root, "diagnostics", "worker"] });
@@ -83,7 +83,8 @@ test("campaign capture failures retain typed worker details through an independe
     expect(findings).toContain("workerElapsedMs=");
     expect(findings).toContain("inputWriteCompleted=true");
     expect(events.some(event => event.name === "capture.campaign_failed" && event.attributes.problemCode === "timeout")).toBe(true);
-    expect(events.some(event => event.problem?.code === "unavailable" && event.problem.stage === "capture.omission")).toBe(true);
+    expect(events.some(event => event.problem?.code === "unavailable" && event.problem.stage === "capture.omission")).toBe(false);
+    expect(await control.contentCapture({ action: "manifest", campaignId })).toMatchObject({ omitted: 1 });
     expect(JSON.stringify(events)).not.toContain(payload);
   } finally {
     await closeRuntimeDiagnostics(); await sink.close();

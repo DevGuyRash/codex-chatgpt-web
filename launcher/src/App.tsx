@@ -1272,12 +1272,13 @@ function SetupSurface({
             title={copy.stepAccount}
           />
           <SetupRow
-            action={snapshot.smokePassed ? copy.smokePassed : copy.runSmoke}
+            action={copy.runSmoke}
             complete={snapshot.smokePassed}
             description={copy.stepSmokeBody}
             disabled={busy || !browser?.authenticated}
             index={2}
             onAction={smoke}
+            repeatable
             title={copy.stepSmoke}
           />
         </> : null}

@@ -193,6 +193,7 @@ export async function runLiveBatch(options: {
             await evidence.capture(item.traceId, "oracle", JSON.stringify({ workload: cell.workload, baseline: cell.baseline, nativeCatalogSha256, cellId: cell.request.id }));
             const terminal = await cellOperation.run(() => runNativeScenario({ executable: options.executable, cwd: cell.task, env: nativeEnv, route: cell.request.route, modelProvider: "golden", workload: cell.workload, variant: cell.request.variant, signal: options.signal, timeoutMs: options.turnTimeoutMs,
               beforeGeneration: signal => paceGoldenGeneration(root, signal),
+              exerciseMultipartTransport: options.experimentalBiggerContext === true && cell.request.variant === "compaction",
               modelSwitch: switches.get(cell.request.id),
               ...(cell.request.variant === "tool-image" ? { imagePath: join(cell.task, "input/label.png") } : {}),
               onRecord: (category, text, phase, receivedAtMs) => captureLane.record(category, text, phase, receivedAtMs),

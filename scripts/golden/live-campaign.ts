@@ -6,7 +6,7 @@ import type { GoldenOutcome } from "./queue";
 import type { GoldenAttempt } from "./runner";
 import { goldenScenarioTerminations } from "./observations";
 import { GoldenAdmissionSuspended, nativeAdmissionObservation } from "./admission";
-import { nativePlanHashes } from "./app-server";
+import { nativePlanHashes, type NativeCompaction } from "./app-server";
 import { GOLDEN_UNICODE_WITNESS } from "./workloads";
 import { createHash } from "node:crypto";
 import { DiagnosticError } from "../../src/diagnostics/problems";
@@ -56,7 +56,7 @@ function finiteCellOutcome(cell: GoldenCell, result: LiveCellResult, batch: Live
   }
   if (cell.variant.id === "compaction") {
     const scenario = "scenario" in proof.terminal ? proof.terminal.scenario : undefined;
-    const compact = scenario && "compaction" in scenario ? scenario.compaction : undefined;
+    const compact = scenario && "compaction" in scenario ? scenario.compaction as NativeCompaction : undefined;
     const witnessSha256 = scenario && "historyWitnessSha256" in scenario ? scenario.historyWitnessSha256 : undefined;
     if (!scenario || !compact || compact.threadId !== proof.terminal.threadId || compact.turn.status !== "completed" || compact.turn.id !== compact.turnId
       || !compact.itemId || scenario.turns.length !== 2 || scenario.turns.some(turn => turn.status !== "completed" || turn.id === compact.turnId)

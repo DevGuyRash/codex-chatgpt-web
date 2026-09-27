@@ -43,6 +43,7 @@ export async function runNativeScenario(options: {
   checkpoint(input: NativeScenarioCheckpoint): void | Promise<void>;
   observeQueue?: Parameters<typeof runStructuredScenario>[0]["observeQueue"];
   beforeGeneration?: (signal: AbortSignal) => Promise<void>;
+  exerciseMultipartTransport?: boolean;
 }) {
   options.signal.throwIfAborted();
   if (!["fresh", "formats", "unicode", "tool-image", "large-history", "continued", "compaction", "resumed", "archived-history", "model-switch", "plan-revise-execute", "plan-stream-interrupt", "plan-tui-execute"].includes(options.variant) && !/^(?:steer|stop)-(?:reasoning|generation|tools|queue)(?:-image|-continue)?$/.test(options.variant)) throw new Error(`No native scenario implementation for ${options.variant}`);

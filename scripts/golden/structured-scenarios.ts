@@ -50,6 +50,7 @@ export async function runStructuredScenario(options: {
   observeQueue?(input: { threadId: string; signal: AbortSignal; timeoutMs: number }): Promise<PhaseObservation>;
   checkpoint(input: { threadId: string; turnId: string }): void | Promise<void>;
   beforeGeneration?: (signal: AbortSignal) => Promise<void>;
+  exerciseMultipartTransport?: boolean;
 }) {
   const { app, workload, variant, signal, timeoutMs } = options;
   signal.throwIfAborted();
@@ -85,7 +86,13 @@ export async function runStructuredScenario(options: {
   }
   if (variant === "compaction") {
     const witness = largeHistoryWitness(workload);
-    completed(await finish(await start(`${prompts.prepare}\n\nRetain this exact runner-owned fact for the continuation: ${witness}. Do not write files or commit during preparation.`)));
+    // A measured Pro-account threshold is far above the ordinary fixture. These inert notes
+    // keep the same workload and native task while making an explicit Bigger Context cell cross
+    // the transport threshold; only the source files and witness remain artifact authority.
+    const background = options.exerciseMultipartTransport
+      ? Array.from({ length: 5_000 }, (_, index) => `Background note ${index + 1}: ${createHash("sha256").update(`${workload.id}:multipart:${index}`).digest("hex")}. This is not an artifact input.`).join("\n")
+      : "";
+    completed(await finish(await start(`${prompts.prepare}\n\nRetain this exact runner-owned fact for the continuation: ${witness}. Do not write files or commit during preparation.${background ? `\n\n${background}` : ""}`)));
     signal.throwIfAborted();
     await options.beforeGeneration?.(signal);
     const compaction = await app.compact({ signal, timeoutMs }).catch(error => {
@@ -94,7 +101,8 @@ export async function runStructuredScenario(options: {
     });
     if (compaction.threadId !== threadId || compaction.turn.status !== "completed" || compaction.turn.id !== compaction.turnId || compaction.turnId === turns[0]!.id) throw new NativeScenarioFailure(threadId, [...turns, compaction.turn]);
     completed(await finish(await start(`${prompts.continue} Also write output/history-witness.txt with the exact fact retained through compaction followed by a newline; do not guess it from repository files.`)));
-    return { variant, turns, compaction, historyWitnessSha256: createHash("sha256").update(`${witness}\n`).digest("hex") };
+    return { variant, turns, compaction, historyWitnessSha256: createHash("sha256").update(`${witness}\n`).digest("hex"),
+      ...(background ? { multipartContext: { notes: 5_000, sha256: createHash("sha256").update(background).digest("hex") } } : {}) };
   }
   if (variant === "plan-revise-execute") {
     const planHashes: string[] = [];

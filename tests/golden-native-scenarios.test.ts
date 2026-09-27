@@ -107,6 +107,7 @@ process.stdin.on("end",()=>process.exit(0));
   try {
     let generationReservations = 0;
     const result = await runNativeScenario({ executable: peer, cwd: root, env: {}, route: CHATGPT_WEB_MODEL_ROUTES[0]!, workload, variant: "compaction", signal: new AbortController().signal, timeoutMs: 2000,
+      exerciseMultipartTransport: true,
       beforeGeneration: async () => { generationReservations++; },
       onRecord: async () => {}, checkpoint: () => {} });
     expect(generationReservations).toBe(3);
@@ -114,8 +115,11 @@ process.stdin.on("end",()=>process.exit(0));
     const prompts = readFileSync(log, "utf8").trim().split("\n").map(line => JSON.parse(line) as { text: string });
     expect(prompts).toHaveLength(2);
     expect(prompts[0]!.text).toContain(largeHistoryWitness(workload));
+    expect(prompts[0]!.text).toContain("Background note 5000:");
     expect(prompts[1]!.text).toContain("output/history-witness.txt");
     expect(prompts[1]!.text).not.toContain(largeHistoryWitness(workload));
+    expect(prompts[1]!.text).not.toContain("Background note 5000:");
+    expect(result).toMatchObject({ scenario: { multipartContext: { notes: 5000 } } });
     await expect(runNativeScenario({ executable: peer, cwd: root, env: { FAIL_COMPACT: "1" }, route: CHATGPT_WEB_MODEL_ROUTES[0]!, workload, variant: "compaction", signal: new AbortController().signal, timeoutMs: 2000,
       onRecord: async () => {}, checkpoint: () => {} })).rejects.toMatchObject({ code: "native_scenario_failed", nativeFailure: { threadId: "thread-one", turns: [{ status: "completed" }, { id: "compact-1", status: "failed" }] } });
     expect(readFileSync(log, "utf8").trim().split("\n")).toHaveLength(3);

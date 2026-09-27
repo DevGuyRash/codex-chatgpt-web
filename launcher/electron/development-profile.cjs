@@ -5,6 +5,13 @@ const { writePrivateFileAtomic } = require("./atomic-file.cjs");
 
 const SHORTCUT_NAME = "codex-web-gpt-dev.desktop";
 const MANAGED_MARKER = "X-Codex-Web-GPT-Managed=true";
+const DEVELOPMENT_UNSET_ENV_KEYS = Object.freeze([
+  "CODEX_CHATGPT_WEB_HOME", "CODEX_HOME", "CODEX_WEB_GPT_LAUNCHER_DATA_DIR",
+  "CODEX_WEB_GPT_CAPTURE_CAMPAIGN_ID", "CODEX_CHATGPT_WEB_BROWSER_HOST_DESCRIPTOR",
+  "CODEX_WEB_GPT_LAUNCHER_CONTROL_TOKEN", "CODEX_CHATGPT_WEB_DIAGNOSTICS_WORKER",
+  "CODEX_CHATGPT_WEB_DIAGNOSTICS_FD", "CODEX_CHATGPT_WEB_TRACEPARENT",
+  "ELECTRON_RUN_AS_NODE", "OPENAI_API_KEY", "CODEX_API_KEY",
+]);
 
 function defaultDevelopmentHome(homeDir = os.homedir()) {
   return path.join(homeDir, ".codex-chatgpt-web-dev");
@@ -39,7 +46,7 @@ function validateDevelopmentHome(home, protectedHomes) {
 
 function developmentLaunchEnvironment(source, home) {
   const env = { ...source };
-  for (const key of ["CODEX_CHATGPT_WEB_HOME", "CODEX_HOME", "CODEX_WEB_GPT_LAUNCHER_DATA_DIR", "CODEX_WEB_GPT_CAPTURE_CAMPAIGN_ID", "CODEX_CHATGPT_WEB_BROWSER_HOST_DESCRIPTOR", "CODEX_WEB_GPT_LAUNCHER_CONTROL_TOKEN", "ELECTRON_RUN_AS_NODE", "OPENAI_API_KEY", "CODEX_API_KEY"]) delete env[key];
+  for (const key of DEVELOPMENT_UNSET_ENV_KEYS) delete env[key];
   env.CODEX_WEB_GPT_DEV_HOME = home;
   return env;
 }
@@ -49,7 +56,9 @@ function desktopArgument(value) {
 }
 
 function developmentDesktopEntry(home, executable, icon) {
-  return `[Desktop Entry]\nType=Application\nVersion=1.0\nName=Codex Web GPT DEV\nComment=Open the isolated development profile\nExec=/usr/bin/env ${desktopArgument(`CODEX_WEB_GPT_DEV_HOME=${home}`)} ${desktopArgument(executable)} --dev-profile\nTryExec=${desktopArgument(executable)}\nIcon=${icon}\nTerminal=false\nCategories=Development;\nStartupWMClass=codex-web-gpt-dev\n${MANAGED_MARKER}\n`;
+  if ([home, executable, icon].some(value => /[\r\n\0]/.test(value))) throw new Error("DEV shortcut paths cannot contain control characters");
+  const unsets = DEVELOPMENT_UNSET_ENV_KEYS.map(key => `-u ${key}`).join(" ");
+  return `[Desktop Entry]\nType=Application\nVersion=1.0\nName=Codex Web GPT DEV\nComment=Open the isolated development profile\nExec=/usr/bin/env ${unsets} ${desktopArgument(`CODEX_WEB_GPT_DEV_HOME=${home}`)} ${desktopArgument(executable)} --dev-profile\nTryExec=${executable}\nIcon=${icon}\nTerminal=false\nCategories=Development;\nStartupWMClass=codex-web-gpt-dev\n${MANAGED_MARKER}\n`;
 }
 
 function installLinuxDevelopmentShortcut({ home, executable, iconSource, dataHome = process.env.XDG_DATA_HOME?.trim() || path.join(os.homedir(), ".local", "share") }) {

@@ -23,10 +23,10 @@ test("DEV launch keeps a separate home and clears inherited production authority
     fs.symlinkSync(dev, alias);
     assert.equal(validateDevelopmentHome(alias, [production, codex]), dev);
     assert.equal(defaultDevelopmentHome(root), path.join(root, ".codex-chatgpt-web-dev"));
-    const env = developmentLaunchEnvironment({ PATH: "/bin", CODEX_HOME: codex, CODEX_CHATGPT_WEB_HOME: production, CODEX_WEB_GPT_CAPTURE_CAMPAIGN_ID: "private", OPENAI_API_KEY: "secret" }, dev);
+    const env = developmentLaunchEnvironment({ PATH: "/bin", CODEX_HOME: codex, CODEX_CHATGPT_WEB_HOME: production, CODEX_WEB_GPT_CAPTURE_CAMPAIGN_ID: "private", CODEX_CHATGPT_WEB_DIAGNOSTICS_WORKER: "foreign-worker", CODEX_CHATGPT_WEB_TRACEPARENT: "foreign-parent", OPENAI_API_KEY: "secret" }, dev);
     assert.equal(env.CODEX_WEB_GPT_DEV_HOME, dev);
     assert.equal(env.PATH, "/bin");
-    for (const key of ["CODEX_HOME", "CODEX_CHATGPT_WEB_HOME", "CODEX_WEB_GPT_CAPTURE_CAMPAIGN_ID", "OPENAI_API_KEY"]) assert.equal(env[key], undefined);
+    for (const key of ["CODEX_HOME", "CODEX_CHATGPT_WEB_HOME", "CODEX_WEB_GPT_CAPTURE_CAMPAIGN_ID", "CODEX_CHATGPT_WEB_DIAGNOSTICS_WORKER", "CODEX_CHATGPT_WEB_TRACEPARENT", "OPENAI_API_KEY"]) assert.equal(env[key], undefined);
   } finally { fs.rmSync(root, { recursive: true, force: true }); }
 });
 
@@ -46,6 +46,9 @@ test("Linux DEV shortcut is distinct and preserves a contributor-managed entry",
     assert.equal(content, developmentDesktopEntry(home, executable, installedIcon));
     assert.match(content, /--dev-profile/);
     assert.match(content, /CODEX_WEB_GPT_DEV_HOME=/);
+    for (const key of ["CODEX_HOME", "CODEX_CHATGPT_WEB_HOME", "CODEX_WEB_GPT_CAPTURE_CAMPAIGN_ID", "CODEX_CHATGPT_WEB_DIAGNOSTICS_WORKER", "CODEX_CHATGPT_WEB_TRACEPARENT", "OPENAI_API_KEY"]) assert.ok(content.includes(`-u ${key}`));
+    assert.ok(content.includes(`TryExec=${executable}\n`));
+    assert.throws(() => developmentDesktopEntry(home, `${executable}\nunsafe`, installedIcon), /control characters/);
     assert.ok(content.includes(`Icon=${installedIcon}\n`));
     assert.equal(installLinuxDevelopmentShortcut({ home, executable, iconSource, dataHome: root }), "present");
     fs.writeFileSync(iconSource, "updated-dev-icon");

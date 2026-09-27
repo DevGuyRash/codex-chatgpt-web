@@ -139,7 +139,7 @@ async function runBrowserHelperOperation({ helper, descriptorPath, appName, oper
     )));
     timer = setTimeout(
       () => finish(new Error(`Browser helper ${operation} timed out`)),
-      BROWSER_HELPER_OPERATION_TIMEOUT_MS,
+      operation === "inspect" && payload.detectCapabilities === true ? 150_000 : BROWSER_HELPER_OPERATION_TIMEOUT_MS,
     );
   });
 

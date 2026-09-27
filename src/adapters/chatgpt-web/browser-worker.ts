@@ -2552,6 +2552,7 @@ export class ChatGptBrowserWorker {
   private async prepareTemporaryChatSurface(
     page: Page,
     captureDiagnostic?: (checkpoint: string) => Promise<void>,
+    composerTimeoutMs = 30_000,
   ): Promise<Locator> {
     // Launcher verification refreshes its owned page before attaching Playwright so a newly added
     // connector is present in the catalog. Navigating again here destroys that freshly hydrated
@@ -2566,7 +2567,7 @@ export class ChatGptBrowserWorker {
     }
     let composer: Locator;
     try {
-      composer = await this.activeComposer(page);
+      composer = await this.activeComposer(page, composerTimeoutMs);
     } catch {
       throw new Error("ChatGPT web login is expired or the Temporary Chat surface is unavailable");
     }
@@ -3803,7 +3804,10 @@ export class ChatGptBrowserWorker {
     proAvailable?: boolean;
   }> {
     const page = await this.ensurePage();
-    await this.prepareTemporaryChatSurface(page);
+    // A cold refreshed ChatGPT document can hydrate its composer well after network load and
+    // cookie authentication have completed. Keep this read-only capability probe bounded without
+    // treating a slow composer as proof of an expired login.
+    await this.prepareTemporaryChatSurface(page, undefined, detectCapabilities ? 90_000 : 30_000);
     const url = page.url();
     if (!detectCapabilities) return { authenticated: true, temporary: true, url };
     const capabilities = await detectChatGptAccountCapabilities(page);

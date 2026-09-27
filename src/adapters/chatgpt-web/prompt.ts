@@ -251,6 +251,21 @@ function plainMessageText(message: CodexMessage): string | undefined {
   return message.content.map(part => part.type === "text" ? part.text : "").join("\n");
 }
 
+/** Use only Codex's developer collaboration block; human text cannot select native Plan mode. */
+function activeNativePlanMode(messages: readonly CodexMessage[]): boolean {
+  let plan = false;
+  for (const message of messages) {
+    if (message.role !== "developer") continue;
+    const text = plainMessageText(message);
+    if (!text) continue;
+    for (const match of text.matchAll(/<collaboration_mode>([\s\S]*?)<\/collaboration_mode>/g)) {
+      const block = match[1]?.trimStart() ?? "";
+      plan = /^# Plan Mode \(Conversational\)/.test(block) && block.includes("<proposed_plan>");
+    }
+  }
+  return plan;
+}
+
 function startsWithControlBlock(message: CodexMessage, tag: string): boolean {
   return message.role === "developer" && plainMessageText(message)?.trimStart().startsWith(tag) === true;
 }
@@ -474,6 +489,7 @@ export function compileChatGptWebPrompt(
     throw new Error("A read-only ChatGPT Web effort must not receive a local-tool capability token");
   }
   const system = parsed.context.systemPrompt ?? [];
+  const nativePlanMode = !manualControl && mode.localTools && activeNativePlanMode(parsed.context.messages);
   const sharedContract = [
     "Act as the model backend for the Codex task encoded below.",
     multipartEnabled
@@ -513,7 +529,10 @@ export function compileChatGptWebPrompt(
       "Use actual Codex Native results as evidence for local observations and effects.",
       "A Codex Native MCP tool result may require context compaction. If it does, follow the compaction instructions in that result exactly.",
       "After a deterministic tool failure, update the working hypothesis from that result and inspect the relevant repository or environment before choosing a different next action; do not repeat the same call unless its inputs or observable state changed.",
-      "Continue using the available tools until the requested work is complete and verified.",
+      ...(nativePlanMode ? [
+        "The active Codex developer collaboration mode is Plan. Use local tools only for non-mutating investigation; do not implement the task or commit artifacts in this turn.",
+        "When presenting the official plan, preserve the exact standalone <proposed_plan> and </proposed_plan> lines required by that developer mode. Codex renders that block as a native Plan item; ordinary Markdown outside it cannot replace the Plan item.",
+      ] : ["Continue using the available tools until the requested work is complete and verified."]),
       "Write the user-facing final answer only after the last required tool result has settled. Do not call another tool after beginning that final answer.",
     ]
     : [
@@ -583,7 +602,7 @@ export function compileChatGptWebPrompt(
     : mode.localTools
     ? [
       "<codex_transport_resume>",
-      `The task context is complete. Pass turn_token ${turnToken} unchanged to every Codex Native call in this response, including continuations after tool results; do not expose it in the answer. Execute the latest active user request now.`,
+      `The task context is complete. Pass turn_token ${turnToken} unchanged to every Codex Native call in this response, including continuations after tool results; do not expose it in the answer. ${nativePlanMode ? "Continue the active Plan Mode contract. If the official plan is ready, return it inside the exact standalone <proposed_plan> block required by Codex; do not substitute an ordinary final answer." : "Execute the latest active user request now."}`,
       "</codex_transport_resume>",
     ]
     : [

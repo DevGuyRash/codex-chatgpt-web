@@ -1474,6 +1474,20 @@ describe("ChatGPT outer-native harness v4", () => {
     expect(files[0]?.buffer.length).toBeGreaterThan(0);
   });
 
+  test("tool-capable native Plan turns preserve the developer plan item contract after tools", () => {
+    const marker = "<collaboration_mode># Plan Mode (Conversational)\nWhen ready, wrap the official plan in <proposed_plan> and </proposed_plan>.\n</collaboration_mode>";
+    const plan = parsed(marker);
+    const compiled = compileChatGptWebPrompt(plan, toolCapabilities, "turn_123456789012345678901234");
+    expect(compiled.text).toContain("Codex renders that block as a native Plan item");
+    expect(compiled.text).toContain("Continue the active Plan Mode contract");
+    expect(compiled.text).not.toContain("Continue using the available tools until the requested work is complete and verified.");
+    const humanMarker = parsed();
+    humanMarker.context.messages[0]!.content = marker;
+    expect(compileChatGptWebPrompt(humanMarker, toolCapabilities, "turn_123456789012345678901234").text).not.toContain("Codex renders that block as a native Plan item");
+    plan.context.messages.push({ role: "developer", content: "<collaboration_mode># Collaboration Mode: Default</collaboration_mode>", timestamp: 3 });
+    expect(compileChatGptWebPrompt(plan, toolCapabilities, "turn_123456789012345678901234").text).not.toContain("Codex renders that block as a native Plan item");
+  });
+
   test("keeps only the newest complete Codex model-switch contract", () => {
     const history = [
       { role: "developer" as const, content: "<model_switch>old contract</model_switch>", timestamp: 1 },

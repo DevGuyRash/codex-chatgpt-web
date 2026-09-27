@@ -345,12 +345,13 @@ async function verify(message: VerifyMessage): Promise<void> {
     const selected = await maintenanceWorker(message).verifyConnector(message.id);
     writeProtocol({ type: "result", id: message.id, text: selected });
   } catch (error) {
+    const problem = problemFor(error, "Browser maintenance failed; inspect its stages", { stage: `browser.${message.type}` });
     writeProtocol({
       type: "error",
       id: message.id,
       name: error instanceof Error ? error.name : "Error",
-      message: error instanceof Error ? error.message : String(error),
-      problem: problemFor(error, "Browser maintenance failed; inspect its stages", { stage: `browser.${message.type}` }),
+      message: problem.message,
+      problem,
     });
   }
 }
@@ -383,12 +384,13 @@ async function maintain(message: InspectMessage | SmokeMessage): Promise<void> {
       : await worker.smokeTest(abortController.signal);
     writeProtocol({ type: "result", id: message.id, value });
   } catch (error) {
+    const problem = problemFor(error, "Browser maintenance failed; inspect its stages", { stage: `browser.${message.type}` });
     writeProtocol({
       type: "error",
       id: message.id,
       name: error instanceof Error ? error.name : "Error",
-      message: error instanceof Error ? error.message : String(error),
-      problem: problemFor(error, "Browser maintenance failed; inspect its stages", { stage: `browser.${message.type}` }),
+      message: problem.message,
+      problem,
     });
   } finally {
     abortControllers.delete(message.id);

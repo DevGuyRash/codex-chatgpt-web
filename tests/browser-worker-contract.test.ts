@@ -45,6 +45,24 @@ test("conversation turn identity survives ChatGPT DOM virtualization", () => {
   )).toThrow("2 new conversation turns");
 });
 
+test("pre-Send composer discovery recovers one stalled DOM read without erasing unrelated failures", async () => {
+  const worker = Object.create(ChatGptBrowserWorker.prototype) as {
+    activeComposer(page: unknown, timeoutMs: number): Promise<unknown>;
+    prepareTemporaryChatSurface(page: unknown): Promise<unknown>;
+  };
+  let reads = 0;
+  const composer = { count: async () => {
+    if (++reads === 1) throw new ChatGptBrowserObservationTimeoutError(5);
+    return 1;
+  }, first: () => "owned-composer" };
+  const page = { locator: () => ({ filter: () => composer }), isClosed: () => false };
+  expect(await worker.activeComposer(page, 1_000)).toBe("owned-composer");
+  expect(reads).toBe(2);
+  worker.activeComposer = async () => { throw new Error("renderer detached"); };
+  await expect(worker.prepareTemporaryChatSurface({ url: () => "https://chatgpt.com/?temporary-chat=true" }))
+    .rejects.toThrow("renderer detached");
+});
+
 test("modern assistant ownership follows the submitted user group through an older response remount", () => {
   const initialUsers = ["group:user:old"], initialAssistants = ["group:assistant:old"];
   const currentUsers = ["group:user:old", "group:user:current"];

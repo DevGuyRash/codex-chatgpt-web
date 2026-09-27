@@ -2529,13 +2529,21 @@ export class ChatGptBrowserWorker {
     let count = 0;
     while (Date.now() < deadline) {
       throwIfPromptAttachmentAborted(abortSignal);
-      count = await withBrowserTurnAbort(
-        withChatGptBrowserObservationTimeout(
-          composers.count(),
-          Math.max(1, Math.min(CHATGPT_BROWSER_OBSERVATION_PROBE_TIMEOUT_MS, deadline - Date.now())),
-        ),
-        abortSignal,
-      );
+      try {
+        count = await withBrowserTurnAbort(
+          withChatGptBrowserObservationTimeout(
+            composers.count(),
+            Math.max(1, Math.min(CHATGPT_BROWSER_OBSERVATION_PROBE_TIMEOUT_MS, deadline - Date.now())),
+          ),
+          abortSignal,
+        );
+      } catch (error) {
+        if (!(error instanceof ChatGptBrowserObservationTimeoutError) || page.isClosed()) throw error;
+        // A busy renderer can miss one bounded CDP observation while hydrating. No prompt has
+        // been sent yet; retry only this read until the owning composer deadline expires.
+        await withBrowserTurnAbort(new Promise(resolveSleep => setTimeout(resolveSleep, 250)), abortSignal);
+        continue;
+      }
       if (count === 1) return composers.first();
       await withBrowserTurnAbort(
         new Promise(resolveSleep => setTimeout(resolveSleep, 50)),
@@ -2568,8 +2576,12 @@ export class ChatGptBrowserWorker {
     let composer: Locator;
     try {
       composer = await this.activeComposer(page, composerTimeoutMs);
-    } catch {
-      throw new Error("ChatGPT web login is expired or the Temporary Chat surface is unavailable");
+    } catch (error) {
+      if (!(error instanceof Error) || !error.message.startsWith("ChatGPT composer is unavailable.")) throw error;
+      await throwIfChatGptSessionFailureAlert(page);
+      throw new ChatGptWebAdapterError("ChatGPT Temporary Chat composer did not become available", {
+        status: 503, errorType: "server_error", code: "chatgpt_composer_unavailable", retryable: false, source: "chatgpt-ui", cause: error,
+      });
     }
     if (await dismissChatGptTemporaryChatOnboarding(page)) {
       await captureDiagnostic?.("temporary-chat-onboarding-dismissed");

@@ -1205,9 +1205,9 @@ export function startServer(
   function shutdown(): void {
     if (shutdownPromise) return;
     draining = true;
-    chatGptTurnSessions.clear();
     shutdownPromise = (async () => {
       const results = await Promise.allSettled([
+        chatGptTurnSessions.clearAndReleaseRetained(),
         closeChatGptBrowserWorkers(),
         closeTurnBrokers(),
       ]);

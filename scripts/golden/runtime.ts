@@ -2,6 +2,7 @@ import { atomicWriteFile, getConfigPath, saveConfig, type AppConfig } from "../.
 import { startServer } from "../../src/server";
 import { connectTunnel, stopTunnel, tunnelStatus, waitForTunnelReady } from "../../src/tunnel";
 import { closeChatGptBrowserWorkers } from "../../src/adapters/chatgpt-web/browser-worker";
+import { chatGptTurnSessions } from "../../src/adapters/chatgpt-web/turn-execution";
 import { TurnBroker } from "../../src/adapters/chatgpt-web/turn-broker";
 import { prepareGoldenRuntimeConfig } from "./runtime-config";
 import { ownsProcess } from "./workspace";
@@ -74,6 +75,7 @@ export async function withGoldenRuntime<T>(input: Parameters<typeof prepareGolde
     const clean = async (name: string, action: () => unknown | Promise<unknown>) => { try { await step(name, action); } catch (error) { cleanupErrors.push(error); } };
     // Stop new HTTP admission before releasing the browser and tool boundaries.
     await clean("http_stop", () => server?.stop(true));
+    await clean("retained_conversation_release", () => chatGptTurnSessions.clearAndReleaseRetained());
     await clean("browser_close", () => closeChatGptBrowserWorkers());
     if (tunnelAttempted) await clean("tunnel_stop", () => stopTunnel(config));
     await clean("broker_close", () => broker.close());

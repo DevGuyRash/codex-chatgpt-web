@@ -776,6 +776,21 @@ export class ChatGptTurnSessions {
     return cancelled;
   }
 
+  /** Shut down an owned runtime only after releasing its retained launcher documents. */
+  async clearAndReleaseRetained(): Promise<number> {
+    const count = this.entries.size;
+    const conversationKeys = [...new Set([...this.entries.values()].map(session => session.conversationKey()).filter((key): key is string => Boolean(key)))];
+    const releases = await Promise.allSettled(conversationKeys.map(key => this.retireConversationAndWait(key)));
+    const remaining = [...this.entries.values()];
+    this.clear();
+    const settlements = await Promise.allSettled(remaining.map(session => session.physicalSettlement));
+    const failures = [...releases, ...settlements]
+      .filter((result): result is PromiseRejectedResult => result.status === "rejected")
+      .map(result => result.reason);
+    if (failures.length) throw new AggregateError(failures, "Retained ChatGPT conversation release did not settle");
+    return count;
+  }
+
   async cancelTrace(traceId: string, reason = chatGptBrowserTabClosedError()): Promise<number> {
     const sessions = [...this.entries.values()]
       .filter(session => session.traceId === traceId && session.isActive());

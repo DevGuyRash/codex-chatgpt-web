@@ -946,6 +946,30 @@ test("retained conversation release waits for physical settlement", async () => 
   expect(releases).toBe(1);
 });
 
+test("runtime shutdown releases one retained launcher document after its physical owner settles", async () => {
+  const sessions = new ChatGptTurnSessions();
+  let settlePhysical!: () => void;
+  const physicalSettlement = new Promise<void>(resolve => { settlePhysical = resolve; });
+  let releases = 0;
+  sessions.getOrCreate("retained", () => ({
+    mode: "read-only",
+    browser: Promise.resolve("done"),
+    physicalSettlement,
+    trace: new ChatGptTraceFeed(),
+    text: new ChatGptTextFeed(),
+    conversationKey: "b".repeat(64),
+    releaseRetainedConversation: async () => { releases += 1; },
+    cancel() {},
+  }));
+  const closing = sessions.clearAndReleaseRetained();
+  await Bun.sleep(0);
+  expect(releases).toBe(0);
+  settlePhysical();
+  expect(await closing).toBe(1);
+  expect(releases).toBe(1);
+  expect(sessions.activeCount()).toBe(0);
+});
+
 test("a repeated compaction waits for the previous conversation retirement", async () => {
   const sessions = new ChatGptTurnSessions();
   const conversationKey = "c".repeat(64);

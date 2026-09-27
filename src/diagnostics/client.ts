@@ -16,6 +16,10 @@ const MAX_QUEUE_BYTES = 4 * 1024 * 1024;
 // extension for the default write budget; explicit short caller deadlines stay authoritative.
 const COMMIT_PROGRESS_GRACE_MS = 15_000;
 const MAX_COMMIT_REQUEST_MS = 20_000;
+// Campaign documents share the worker with ordinary spans and may enter behind an in-budget
+// SQLite commit. Give their admission plus write one bounded window; a timeout still retires the
+// worker and leaves the capture explicitly incomplete rather than guessing its outcome.
+const CONTENT_CAPTURE_REQUEST_MS = 20_000;
 
 /** Cross-platform bounded worker transport, usable by Electron and standalone Bun processes. */
 export class DiagnosticsClient {
@@ -260,7 +264,7 @@ export class DiagnosticsClient {
     const result: unknown = await this.request({ method: "capture-claim", traceId });
     return Boolean(result && typeof result === "object" && "allowed" in result && result.allowed === true);
   }
-  async contentCapture(command: ContentCaptureCommand) { return ContentCaptureResultSchema.parse(await this.request({ method: "content-capture", command: ContentCaptureCommandSchema.parse(command) })); }
+  async contentCapture(command: ContentCaptureCommand) { return ContentCaptureResultSchema.parse(await this.request({ method: "content-capture", command: ContentCaptureCommandSchema.parse(command) }, CONTENT_CAPTURE_REQUEST_MS)); }
   async writeCapture(traceId: string, png: Buffer) {
     if (png.byteLength > 1024 * 1024) return CaptureWriteResultSchema.parse({ status: "omitted", reason: "too-large" });
     return CaptureWriteResultSchema.parse(await this.request({ method: "capture-write", traceId, png: png.toString("base64") }));

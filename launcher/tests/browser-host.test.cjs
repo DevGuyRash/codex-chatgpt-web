@@ -484,11 +484,10 @@ test("session inspection delegates navigation and capability detection to the sh
     solAvailable: true,
     proAvailable: true,
   });
-  assert.equal(calls.length, 2);
-  assert.equal(calls[0].operation, "refresh");
-  assert.equal(calls[1].operation, "inspect");
-  assert.equal(calls[1].appName, "Codex Native2");
-  assert.deepEqual(calls[1].payload, { detectCapabilities: true });
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].operation, "inspect");
+  assert.equal(calls[0].appName, "Codex Native2");
+  assert.deepEqual(calls[0].payload, { detectCapabilities: true });
 });
 
 test("session inspection fails closed on incomplete shared-helper capability evidence", async () => {

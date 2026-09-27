@@ -2997,7 +2997,6 @@ class BrowserHost {
     const connectorName = this.connectorName();
     const initialUrl = this.view.webContents.getURL();
     const startedIdle = initialUrl === IDLE_BROWSER_URL;
-    if (detectCapabilities) await this.refreshChatGptHomeDocument();
     const result = await this.runBrowserHelperOperation({
       helper: this.helper,
       descriptorPath: this.descriptorPath,
@@ -3017,9 +3016,8 @@ class BrowserHost {
     if (detectCapabilities && inspected.proAvailable && !inspected.solAvailable) {
       throw new Error("Browser helper returned contradictory ChatGPT capability evidence");
     }
-    // Capability inspection refreshes the owned page and can leave its status at "loading".
-    // A validated helper result is the terminal state for that refresh; without publishing it,
-    // Setup keeps smoke and installation actions disabled after a successful inspection.
+    // The helper may navigate an idle surface or recover a delayed ChatGPT composer. A validated
+    // result is the terminal state for that work; otherwise Setup can remain disabled at loading.
     this.setState({ authenticated: true, status: "ready", message: "ChatGPT is ready", loading: false });
     if (startedIdle) await this.returnToIdle();
     return inspected;

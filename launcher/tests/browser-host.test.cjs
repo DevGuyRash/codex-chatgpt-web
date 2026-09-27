@@ -459,6 +459,9 @@ test("session inspection delegates navigation and capability detection to the sh
     getConnectorName: () => "Codex Native2",
     logger: { info() {} },
     view: { webContents: { getURL: () => "https://chatgpt.com/" } },
+    visible: false,
+    surfaceActive: false,
+    syncViewVisibility: () => calls.push({ operation: "viewport" }),
     refreshChatGptHomeDocument: async () => calls.push({ operation: "refresh" }),
     runBrowserHelperOperation: async options => {
       calls.push(options);
@@ -484,10 +487,12 @@ test("session inspection delegates navigation and capability detection to the sh
     solAvailable: true,
     proAvailable: true,
   });
-  assert.equal(calls.length, 1);
-  assert.equal(calls[0].operation, "inspect");
-  assert.equal(calls[0].appName, "Codex Native2");
-  assert.deepEqual(calls[0].payload, { detectCapabilities: true });
+  assert.equal(calls.length, 2);
+  assert.equal(calls[0].operation, "viewport");
+  assert.equal(calls[1].operation, "inspect");
+  assert.equal(calls[1].appName, "Codex Native2");
+  assert.deepEqual(calls[1].payload, { detectCapabilities: true });
+  assert.equal(fixture.primaryDeviceEmulationDirty, true);
 });
 
 test("session inspection fails closed on incomplete shared-helper capability evidence", async () => {
@@ -497,6 +502,8 @@ test("session inspection fails closed on incomplete shared-helper capability evi
     getConnectorName: () => "Codex Native",
     logger: { info() {} },
     view: { webContents: { getURL: () => "https://chatgpt.com/?temporary-chat=true" } },
+    visible: true,
+    surfaceActive: true,
     refreshChatGptHomeDocument: async () => {},
     runBrowserHelperOperation: async () => ({
       type: "result",

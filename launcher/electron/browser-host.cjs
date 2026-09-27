@@ -2997,6 +2997,13 @@ class BrowserHost {
     const connectorName = this.connectorName();
     const initialUrl = this.view.webContents.getURL();
     const startedIdle = initialUrl === IDLE_BROWSER_URL;
+    if (detectCapabilities && (!this.visible || !this.surfaceActive)) {
+      // A hidden WebContentsView can lose its emulated viewport without navigation. Give the
+      // helper a drawable, owned page before it clicks the model picker, while preserving an
+      // already-hydrated ChatGPT document and its extension state.
+      this.primaryDeviceEmulationDirty = true;
+      this.syncViewVisibility();
+    }
     const result = await this.runBrowserHelperOperation({
       helper: this.helper,
       descriptorPath: this.descriptorPath,

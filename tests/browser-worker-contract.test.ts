@@ -53,9 +53,13 @@ test("modern assistant ownership follows the submitted user group through an old
   expect(chatGptOwnedAssistantTurnIdentity(initialUsers, currentUsers, initialAssistants,
     ["group:assistant:old", "group:assistant:remounted", "group:assistant:current"]))
     .toBe("group:assistant:current");
+  expect(chatGptOwnedAssistantTurnIdentity(initialUsers,
+    ["group:user:old", "group:user:remounted", "group:user:current"], initialAssistants,
+    ["group:assistant:old", "group:assistant:remounted", "group:assistant:current"],
+    ["old", "remounted", "current"])).toBe("group:assistant:current");
   expect(() => chatGptOwnedAssistantTurnIdentity(initialUsers,
     ["group:user:old", "group:user:current", "group:user:foreign"], initialAssistants,
-    ["group:assistant:current"])).toThrow("2 new conversation turns");
+    ["group:assistant:current"])).toThrow("lack a unique document order");
 });
 
 test("assistant tracking rebinds only one proven replacement after React detaches its node", () => {

@@ -1534,13 +1534,21 @@ export function chatGptOwnedAssistantTurnIdentity(
   currentUsers: readonly string[],
   initialAssistants: readonly string[],
   currentAssistants: readonly string[],
+  groupKeys: readonly string[] = [],
 ): string | undefined {
-  const submittedUser = chatGptNewTurnIdentity(initialUsers, currentUsers);
+  const previousUsers = new Set(initialUsers);
+  const newGroupedUsers = currentUsers.filter(identity => !previousUsers.has(identity) && identity.startsWith("group:user:"));
   const groupPrefix = "group:user:";
-  if (submittedUser?.startsWith(groupPrefix)) {
-    const ownedAssistant = `group:assistant:${submittedUser.slice(groupPrefix.length)}`;
+  // A previously virtualized history group can remount after Send. The newest group in
+  // document order is the submitted user turn; older remounts cannot own its answer.
+  const submittedUser = newGroupedUsers.length > 1
+    ? groupKeys.filter(key => newGroupedUsers.includes(`${groupPrefix}${key}`)).at(-1)
+    : newGroupedUsers[0]?.slice(groupPrefix.length);
+  if (submittedUser) {
+    const ownedAssistant = `group:assistant:${submittedUser}`;
     return currentAssistants.includes(ownedAssistant) ? ownedAssistant : undefined;
   }
+  if (newGroupedUsers.length > 1) throw new Error("ChatGPT grouped user turns lack a unique document order");
   return chatGptNewTurnIdentity(initialAssistants, currentAssistants);
 }
 
@@ -2777,8 +2785,8 @@ export class ChatGptBrowserWorker {
     signal?: AbortSignal,
   ): Promise<ChatGptSubmissionEvidence | undefined> {
     const state = await this.submissionDomState(page, baseline.domCache, signal);
-    if (chatGptNewTurnIdentity(baseline.initialUserTurnIdentities, state.userIdentities)) return "user_turn";
-    if (chatGptNewTurnIdentity(baseline.initialResponseTurnIdentities, state.responseIdentities)) return "assistant_turn";
+    if (state.userIdentities.some(identity => !baseline.initialUserTurnIdentities.includes(identity))) return "user_turn";
+    if (state.responseIdentities.some(identity => !baseline.initialResponseTurnIdentities.includes(identity))) return "assistant_turn";
     return chatGptSubmissionEvidence({
       initialUserTurnCount: baseline.initialUserTurnCount,
       userTurnCount: state.userTurnCount,
@@ -2799,6 +2807,7 @@ export class ChatGptBrowserWorker {
       state.userIdentities,
       baseline.initialResponseTurnIdentities,
       state.responseIdentities,
+      state.groupKeys,
     );
     if (!identity) return "";
     const locator = page.locator(chatGptAssistantTurnSelector(identity));
@@ -2944,6 +2953,7 @@ export class ChatGptBrowserWorker {
         state.userIdentities,
         observationBaseline.initialResponseTurnIdentities,
         state.responseIdentities,
+        state.groupKeys,
       );
       if (progress
         && externalProgress

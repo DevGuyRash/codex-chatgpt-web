@@ -1492,6 +1492,7 @@ test("launcher delegates every ChatGPT model and turn operation to the shared br
     logger: { info: (...args) => calls.push(["log", ...args]) },
     show: () => calls.push(["show"]),
     waitForSurfaceReady: async () => calls.push(["ready"]),
+    returnToIdle: async () => calls.push(["idle"]),
     setState: patch => calls.push(["state", patch]),
     runBrowserHelperOperation: async options => {
       calls.push(["helper", options]);
@@ -1507,6 +1508,7 @@ test("launcher delegates every ChatGPT model and turn operation to the shared br
   const helperCall = calls.find(call => call[0] === "helper")[1];
   assert.equal(helperCall.operation, "smoke");
   assert.equal(helperCall.appName, "Codex Native2");
+  assert.ok(calls.findIndex(call => call[0] === "idle") > calls.findIndex(call => call[0] === "helper"));
 });
 
 test("browser helper operations fail closed when the configured connector name is invalid", async () => {

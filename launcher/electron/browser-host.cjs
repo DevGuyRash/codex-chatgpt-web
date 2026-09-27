@@ -2941,6 +2941,10 @@ class BrowserHost {
       throw new Error("Browser helper returned invalid smoke-test evidence");
     }
     this.logger.info("smoke.completed", { effort: evidence.effort, responseChars: evidence.response.length });
+    // A smoke chat is disposable after its exact answer is validated. Leaving its hydrated
+    // document open in the persistent home view retains a large Chromium renderer even while
+    // Setup is idle; keep the authenticated partition and release only that page.
+    await this.returnToIdle();
     this.setState({ status: "ready", message: "Smoke test passed", authenticated: true });
     return { ok: true, ...evidence };
   }

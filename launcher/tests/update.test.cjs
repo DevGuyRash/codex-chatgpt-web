@@ -224,10 +224,13 @@ test("detached worker replaces an installed Linux AppImage and removes the old v
     assert.doesNotMatch(fs.readFileSync(wrapper, "utf8"), /APPIMAGE_EXTRACT_AND_RUN/);
     assert.equal(fs.existsSync(path.join(versionsRoot, "run-appimage")), true);
     const deadline = Date.now() + 3_000;
-    while (!fs.existsSync(marker) && Date.now() < deadline) {
+    let launched = "";
+    while (launched !== "launched" && Date.now() < deadline) {
+      launched = fs.existsSync(marker) ? fs.readFileSync(marker, "utf8") : "";
+      if (launched === "launched") break;
       Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 25);
     }
-    assert.equal(fs.readFileSync(marker, "utf8"), "launched");
+    assert.equal(launched, "launched");
     assert.match(fs.readFileSync(logPath, "utf8"), /installed and relaunched/);
   } finally {
     fs.rmSync(root, { recursive: true, force: true });

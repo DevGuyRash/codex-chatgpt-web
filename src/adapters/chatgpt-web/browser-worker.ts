@@ -5176,7 +5176,14 @@ export class ChatGptBrowserWorker {
             if (!footerRevealAttempted && failure instanceof ChatGptWebAdapterError
               && failure.code === "chatgpt_completion_unconfirmed" && !externalToolCallsInFlight) {
               footerRevealAttempted = true;
-              if (await revealChatGptResponseFooter(responseTurn.locator)) {
+              const revealed = await revealChatGptResponseFooter(responseTurn.locator);
+              runtimeDiagnostics()?.event(
+                "browser.completion_reobservation",
+                "The exact assistant turn was scrolled into view without resubmission",
+                { outcome: revealed ? "observing" : "unavailable" },
+                revealed ? "info" : "warning",
+              );
+              if (revealed) {
                 domHealthTracker.clearMissingCompletionAction();
                 responseDomCache.key = undefined;
                 responseDomCache.snapshot = undefined;
@@ -5244,6 +5251,11 @@ export class ChatGptBrowserWorker {
             } else {
               finalText = final.markdown;
             }
+            if (footerRevealAttempted) runtimeDiagnostics()?.event(
+              "browser.completion_reobservation",
+              "The owned assistant footer became complete after a read-only re-observation",
+              { outcome: "recovered" },
+            );
             break;
           }
           if (!loggedCompletionWait && Date.now() - sentAt >= 30_000) {

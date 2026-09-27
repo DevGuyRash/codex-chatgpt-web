@@ -90,6 +90,19 @@ test.skipIf(!process.env.CODEX_TEST_PROFILE_BINARY)("native Plan events survive 
   } finally { await f.close(); }
 }, 20000);
 
+test.skipIf(!process.env.CODEX_TEST_PROFILE_BINARY)("a completed Plan turn without a Plan item stops before revision", async () => {
+  const f = await fixture(async function* () {
+    yield { type: "text_delta", text: "Here is an ordinary Markdown plan.", phase: "final_answer" };
+    yield { type: "done", endTurn: true };
+  });
+  try {
+    const failure = await runStructuredScenario({ app: f.app, workload: createWorkload({ level: 1, seed: "native-plan-missing", batch: 0 }), variant: "plan-revise-execute", signal: new AbortController().signal, timeoutMs: 10000, checkpoint: () => {} }).catch(error => error);
+    expect(problemFor(failure)).toMatchObject({ code: "native_plan_missing", origin: "native" });
+    expect(f.requests()).toBe(1);
+    expect(f.frames.filter(frame => frame.direction === "received" && frame.message.method === "turn/completed")).toHaveLength(1);
+  } finally { await f.close(); }
+}, 20000);
+
 test.skipIf(!process.env.CODEX_TEST_PROFILE_BINARY)("generation steering waits for native output and carries its correction into the same task", async () => {
   let release!: () => void, steerId: number | undefined;
   const waiting = new Promise<void>(resolve => { release = resolve; });

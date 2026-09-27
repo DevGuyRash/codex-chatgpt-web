@@ -99,16 +99,11 @@ export async function runStructuredScenario(options: {
   if (variant === "plan-revise-execute") {
     const planHashes: string[] = [];
     for (const text of [prompts.plan, prompts.revision]) {
-      const observer = new AbortController(), observedSignal = AbortSignal.any([signal, observer.signal]);
-      const plan = app.rpc.waitFor("item/completed", params => params.threadId === threadId && typeof params.turnId === "string" && object(params.item) && params.item.type === "plan" && typeof params.item.text === "string" && params.item.text.length > 0, { signal: observedSignal, timeoutMs });
-      void plan.catch(() => {});
-      try {
-        const turn = await start(text, "plan");
-        completed(await finish(turn));
-        const params = await plan;
-        if (params.turnId !== turn.id || !object(params.item)) throw new Error("Observed plan belongs to a different native turn");
-        planHashes.push(createHash("sha256").update(params.item.text as string).digest("hex"));
-      } finally { observer.abort(); }
+      const turn = await start(text, "plan");
+      const terminal = completed(await finish(turn));
+      const hashes = app.takePlanHashes(terminal);
+      if (hashes.length !== 1) throw new DiagnosticError({ code: "native_plan_missing", message: "The completed native Plan turn did not contain exactly one Plan item", origin: "native", evidenceMissing: "The native turn completed without one attributable Plan item; revision and execution were not submitted." });
+      planHashes.push(hashes[0]!);
     }
     if (planHashes[0] === planHashes[1]) throw new Error("Plan revision produced no changed plan evidence");
     completed(await finish(await start(prompts.execute)));

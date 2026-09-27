@@ -49,6 +49,7 @@ export class GoldenAppServer {
   private active?: ActiveTurn;
   private compacting?: ActiveCompaction;
   private readonly completed = new Map<string, NativeTurn>();
+  private readonly completedPlans = new Map<string, string[]>();
   constructor(private readonly options: {
     executable: string; args?: string[]; cwd: string; env: NodeJS.ProcessEnv; route: ChatGptWebModelRoute; modelProvider?: string; artifactRepository?: string;
     onFrame: ConstructorParameters<typeof NativeRpc>[0]["onFrame"];
@@ -99,6 +100,14 @@ export class GoldenAppServer {
         if (this.active.id && this.active.id !== turn.id) throw invalid("Another native turn started before the owned turn settled");
         this.active.id = turn.id;
       }
+      if (frame.message.method === "item/completed" && object(params.item) && params.item.type === "plan" && typeof params.turnId === "string" && this.active?.id === params.turnId) {
+        const text = params.item.text;
+        if (typeof text !== "string" || !text.trim()) throw invalid("Native Plan item has no text");
+        const plans = this.completedPlans.get(params.turnId) ?? [];
+        if (plans.length >= 4) throw invalid("Native turn emitted too many Plan items");
+        plans.push(createHash("sha256").update(text).digest("hex"));
+        this.completedPlans.set(params.turnId, plans);
+      }
       if (frame.message.method === "turn/completed") {
         const turn = readNativeTurn(params.turn);
         // Native compaction and ancillary work can settle on the same thread.
@@ -136,6 +145,7 @@ export class GoldenAppServer {
     const route = input.route ?? this.options.route;
     if (isProGeneration(route) || route.interactionMode !== "automatic") throw new Error("The automatic golden driver requires a permitted non-Pro automatic route");
     const parts = inputParts(input);
+    this.completedPlans.clear();
     const active: ActiveTurn = { submission: "submitting" }; this.active = active;
     try {
       const result = await this.rpc.request("turn/start", {
@@ -213,9 +223,17 @@ export class GoldenAppServer {
     this.completed.delete(turnId); this.active = undefined;
     return turn;
   }
+  /** A native terminal snapshot may omit items already delivered as owned item events. */
+  takePlanHashes(turn: NativeTurn): string[] {
+    const events = this.completedPlans.get(turn.id) ?? [];
+    this.completedPlans.delete(turn.id);
+    const snapshot = nativePlanHashes(turn);
+    if (events.length && snapshot.length && JSON.stringify(events) !== JSON.stringify(snapshot)) throw invalid("Native Plan events disagree with the completed turn");
+    return events.length ? events : snapshot;
+  }
   close(graceMs?: number): Promise<void> {
     this.compacting?.reject(new NativeRpcError("Native compaction owner is closing", "native_process_closing", true));
-    return this.rpc.close(graceMs).finally(() => { this.compacting = undefined; this.completed.clear(); });
+    return this.rpc.close(graceMs).finally(() => { this.compacting = undefined; this.completed.clear(); this.completedPlans.clear(); });
   }
 }
 

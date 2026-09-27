@@ -15,11 +15,10 @@ const MAX_QUEUE_BYTES = 4 * 1024 * 1024;
 // SQLite may be waiting on host I/O after it reports commit progress. Grant one bounded
 // extension for the default write budget; explicit short caller deadlines stay authoritative.
 const COMMIT_PROGRESS_GRACE_MS = 15_000;
-const MAX_COMMIT_REQUEST_MS = 20_000;
-// Campaign documents share the worker with ordinary spans and may enter behind an in-budget
-// SQLite commit. Give their admission plus write one bounded window; a timeout still retires the
-// worker and leaves the capture explicitly incomplete rather than guessing its outcome.
-const CONTENT_CAPTURE_REQUEST_MS = 20_000;
+const DEFAULT_WRITE_REQUEST_MS = 20_000;
+const MAX_COMMIT_REQUEST_MS = 35_000;
+// Campaign documents and ordinary spans share one worker. Either can enter behind the other's
+// in-budget SQLite commit, so both write classes need bounded queue admission plus commit time.
 
 /** Cross-platform bounded worker transport, usable by Electron and standalone Bun processes. */
 export class DiagnosticsClient {
@@ -209,7 +208,7 @@ export class DiagnosticsClient {
         ...(request.method === "content-capture" ? { action: request.command.action } : {}),
         requestedAt, deadlineAt: requestedAt + timeout, timeoutMs: timeout,
         inputWriteCompleted: false, cpuUsage: process.cpuUsage(), maxEventLoopLagMs: 0 };
-      if (timeout === 5000 && (request.method === "append" || request.method === "content-capture")) {
+      if (timeout === DEFAULT_WRITE_REQUEST_MS && (request.method === "append" || request.method === "content-capture")) {
         let extended = false;
         pending.extendForCommit = () => {
           if (extended) return;
@@ -239,7 +238,7 @@ export class DiagnosticsClient {
     this.flushing = (async () => {
       while (this.queue.length && !this.stopped) {
         const batch = this.queue.splice(0, 128); this.queueBytes -= batch.reduce((sum, item) => sum + item.bytes, 0);
-        try { await this.request({ method: "append", events: batch.map(item => item.event) }); }
+        try { await this.request({ method: "append", events: batch.map(item => item.event) }, DEFAULT_WRITE_REQUEST_MS); }
         catch { this.dropped += batch.length; this.failure ??= "Some diagnostic records could not be persisted"; break; }
       }
       const unreported = this.dropped - this.reportedDrops;
@@ -264,7 +263,7 @@ export class DiagnosticsClient {
     const result: unknown = await this.request({ method: "capture-claim", traceId });
     return Boolean(result && typeof result === "object" && "allowed" in result && result.allowed === true);
   }
-  async contentCapture(command: ContentCaptureCommand) { return ContentCaptureResultSchema.parse(await this.request({ method: "content-capture", command: ContentCaptureCommandSchema.parse(command) }, CONTENT_CAPTURE_REQUEST_MS)); }
+  async contentCapture(command: ContentCaptureCommand) { return ContentCaptureResultSchema.parse(await this.request({ method: "content-capture", command: ContentCaptureCommandSchema.parse(command) }, DEFAULT_WRITE_REQUEST_MS)); }
   async writeCapture(traceId: string, png: Buffer) {
     if (png.byteLength > 1024 * 1024) return CaptureWriteResultSchema.parse({ status: "omitted", reason: "too-large" });
     return CaptureWriteResultSchema.parse(await this.request({ method: "capture-write", traceId, png: png.toString("base64") }));

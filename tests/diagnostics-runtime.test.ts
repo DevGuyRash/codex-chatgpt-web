@@ -414,6 +414,25 @@ test("campaign content waits behind an in-budget diagnostic commit without losin
   } finally { await client.close(); }
 }, 15000);
 
+test("background spans wait behind an in-budget campaign write without dropping events", async () => {
+  const home = root();
+  const script = `const { DiagnosticStore } = await import(${JSON.stringify(resolve("src/diagnostics/store.ts"))}); const original = DiagnosticStore.prototype.contentCapture; DiagnosticStore.prototype.contentCapture = function(command, progress) { if (command.action === "write") Bun.sleepSync(7000); return original.call(this, command, progress); }; const { runDiagnosticsWorker } = await import(${JSON.stringify(resolve("src/diagnostics/worker.ts"))}); await runDiagnosticsWorker(${JSON.stringify(join(home, "diagnostics", "observability"))});`;
+  const client = new DiagnosticsClient({ executable: process.execPath, args: ["-e", script] });
+  try {
+    const campaignId = crypto.randomUUID(), traceId = "a".repeat(32);
+    await client.contentCapture({ action: "start", campaignId, acknowledged: true, until: Date.now() + 60000, maxBytes: 1048576 });
+    await client.contentCapture({ action: "bind", campaignId, traceId });
+    const capture = client.contentCapture({ action: "write", campaignId, traceId, category: "transport", text: "synthetic retained evidence" });
+    await Bun.sleep(50);
+    const event: DiagnosticEvent = { version: 1, id: crypto.randomUUID(), time: Date.now(), kind: "log", name: "fixture.queued-span", body: "Synthetic queued event", severity: "info", component: "test", environment: "test", target: "fixture", attributes: {} };
+    client.emit(event);
+    await client.flush();
+    expect(await capture).toMatchObject({ status: "stored" });
+    expect((await client.status()).available).toBe(true);
+    expect((await client.query({ eventId: event.id })).events.map(item => item.id)).toEqual([event.id]);
+  } finally { await client.close(); }
+}, 15000);
+
 test("foreground health checks report busy without killing an in-budget ingestion", async () => {
   const home = root();
   const script = `const { DiagnosticStore } = await import(${JSON.stringify(resolve("src/diagnostics/store.ts"))}); const original = DiagnosticStore.prototype.append; DiagnosticStore.prototype.append = function(events) { Bun.sleepSync(3000); return original.call(this, events); }; const { runDiagnosticsWorker } = await import(${JSON.stringify(resolve("src/diagnostics/worker.ts"))}); await runDiagnosticsWorker(${JSON.stringify(join(home, "diagnostics", "observability"))});`;

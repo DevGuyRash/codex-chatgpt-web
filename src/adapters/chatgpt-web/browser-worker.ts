@@ -4136,12 +4136,28 @@ export class ChatGptBrowserWorker {
         streamable: index < segments.length - 1,
       }));
       const rendered = renderedRoots.at(-1);
-      const completionAction = rendered
+      const identifiedCompletionAction = rendered
         ? [...root.querySelectorAll<HTMLElement>(options.completionActionSelector)]
           .filter(renderedInDom)
           .find(candidate => !rendered.contains(candidate)
             && Boolean(rendered.compareDocumentPosition(candidate) & Node.DOCUMENT_POSITION_FOLLOWING))
         : undefined;
+      // A newer ChatGPT footer can omit both the Copy test ID and turn-action-controls wrapper.
+      // Its icon-only accessible actions still follow the final answer inside this exact assistant
+      // turn. Require two of them and no active status/busy element before treating that footer as
+      // completion evidence; a generic button or visible answer text is not enough.
+      const accessibleFooterActions = rendered && streamingStatusContainers.length === 0
+        && !root.querySelector('[aria-busy="true"]')
+        ? [...root.querySelectorAll<HTMLButtonElement>("button[aria-label]")]
+          .filter(candidate => renderedInDom(candidate)
+            && !rendered.contains(candidate)
+            && Boolean(rendered.compareDocumentPosition(candidate) & Node.DOCUMENT_POSITION_FOLLOWING)
+            && !candidate.closest("[data-streaming-response-status]")
+            && Boolean(candidate.getAttribute("aria-label")?.trim())
+            && !(candidate.innerText ?? "").trim())
+        : [];
+      const completionAction = identifiedCompletionAction
+        ?? (accessibleFooterActions.length >= 2 ? accessibleFooterActions[0] : undefined);
       const completionActionSet = new Set(completionAction ? [completionAction] : []);
       const candidates = new Map<HTMLElement, ChatGptVisibleTraceBlock["kind"]>();
       renderedRoots.forEach(candidate => candidates.set(candidate, "answer"));

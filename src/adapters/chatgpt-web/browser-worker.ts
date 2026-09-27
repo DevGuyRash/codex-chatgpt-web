@@ -1634,6 +1634,20 @@ export class ChatGptCompletionTracker {
   }
 }
 
+const CHATGPT_DOM_HEALTH_FAILURES = {
+  disappeared: { code: "chatgpt_response_dom_disappeared", message: "ChatGPT response DOM disappeared while the browser turn was active" },
+  missing: { code: "chatgpt_response_dom_missing", message: "ChatGPT did not create a response DOM after the message was sent" },
+  empty: { code: "chatgpt_empty_response", message: "ChatGPT browser turn completed without a final answer" },
+  unconfirmed: { code: "chatgpt_completion_unconfirmed", message: "ChatGPT stopped generating but did not expose its completed-turn action; the ChatGPT DOM may have changed" },
+} as const;
+
+export function chatGptDomHealthFailure(message: string): Error {
+  const failure = Object.values(CHATGPT_DOM_HEALTH_FAILURES).find(candidate => candidate.message === message);
+  return failure
+    ? new ChatGptWebAdapterError(message, { status: 502, errorType: "browser_state_error", code: failure.code, retryable: false, source: "chatgpt-ui" })
+    : new Error(message);
+}
+
 export class ChatGptTurnDomHealthTracker {
   private sawResponse = false;
   private missingResponseSince?: number;
@@ -1680,8 +1694,8 @@ export class ChatGptTurnDomHealthTracker {
       this.missingResponseSince ??= now;
       if (now - this.missingResponseSince >= this.missingResponseMs) {
         return this.sawResponse
-          ? "ChatGPT response DOM disappeared while the browser turn was active"
-          : "ChatGPT did not create a response DOM after the message was sent";
+          ? CHATGPT_DOM_HEALTH_FAILURES.disappeared.message
+          : CHATGPT_DOM_HEALTH_FAILURES.missing.message;
       }
     }
 
@@ -1694,7 +1708,7 @@ export class ChatGptTurnDomHealthTracker {
     } else {
       this.emptyCompletionSince ??= now;
       if (now - this.emptyCompletionSince >= this.emptyCompletionMs) {
-        return "ChatGPT browser turn completed without a final answer";
+        return CHATGPT_DOM_HEALTH_FAILURES.empty.message;
       }
     }
 
@@ -1707,7 +1721,7 @@ export class ChatGptTurnDomHealthTracker {
     } else if (this.missingCompletionAction?.text !== state.currentText) {
       this.missingCompletionAction = { text: state.currentText, since: now };
     } else if (now - this.missingCompletionAction.since >= this.missingCompletionActionMs) {
-      return "ChatGPT stopped generating but did not expose its completed-turn action; the ChatGPT DOM may have changed";
+      return CHATGPT_DOM_HEALTH_FAILURES.unconfirmed.message;
     }
     return undefined;
   }
@@ -5142,7 +5156,7 @@ export class ChatGptBrowserWorker {
             completionActionVisible: snapshot.completionActionVisible,
             externalProgressLive,
           });
-          if (domError) throw new Error(domError);
+          if (domError) throw chatGptDomHealthFailure(domError);
           const completionReady = completionTracker.update({
             responsePresent: snapshot.responsePresent,
             running,
@@ -5227,7 +5241,7 @@ export class ChatGptBrowserWorker {
             completionActionVisible: false,
             externalProgressLive,
           });
-          if (domError) throw new Error(domError);
+          if (domError) throw chatGptDomHealthFailure(domError);
         }
         await new Promise(resolveSleep => setTimeout(resolveSleep, 250));
        } catch (error) {

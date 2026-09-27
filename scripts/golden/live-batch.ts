@@ -71,6 +71,7 @@ export interface LiveBatchCell {
 export async function runLiveBatch(options: {
   root: string; sourceHome: string; executable: string; cells: readonly LiveBatchCell[]; signal: AbortSignal;
   protocol?: Protocol; turnTimeoutMs: number; boundary?: "ordinary-native-tools" | "campaign-batch";
+  experimentalBiggerContext?: boolean;
   onPrepared?(identity: { work: string; campaignId: string; traceId: string }): void | Promise<void>;
 }) {
   options.signal.throwIfAborted();
@@ -82,6 +83,7 @@ export async function runLiveBatch(options: {
     if (!route || isProGeneration(route) || route.interactionMode !== "automatic") throw new Error("The live batch requires permitted automatic non-Pro routes");
     return { ...cell, route };
   });
+  if (options.experimentalBiggerContext && requests.some(cell => cell.variant !== "compaction" || cell.route.backendModel === "gpt-5.6-luna")) throw new Error("Golden Bigger Context opt-in requires only non-Luna compaction cells");
   const root = resolve(options.root), sourceHome = resolve(options.sourceHome), boundary = options.boundary ?? "campaign-batch";
   {
     const queue = new GoldenQueue(join(root, "campaign.sqlite"));
@@ -172,7 +174,7 @@ export async function runLiveBatch(options: {
         return [cell.request.id, { from, to: cell.request.route }];
       }));
       writeFileSync(join(root, "session-inspection.json"), JSON.stringify({ inspectedAt: new Date().toISOString(), ...inspection }, null, 2), { mode: 0o600 });
-      results = await operation.run(() => withGoldenRuntime({ workspace, nativeHome: home, protocol, connectorName: source.appName, tunnelId: source.tunnel!.tunnelId, tunnelBinary: source.tunnel!.binaryPath, runtimeKeyFile: source.tunnel!.runtimeKeyFile, capabilities: { solAvailable: inspection.solAvailable!, proAvailable: inspection.proAvailable! }, borrowFromRuntimeHome: sourceHome }, options.signal, async config => {
+      results = await operation.run(() => withGoldenRuntime({ workspace, nativeHome: home, protocol, connectorName: source.appName, tunnelId: source.tunnel!.tunnelId, tunnelBinary: source.tunnel!.binaryPath, runtimeKeyFile: source.tunnel!.runtimeKeyFile, capabilities: { solAvailable: inspection.solAvailable!, proAvailable: inspection.proAvailable! }, experimentalBiggerContext: options.experimentalBiggerContext === true, borrowFromRuntimeHome: sourceHome }, options.signal, async config => {
         const catalogPath = join(work, "web-models.json");
         writeFileSync(catalogPath, JSON.stringify(augmentNativeModelCatalog(JSON.parse(bundled.stdout), config)), { mode: 0o600 });
         writeFileSync(join(home, "config.toml"), goldenNativeConfig({ catalogPath, port: config.port, integration: { nativeConfigPath: join(home, "config.toml"), runtimeHome: workspace.runtimeHome, protocol } }), { mode: 0o600 });

@@ -30,6 +30,8 @@ test("full golden configuration and lifecycle retain isolated MCP authority and 
     await new Promise<void>((resolve, reject) => { launcher.once("spawn", resolve); launcher.once("error", reject); });
     workspace.processes.launcher = ownedProcessIdentity(launcher.pid!)!;
     const config = prepareGoldenRuntimeConfig(input);
+    expect(config.experimentalBiggerContext).toBe(false);
+    expect(prepareGoldenRuntimeConfig({ ...input, experimentalBiggerContext: true }).experimentalBiggerContext).toBe(true);
     // A bound server supplies the actual port before the configuration is persisted.
     config.port = 18765;
     saveConfig(config);

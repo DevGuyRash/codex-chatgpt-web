@@ -17,6 +17,7 @@ export function prepareGoldenRuntimeConfig(input: {
   workspace: GoldenWorkspace; protocol: Protocol; connectorName: string;
   tunnelId: string; tunnelBinary: string; runtimeKeyFile: string;
   capabilities: { solAvailable: boolean; proAvailable: boolean };
+  experimentalBiggerContext?: boolean;
   borrowFromRuntimeHome?: string;
 }): AppConfig {
   const { workspace } = input;
@@ -27,6 +28,7 @@ export function prepareGoldenRuntimeConfig(input: {
   if (Buffer.byteLength(brokerSocketPath) > 103 || (statSync(root).mode & 0o077) !== 0) throw new Error("Golden broker requires a short, private workspace socket path");
   if (process.env.CODEX_WEB_GPT_CAPTURE_CAMPAIGN_ID !== workspace.campaignId || !/^[a-f\d]{8}(?:-[a-f\d]{4}){3}-[a-f\d]{12}$/i.test(workspace.campaignId)) throw new Error("Golden runtime requires its exact active campaign identity");
   if (input.protocol !== "native" && input.protocol !== "compatibility-v1") throw new Error("Unknown golden protocol");
+  if (input.experimentalBiggerContext !== undefined && typeof input.experimentalBiggerContext !== "boolean") throw new Error("Golden Bigger Context selection must be explicit and boolean");
   for (const path of [workspace.descriptorPath, input.tunnelBinary, input.runtimeKeyFile]) {
     if (resolve(path) !== path || realpathSync(path) !== path || !statSync(path).isFile()) throw new Error("Golden runtime inputs require canonical regular files");
   }
@@ -38,6 +40,7 @@ export function prepareGoldenRuntimeConfig(input: {
   if (input.borrowFromRuntimeHome) readBorrowedTunnel(input.borrowFromRuntimeHome, root, { appName: connectorName, tunnel });
   return {
     ...defaultConfig("full", runtimeHome), ...input.capabilities,
+    experimentalBiggerContext: input.experimentalBiggerContext === true,
     subagentProtocol: input.protocol, port: 0,
     brokerSocketPath,
     // Synthetic tasks are confined to disposable native workspaces; approve only the current connector action.

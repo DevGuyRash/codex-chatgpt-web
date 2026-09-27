@@ -192,7 +192,24 @@ export async function runLiveBatch(options: {
             await evidence.bind(item.traceId);
             await evidence.capture(item.traceId, "oracle", JSON.stringify({ workload: cell.workload, baseline: cell.baseline, nativeCatalogSha256, cellId: cell.request.id }));
             const terminal = await cellOperation.run(() => runNativeScenario({ executable: options.executable, cwd: cell.task, env: nativeEnv, route: cell.request.route, modelProvider: "golden", workload: cell.workload, variant: cell.request.variant, signal: options.signal, timeoutMs: options.turnTimeoutMs,
-              beforeGeneration: signal => paceGoldenGeneration(root, signal),
+              beforeGeneration: async signal => {
+                await paceGoldenGeneration(root, signal);
+                const response = await fetch(`http://127.0.0.1:${config.port}/healthz`, { signal: AbortSignal.timeout(5_000) });
+                const health = await response.json() as { service?: string; pid?: number; accepting_turns?: boolean };
+                const ready = response.ok && health.service === "codex-chatgpt-web" && health.pid === process.pid && health.accepting_turns === true;
+                await captureLane.record("transport", JSON.stringify({ localProviderHealth: { stage: "before-generation", ready, status: response.status, pidMatches: health.pid === process.pid } }));
+                if (!ready) throw new DiagnosticError({ code: "golden_local_provider_unavailable", message: "The owned local Responses listener was not ready before native submission", origin: "golden", stage: "generation_admission", retryable: false });
+              },
+              onNativeReconnect: async () => {
+                let status = 0, ready = false;
+                try {
+                  const response = await fetch(`http://127.0.0.1:${config.port}/healthz`, { signal: AbortSignal.timeout(5_000) });
+                  status = response.status;
+                  const health = await response.json() as { service?: string; pid?: number; accepting_turns?: boolean };
+                  ready = response.ok && health.service === "codex-chatgpt-web" && health.pid === process.pid && health.accepting_turns === true;
+                } catch { /* The failed read is the observation. Native owns retry and settlement. */ }
+                await captureLane.record("transport", JSON.stringify({ localProviderHealth: { stage: "native-reconnect", ready, status } }));
+              },
               exerciseMultipartTransport: options.experimentalBiggerContext === true && cell.request.variant === "compaction",
               modelSwitch: switches.get(cell.request.id),
               ...(cell.request.variant === "tool-image" ? { imagePath: join(cell.task, "input/label.png") } : {}),

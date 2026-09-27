@@ -3,6 +3,7 @@ import { createHash } from "node:crypto";
 import type { ChatGptWebModelRoute } from "../../src/chatgpt-web-models";
 import { NativeRpc, NativeRpcError } from "./native-protocol";
 import { goldenArtifactWritableRoots } from "./runtime-config";
+import { DiagnosticError } from "../../src/diagnostics/problems";
 
 type ObjectValue = Record<string, unknown>;
 const object = (value: unknown): value is ObjectValue => value !== null && typeof value === "object" && !Array.isArray(value);
@@ -50,6 +51,7 @@ export class GoldenAppServer {
   private compacting?: ActiveCompaction;
   private readonly completed = new Map<string, NativeTurn>();
   private readonly completedPlans = new Map<string, string[]>();
+  private readonly reconnecting = new Map<string, { count: number; firstAt: number; lastAt: number }>();
   constructor(private readonly options: {
     executable: string; args?: string[]; cwd: string; env: NodeJS.ProcessEnv; route: ChatGptWebModelRoute; modelProvider?: string; artifactRepository?: string;
     onFrame: ConstructorParameters<typeof NativeRpc>[0]["onFrame"];
@@ -108,6 +110,14 @@ export class GoldenAppServer {
         plans.push(createHash("sha256").update(text).digest("hex"));
         this.completedPlans.set(params.turnId, plans);
       }
+      if (frame.message.method === "error" && this.active?.id === params.turnId && params.willRetry === true
+        && object(params.error) && object(params.error.codexErrorInfo)
+        && object(params.error.codexErrorInfo.responseStreamDisconnected)) {
+        const now = frame.receivedAtMs ?? Date.now();
+        const current = this.reconnecting.get(params.turnId as string) ?? { count: 0, firstAt: now, lastAt: now };
+        current.count += 1; current.lastAt = now;
+        this.reconnecting.set(params.turnId as string, current);
+      }
       if (frame.message.method === "turn/completed") {
         const turn = readNativeTurn(params.turn);
         // Native compaction and ancillary work can settle on the same thread.
@@ -145,7 +155,7 @@ export class GoldenAppServer {
     const route = input.route ?? this.options.route;
     if (isProGeneration(route) || route.interactionMode !== "automatic") throw new Error("The automatic golden driver requires a permitted non-Pro automatic route");
     const parts = inputParts(input);
-    this.completedPlans.clear();
+    this.completedPlans.clear(); this.reconnecting.clear();
     const active: ActiveTurn = { submission: "submitting" }; this.active = active;
     try {
       const result = await this.rpc.request("turn/start", {
@@ -215,12 +225,22 @@ export class GoldenAppServer {
     const active = this.requireTurn(turnId);
     let turn = this.completed.get(turnId);
     if (!turn) {
-      const params = await this.rpc.waitFor("turn/completed", params => params.threadId === this.threadId && object(params.turn) && params.turn.id === turnId, options);
-      turn = readNativeTurn(params.turn);
+      try {
+        const params = await this.rpc.waitFor("turn/completed", params => params.threadId === this.threadId && object(params.turn) && params.turn.id === turnId, options);
+        turn = readNativeTurn(params.turn);
+      } catch (error) {
+        const reconnecting = this.reconnecting.get(turnId);
+        if (error instanceof NativeRpcError && error.code === "native_event_timeout" && reconnecting && reconnecting.count >= 2) {
+          throw new DiagnosticError({ code: "native_response_reconnecting_timeout", message: "Native Codex repeatedly reported a disconnected response stream and did not complete its turn", origin: "golden-native", retryable: false,
+            findings: [{ message: `reconnectEvents=${reconnecting.count}; observedSpanMs=${Math.max(0, Math.round(reconnecting.lastAt - reconnecting.firstAt))}` }],
+            evidenceMissing: "The accepted native turn has no terminal outcome; its submission and tool effects must not be replayed automatically." });
+        }
+        throw error;
+      }
     }
     if (turn.status === "inProgress") throw invalid("Native completion is not terminal");
     if (this.active !== active) throw invalid("Native completion ownership changed while waiting");
-    this.completed.delete(turnId); this.active = undefined;
+    this.completed.delete(turnId); this.reconnecting.delete(turnId); this.active = undefined;
     return turn;
   }
   /** A native terminal snapshot may omit items already delivered as owned item events. */
@@ -233,7 +253,7 @@ export class GoldenAppServer {
   }
   close(graceMs?: number): Promise<void> {
     this.compacting?.reject(new NativeRpcError("Native compaction owner is closing", "native_process_closing", true));
-    return this.rpc.close(graceMs).finally(() => { this.compacting = undefined; this.completed.clear(); this.completedPlans.clear(); });
+    return this.rpc.close(graceMs).finally(() => { this.compacting = undefined; this.completed.clear(); this.completedPlans.clear(); this.reconnecting.clear(); });
   }
 }
 

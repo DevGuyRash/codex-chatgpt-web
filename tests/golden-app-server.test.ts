@@ -42,6 +42,7 @@ process.stdin.on("data", chunk => { buffer+=chunk.toString(); for (;;) {
   send({method:"turn/started",params:{threadId:"thread-one",turn:{id,status:"inProgress",items:[]}}});
   if(text==="early-with-ancillary")for(let i=0;i<140;i++)send({method:"turn/completed",params:{threadId:"thread-one",turn:{id:"background-active-"+i,status:"completed",items:[]}}});
   if(text==="uncertain")continue;
+  if(text==="reconnecting")for(let i=0;i<3;i++)send({method:"error",params:{threadId:"thread-one",turnId:id,willRetry:true,error:{message:"Reconnecting... waiting for network",codexErrorInfo:{responseStreamDisconnected:{httpStatusCode:null}}}}});
   if(text==="early" || text==="early-with-ancillary")send({method:"turn/completed",params:{threadId:"thread-one",turn:{id,status:"completed",items:[]}}});
   if(text==="wrong-thread")send({method:"turn/completed",params:{threadId:"other",turn:{id,status:"completed",items:[]}}});
   send({id:m.id,result:{turn:{id,status:"inProgress",items:[]}}});
@@ -81,6 +82,16 @@ test("native turn completion can precede its acknowledgement without being lost"
     await expect(f.app.startTurn({ text: "no replay" })).rejects.toMatchObject({ code: "native_turn_unsettled" });
     await f.app.interrupt(next.id);
     expect(await f.app.waitForCompletion(next.id)).toMatchObject({ status: "interrupted" });
+  } finally { await f.close(); }
+});
+
+test("repeated native response disconnects remain an uncertain turn with a typed terminal cause", async () => {
+  const f = fixture();
+  try {
+    await f.app.initialize(); await f.app.openThread();
+    const turn = await f.app.startTurn({ text: "reconnecting" });
+    await expect(f.app.waitForCompletion(turn.id, { timeoutMs: 30 })).rejects.toMatchObject({ problem: { code: "native_response_reconnecting_timeout", evidenceMissing: expect.stringContaining("must not be replayed") } });
+    await expect(f.app.startTurn({ text: "duplicate" })).rejects.toMatchObject({ code: "native_turn_unsettled" });
   } finally { await f.close(); }
 });
 

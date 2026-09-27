@@ -43,6 +43,7 @@ export async function runNativeScenario(options: {
   checkpoint(input: NativeScenarioCheckpoint): void | Promise<void>;
   observeQueue?: Parameters<typeof runStructuredScenario>[0]["observeQueue"];
   beforeGeneration?: (signal: AbortSignal) => Promise<void>;
+  onNativeReconnect?: () => Promise<void>;
   exerciseMultipartTransport?: boolean;
 }) {
   options.signal.throwIfAborted();
@@ -143,10 +144,20 @@ export async function runNativeScenario(options: {
       ...(historyWitnessSha256 ? { historyWitnessSha256 } : {}), ...(attachedImageSha256 ? { attachedImageSha256 } : {}) };
   }
   let app!: GoldenAppServer;
+  let observedReconnect = false;
   app = new GoldenAppServer({ ...options, artifactRepository: options.cwd, onFrame: async frame => {
     const { tool, phase } = ownedNativeActivity(frame, app?.state() ?? {});
     if (tool) toolItems++;
     await options.onRecord("transport", JSON.stringify(frame), phase, frame.receivedAtMs);
+    const params = object(frame.message.params) ? frame.message.params : undefined;
+    const error = params && object(params.error) ? params.error : undefined;
+    if (!observedReconnect && frame.direction === "received" && frame.message.method === "error"
+      && params?.threadId === app.state().threadId && params?.turnId === app.state().turnId
+      && params?.willRetry === true && error && object(error.codexErrorInfo)
+      && object(error.codexErrorInfo.responseStreamDisconnected)) {
+      observedReconnect = true;
+      await options.onNativeReconnect?.();
+    }
   }, onStderr: text => options.onRecord("transport", text).then(() => {}) });
   let failure: unknown;
   try {

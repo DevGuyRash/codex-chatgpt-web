@@ -1528,6 +1528,22 @@ export function chatGptNewTurnIdentity(
   return added[0];
 }
 
+/** Modern ChatGPT groups the submitted user and its assistant under one key. */
+export function chatGptOwnedAssistantTurnIdentity(
+  initialUsers: readonly string[],
+  currentUsers: readonly string[],
+  initialAssistants: readonly string[],
+  currentAssistants: readonly string[],
+): string | undefined {
+  const submittedUser = chatGptNewTurnIdentity(initialUsers, currentUsers);
+  const groupPrefix = "group:user:";
+  if (submittedUser?.startsWith(groupPrefix)) {
+    const ownedAssistant = `group:assistant:${submittedUser.slice(groupPrefix.length)}`;
+    return currentAssistants.includes(ownedAssistant) ? ownedAssistant : undefined;
+  }
+  return chatGptNewTurnIdentity(initialAssistants, currentAssistants);
+}
+
 export function chatGptReboundTurnIdentity(
   initial: readonly string[],
   boundIdentity: string,
@@ -2778,7 +2794,9 @@ export class ChatGptBrowserWorker {
     signal?: AbortSignal,
   ): Promise<string> {
     const state = await this.submissionDomState(page, baseline.domCache, signal);
-    const identity = chatGptNewTurnIdentity(
+    const identity = chatGptOwnedAssistantTurnIdentity(
+      baseline.initialUserTurnIdentities,
+      state.userIdentities,
       baseline.initialResponseTurnIdentities,
       state.responseIdentities,
     );
@@ -2921,7 +2939,9 @@ export class ChatGptBrowserWorker {
       // acknowledging its boundary; the pre-probe snapshot can otherwise leave the broker waiting
       // despite this exact iteration having successfully observed the page.
       progress = externalProgress?.snapshot();
-      const identity = chatGptNewTurnIdentity(
+      const identity = chatGptOwnedAssistantTurnIdentity(
+        observationBaseline.initialUserTurnIdentities,
+        state.userIdentities,
         observationBaseline.initialResponseTurnIdentities,
         state.responseIdentities,
       );

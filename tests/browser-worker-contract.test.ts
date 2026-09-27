@@ -3437,6 +3437,9 @@ test("an unconfirmed completed turn retains a typed non-replayable browser cause
   const failure = chatGptDomHealthFailure(verdict!);
   expect(failure).toMatchObject({ code: "chatgpt_completion_unconfirmed", status: 502, retryable: false, source: "chatgpt-ui" });
   expect(problemFor(failure)).toMatchObject({ code: "chatgpt_completion_unconfirmed", origin: "chatgpt-ui", retryable: false });
+  tracker.clearMissingCompletionAction();
+  expect(tracker.update(state, 1_102)).toBeUndefined();
+  expect(tracker.update(state, 1_203)).toContain("completed-turn action");
   expect(chatGptDomHealthFailure("Unknown private browser output")).toMatchObject({ name: "Error", message: "Unknown private browser output" });
 });
 

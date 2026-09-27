@@ -1671,6 +1671,11 @@ export class ChatGptTurnDomHealthTracker {
     this.missingResponseSince = undefined;
   }
 
+  /** One read-only footer reveal gets a fresh observation window without changing turn ownership. */
+  clearMissingCompletionAction(): void {
+    this.missingCompletionAction = undefined;
+  }
+
   update(state: {
     responsePresent: boolean;
     running: boolean;
@@ -1728,6 +1733,15 @@ export class ChatGptTurnDomHealthTracker {
 }
 
 export const CHATGPT_STOPPED_THINKING_GRACE_MS = 5_000;
+
+/** Scroll only the exact owned assistant turn; never click, resend, or navigate its conversation. */
+export async function revealChatGptResponseFooter(responseTurn: Locator): Promise<boolean> {
+  return responseTurn.evaluate(root => {
+    if (!root.isConnected) return false;
+    root.scrollIntoView({ block: "end", behavior: "instant" });
+    return true;
+  }, undefined, { timeout: 2_000 }).catch(() => false);
+}
 
 /**
  * Consecutive internal observation faults tolerated before a turn is abandoned.
@@ -5002,6 +5016,7 @@ export class ChatGptBrowserWorker {
       let observedThisIteration = false;
       let sideEffectBoundaryReached = false;
       let completionFenceRevision: number | undefined;
+      let footerRevealAttempted = false;
       const rebindStreamingObservation = async (error: Error) => {
         consecutiveObservationRebinds += 1;
         if (consecutiveObservationRebinds > MAX_CHATGPT_BROWSER_PAGE_REBINDS) throw new Error(
@@ -5156,7 +5171,22 @@ export class ChatGptBrowserWorker {
             completionActionVisible: snapshot.completionActionVisible,
             externalProgressLive,
           });
-          if (domError) throw chatGptDomHealthFailure(domError);
+          if (domError) {
+            const failure = chatGptDomHealthFailure(domError);
+            if (!footerRevealAttempted && failure instanceof ChatGptWebAdapterError
+              && failure.code === "chatgpt_completion_unconfirmed" && !externalToolCallsInFlight) {
+              footerRevealAttempted = true;
+              if (await revealChatGptResponseFooter(responseTurn.locator)) {
+                domHealthTracker.clearMissingCompletionAction();
+                responseDomCache.key = undefined;
+                responseDomCache.snapshot = undefined;
+                console.info(`[chatgpt-web] browser turn ${turn.traceId} revealed its exact response footer for read-only completion observation`);
+                await new Promise(resolveSleep => setTimeout(resolveSleep, 300));
+                continue;
+              }
+            }
+            throw failure;
+          }
           const completionReady = completionTracker.update({
             responsePresent: snapshot.responsePresent,
             running,

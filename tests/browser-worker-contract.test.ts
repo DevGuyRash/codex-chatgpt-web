@@ -413,7 +413,7 @@ test("compaction retry submission evidence cannot make prompt-stage settlement u
 
 test("launcher page acquisition proves a nonzero operational viewport before DOM interaction", () => {
   const workerSource = readFileSync(new URL("../src/adapters/chatgpt-web/browser-worker.ts", import.meta.url), "utf8");
-  const connect = workerSource.indexOf("const connection = await connectLauncherBrowserHost(");
+  const connect = workerSource.indexOf("const connection = await this.launcherConnections.acquire(");
   const viewport = workerSource.indexOf("await waitForOperationalChatGptViewport(connection.page, abortSignal);", connect);
   const acquired = workerSource.indexOf('await diagnostics.capture(page, "browser-page-acquired")', viewport);
 
@@ -1022,6 +1022,12 @@ test("a disconnected response stream rebinds the exact leased tab without resend
   const result = Bun.spawnSync([process.execPath, join(import.meta.dir, "fixtures/browser-disconnect-continuation.ts")], { stdout: "pipe", stderr: "pipe" });
   expect({ exitCode: result.exitCode, errors: result.exitCode === 0 ? "" : result.stderr.toString() }).toEqual({ exitCode: 0, errors: "" });
   expect(result.stdout.toString()).toContain("DISCONNECTED_CONTINUATION_OWNERSHIP_OK");
+});
+
+test("two completed browser turns reuse one exclusive CDP transport and release it on shutdown", () => {
+  const result = Bun.spawnSync([process.execPath, join(import.meta.dir, "fixtures/browser-pool-continuation.ts")], { stdout: "pipe", stderr: "pipe" });
+  expect({ exitCode: result.exitCode, errors: result.exitCode === 0 ? "" : result.stderr.toString() }).toEqual({ exitCode: 0, errors: "" });
+  expect(result.stdout.toString()).toContain("POOLED_TURN_OWNERSHIP_OK");
 });
 
 test("closing the launcher page is an immediate terminal turn error", async () => {

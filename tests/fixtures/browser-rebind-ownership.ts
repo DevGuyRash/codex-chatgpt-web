@@ -6,23 +6,25 @@ import type { Page } from "playwright-core";
 const host = await import("../../src/launcher-browser-host");
 const calls: string[] = [];
 let acquired = 0;
+const connect = async () => {
+  const name = ++acquired === 1 ? "first" : "rebound";
+  calls.push(`connect:${name}`);
+  return {
+    browser: { isConnected: () => true, close: async () => { calls.push(`close:${name}`); } },
+    page: { isClosed: () => false, waitForFunction: async () => {
+      if (name === "rebound") throw new Error("Synthetic viewport failure");
+    } },
+  };
+};
 mock.module("../../src/launcher-browser-host", () => ({
   ...host,
   notifyLauncherTurn: async () => { calls.push("heartbeat"); return {}; },
-  connectLauncherBrowserHost: async () => {
-    const name = ++acquired === 1 ? "first" : "rebound";
-    calls.push(`connect:${name}`);
-    return {
-      browser: { close: async () => { calls.push(`close:${name}`); } },
-      page: { isClosed: () => false, waitForFunction: async () => {
-        if (name === "rebound") throw new Error("Synthetic viewport failure");
-      } },
-    };
-  },
+  connectLauncherBrowserHost: connect,
 }));
 const { ChatGptBrowserWorker, ChatGptBrowserObservationTimeoutError } = await import("../../src/adapters/chatgpt-web/browser-worker");
 const worker = Object.assign(Object.create(ChatGptBrowserWorker.prototype), {
   config: { browserHost: "launcher", browserHostDescriptorPath: "/synthetic/unused" },
+  launcherConnections: { acquire: connect, release: async (connection: Awaited<ReturnType<typeof connect>>, reusable: boolean) => { if (!reusable) await connection.browser.close(); } },
   runStage: async (_trace: string, _stage: string, _timeout: number, action: (signal: AbortSignal) => Promise<unknown>) => action(new AbortController().signal),
   selectModelAndEffort: async () => ({ effort: "medium", localTools: false }),
   captureSubmissionBaseline: async () => ({ initialResponseTurnIdentities: [], domCache: {} }),

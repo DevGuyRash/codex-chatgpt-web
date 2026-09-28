@@ -6,6 +6,7 @@ import { join } from "node:path";
 import {
   LAUNCHER_BROWSER_HOST_KIND,
   LAUNCHER_BROWSER_IDLE_URL,
+  LauncherBrowserConnectionPool,
   LauncherManualTurnTimedOutError,
   LauncherRetainedConversationUnavailableError,
   LauncherBrowserTurnCancelledError,
@@ -452,6 +453,52 @@ test("launcher page selection stops immediately when acquisition is aborted", as
     descriptor.surfaceId,
     controller.signal,
   )).rejects.toMatchObject({ name: "AbortError" });
+});
+
+test("idle launcher CDP leases are reused exclusively and stale owners are disconnected", async () => {
+  const original = readLauncherBrowserHostDescriptor(descriptorFile());
+  let current = original, connects = 0;
+  const closed: number[] = [];
+  const makeConnection = () => {
+    const id = ++connects;
+    let connected = true;
+    const browser = { isConnected: () => connected, close: async () => { connected = false; closed.push(id); } } as unknown as Browser;
+    return { descriptor: current, browser, context: { id } as unknown as BrowserContext, page: { id } as unknown as Page };
+  };
+  const pool = new LauncherBrowserConnectionPool(2, {
+    read: () => current,
+    connect: async () => makeConnection(),
+    select: async browser => ({ context: { browser } as unknown as BrowserContext, page: { browser } as unknown as Page }),
+  });
+  const aborted = new AbortController(); aborted.abort();
+  await expect(pool.acquire("owned", 100, original.surfaceId, aborted.signal)).rejects.toMatchObject({ name: "AbortError" });
+  expect(connects).toBe(0);
+  const first = await pool.acquire("owned", 100, original.surfaceId);
+  await pool.release(first, true, "owned");
+  const reused = await pool.acquire("owned", 100, original.surfaceId);
+  expect(reused.browser).toBe(first.browser);
+  expect(connects).toBe(1);
+  const concurrent = await pool.acquire("owned", 100, original.surfaceId);
+  expect(concurrent.browser).not.toBe(first.browser);
+  expect(connects).toBe(2);
+  await pool.release(reused, true, "owned");
+  await pool.release(concurrent, true, "owned");
+  const surplus = await pool.acquire("owned", 100, original.surfaceId);
+  const extra = await pool.acquire("owned", 100, original.surfaceId);
+  const third = await pool.acquire("owned", 100, original.surfaceId);
+  await pool.release(surplus, true, "owned");
+  await pool.release(extra, true, "owned");
+  await pool.release(third, true, "owned");
+  expect(closed).toContain(3);
+  current = { ...original, pid: original.pid + 1, createdAt: new Date(Date.now() + 1000).toISOString() };
+  const replacement = await pool.acquire("owned", 100, original.surfaceId);
+  expect(replacement.browser).not.toBe(first.browser);
+  expect(connects).toBe(4);
+  expect(closed).toContain(1);
+  expect(closed).toContain(2);
+  await pool.release(replacement, false, "owned");
+  expect(closed).toContain(4);
+  await pool.close();
 });
 
 test("manual launcher control separates idempotent start from reconnectable Sent observation", async () => {

@@ -70,6 +70,8 @@ import {
 import { loginVerificationMarkerPath } from "../../browser-login";
 import {
   connectLauncherBrowserHost,
+  LauncherBrowserConnectionPool,
+  type LauncherBrowserConnection,
   LAUNCHER_BROWSER_IDLE_URL,
   LauncherBrowserTurnCancelledError,
   LauncherRetainedConversationUnavailableError,
@@ -2125,6 +2127,7 @@ export class ChatGptBrowserWorker {
   private page?: Page;
   private managedBrowserReady?: Promise<{ browser: Browser; context: BrowserContext }>;
   private launcherHelper?: LauncherBrowserHelperClient;
+  private readonly launcherConnections = new LauncherBrowserConnectionPool(2);
   private maintenanceTail: Promise<void> = Promise.resolve();
   private readonly activeRuns = new Map<string, Promise<string>>();
 
@@ -2258,6 +2261,7 @@ export class ChatGptBrowserWorker {
     }
     await Promise.allSettled([...this.activeRuns.values()]);
     await this.maintenanceTail;
+    await this.launcherConnections.close();
     const browser = this.browser;
     this.browser = undefined;
     this.context = undefined;
@@ -4535,7 +4539,8 @@ export class ChatGptBrowserWorker {
       this.config.browserDiagnosticsPath ?? join(getConfigDir(), "diagnostics", "browser-turns"),
       this.config.appName,
     );
-    let turnConnection: Browser | undefined;
+    let turnConnection: LauncherBrowserConnection | undefined;
+    let browserTurnCompleted = false;
     let managedPage: Page | undefined;
     let diagnosticPage: Page | undefined;
     let browserSendActivated = false;
@@ -4617,17 +4622,17 @@ export class ChatGptBrowserWorker {
           }
           return managed;
         }
-        const connection = await connectLauncherBrowserHost(
+        const connection = await this.launcherConnections.acquire(
           this.config.browserHostDescriptorPath!,
           browserStageTimeouts.browserPage,
           launcherSurfaceId,
           abortSignal,
         );
         if (abortSignal.aborted) {
-          await connection.browser.close().catch(() => {});
+          await this.launcherConnections.release(connection, false, this.config.browserHostDescriptorPath!).catch(() => {});
           throw new DOMException("ChatGPT browser page acquisition aborted", "AbortError");
         }
-        turnConnection = connection.browser;
+        turnConnection = connection;
         await waitForOperationalChatGptViewport(connection.page, abortSignal);
         return connection.page;
       });
@@ -4644,7 +4649,7 @@ export class ChatGptBrowserWorker {
           `[chatgpt-web] browser turn ${turn.traceId} is rebinding its existing launcher page after an unavailable observation:`
           + ` ${redactChatGptUiDiagnostic(cause.message)}`,
         );
-        const previousConnection = turnConnection;
+        const previousConnection = turnConnection?.browser;
         // The observation timeout races the Playwright operation but cannot cancel the underlying
         // page.evaluate by itself. A failed disconnect is terminal: opening a replacement while
         // the stale probe still owns its transport would recreate the contention this rebind is
@@ -4669,14 +4674,14 @@ export class ChatGptBrowserWorker {
                   helperPid: process.pid,
                   refreshViewport: true,
                 });
-                const rebound = await connectLauncherBrowserHost(
+                const rebound = await this.launcherConnections.acquire(
                   this.config.browserHostDescriptorPath!,
                   browserStageTimeouts.browserPage,
                   launcherSurfaceId,
                   signal,
                 );
                 // Acquire ownership before validation so failure still releases this transport.
-                turnConnection = rebound.browser;
+                turnConnection = rebound;
                 diagnosticPage = rebound.page;
                 await waitForOperationalChatGptViewport(rebound.page, signal);
                 return rebound;
@@ -4684,7 +4689,7 @@ export class ChatGptBrowserWorker {
             );
           },
         );
-        turnConnection = connection.browser;
+        turnConnection = connection;
         page = connection.page;
         diagnosticPage = page;
         console.warn(
@@ -4737,7 +4742,7 @@ export class ChatGptBrowserWorker {
       const launcherObservationRecovery = launcherSurfaceId !== undefined
         && this.config.browserHostDescriptorPath !== undefined;
       const launcherTransportDisconnected = launcherObservationRecovery
-        ? () => turnConnection?.isConnected() === false
+        ? () => turnConnection?.browser.isConnected() === false
         : undefined;
       await diagnostics.capture(page, "browser-page-acquired");
       console.info(
@@ -5312,7 +5317,7 @@ export class ChatGptBrowserWorker {
         await new Promise(resolveSleep => setTimeout(resolveSleep, 250));
        } catch (error) {
         if (error instanceof Error && !sideEffectBoundaryReached && !observedThisIteration
-          && launcherSurfaceId && turnConnection?.isConnected() === false && !turn.abortSignal?.aborted) {
+          && launcherSurfaceId && turnConnection?.browser.isConnected() === false && !turn.abortSignal?.aborted) {
           await rebindStreamingObservation(error);
           continue;
         }
@@ -5358,6 +5363,7 @@ export class ChatGptBrowserWorker {
         `[chatgpt-web] browser turn ${turn.traceId} completed`
         + ` (markdownChars=${finalText.length}, domFullScans=${responseDomCache.fullScans ?? 0}, domCacheHits=${responseDomCache.cacheHits ?? 0})`,
       );
+      browserTurnCompleted = true;
       return finalText;
     } catch (error) {
       if (!(error instanceof DOMException && error.name === "AbortError")
@@ -5384,7 +5390,7 @@ export class ChatGptBrowserWorker {
       submissionRejection.dispose();
       prepared.release();
       if (turnConnection) {
-        await turnConnection.close().catch(error => {
+        await this.launcherConnections.release(turnConnection, browserTurnCompleted && !turn.abortSignal?.aborted, this.config.browserHostDescriptorPath!).catch(error => {
           console.error(
             `[chatgpt-web] failed to release launcher browser connection for ${turn.traceId}: ${error instanceof Error ? error.message : String(error)}`,
           );

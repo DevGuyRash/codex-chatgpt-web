@@ -23,24 +23,26 @@ const reboundPage = {
   waitForFunction: async () => {},
   evaluate: async () => ({}),
 } as unknown as Page;
+const connect = async () => {
+  const first = ++acquired === 1;
+  calls.push(first ? "connect:first" : "connect:rebound");
+  return {
+    browser: { isConnected: () => first ? firstConnected : true,
+      close: async () => { calls.push(first ? "close:first" : "close:rebound"); } },
+    page: first ? firstPage : reboundPage,
+  };
+};
 mock.module("../../src/launcher-browser-host", () => ({
   ...host,
   notifyLauncherTurn: async () => { calls.push("heartbeat"); return {}; },
-  connectLauncherBrowserHost: async () => {
-    const first = ++acquired === 1;
-    calls.push(first ? "connect:first" : "connect:rebound");
-    return {
-      browser: { isConnected: () => first ? firstConnected : true,
-        close: async () => { calls.push(first ? "close:first" : "close:rebound"); } },
-      page: first ? firstPage : reboundPage,
-    };
-  },
+  connectLauncherBrowserHost: connect,
 }));
 const { ChatGptBrowserWorker } = await import("../../src/adapters/chatgpt-web/browser-worker");
 const observedAfterRebind = new Error("fixture reached the rebound response");
 let reads = 0;
 const worker = Object.assign(Object.create(ChatGptBrowserWorker.prototype), {
   config: { browserHost: "launcher", browserHostDescriptorPath: "/synthetic/owned", appName: "Codex Native2" },
+  launcherConnections: { acquire: connect, release: async (connection: Awaited<ReturnType<typeof connect>>, reusable: boolean) => { if (!reusable) await connection.browser.close(); } },
   runStage: async (_trace: string, _stage: string, _timeout: number, action: (signal: AbortSignal) => Promise<unknown>) => action(new AbortController().signal),
   selectModelAndEffort: async () => ({ effort: "medium", localTools: false }),
   captureSubmissionBaseline: async () => ({ initialUserTurnIdentities: [], initialResponseTurnIdentities: [], domCache: {} }),

@@ -308,6 +308,80 @@ export async function connectLauncherBrowserHost(
   }
 }
 
+type LauncherConnectionOperations = {
+  read: typeof readLauncherBrowserHostDescriptor;
+  connect: typeof connectLauncherBrowserHost;
+  select: typeof selectLauncherPage;
+};
+
+/** Reuse only idle CDP transports; active turns retain exclusive cancellation ownership. */
+export class LauncherBrowserConnectionPool {
+  private readonly idle: LauncherBrowserConnection[] = [];
+
+  constructor(
+    private readonly maxIdle = 2,
+    private readonly operations: LauncherConnectionOperations = {
+      read: readLauncherBrowserHostDescriptor,
+      connect: connectLauncherBrowserHost,
+      select: selectLauncherPage,
+    },
+  ) {
+    if (!Number.isSafeInteger(maxIdle) || maxIdle < 1 || maxIdle > 8) throw new Error("Launcher CDP pool requires a bounded idle capacity");
+  }
+
+  private sameLauncher(left: LauncherBrowserHostDescriptor, right: LauncherBrowserHostDescriptor): boolean {
+    return left.pid === right.pid && left.endpoint === right.endpoint
+      && left.partition === right.partition && left.createdAt === right.createdAt;
+  }
+
+  private async disconnect(browser: Browser): Promise<void> {
+    if (browser.isConnected()) await browser.close();
+  }
+
+  async acquire(descriptorPath: string, timeoutMs: number, surfaceId: string, signal?: AbortSignal): Promise<LauncherBrowserConnection> {
+    signal?.throwIfAborted();
+    const descriptor = this.operations.read(descriptorPath);
+    while (this.idle.length) {
+      const previous = this.idle.pop()!;
+      if (!previous.browser.isConnected() || !this.sameLauncher(previous.descriptor, descriptor)) {
+        await this.disconnect(previous.browser);
+        continue;
+      }
+      try {
+        const { context, page } = await this.operations.select(previous.browser, descriptor, timeoutMs, surfaceId, signal);
+        signal?.throwIfAborted();
+        return { descriptor, browser: previous.browser, context, page };
+      } catch (error) {
+        // A selected page may have closed while it was idle. Do not place a possibly stale
+        // transport back in the pool or create a competing connection before it is released.
+        await this.disconnect(previous.browser);
+        throw error;
+      }
+    }
+    return this.operations.connect(descriptorPath, timeoutMs, surfaceId, signal);
+  }
+
+  async release(connection: LauncherBrowserConnection, reusable: boolean, descriptorPath: string): Promise<void> {
+    if (this.idle.some(entry => entry.browser === connection.browser)) throw new Error("Launcher CDP connection was released twice");
+    if (reusable && connection.browser.isConnected() && this.idle.length < this.maxIdle) {
+      let current: LauncherBrowserHostDescriptor | undefined;
+      try { current = this.operations.read(descriptorPath); } catch { /* The launcher may have exited. */ }
+      if (current && this.sameLauncher(connection.descriptor, current)) {
+        this.idle.push(connection);
+        return;
+      }
+    }
+    await this.disconnect(connection.browser);
+  }
+
+  async close(): Promise<void> {
+    const idle = this.idle.splice(0);
+    const settled = await Promise.allSettled(idle.map(connection => this.disconnect(connection.browser)));
+    const failures = settled.filter((result): result is PromiseRejectedResult => result.status === "rejected").map(result => result.reason);
+    if (failures.length) throw new AggregateError(failures, "Launcher idle CDP transports did not all disconnect");
+  }
+}
+
 export async function inspectLauncherBrowserHost(
   descriptorPath: string,
   options: {

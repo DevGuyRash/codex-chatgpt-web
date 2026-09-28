@@ -45,8 +45,10 @@ export async function inspectCaptureSurface(page: Page): Promise<{ allowed: bool
   } catch { return { allowed: false, reason: "inspection-failed" }; }
 }
 
-/** Capture the current viewport intersection without scrolling or waiting for layout stability. */
-export async function captureVisibleConversationImage(page: Page): Promise<Buffer> {
+type ConversationClip = { x: number; y: number; width: number; height: number };
+
+/** Capture only the current viewport intersection; never include the sidebar. */
+async function visibleConversationClip(page: Page): Promise<ConversationClip> {
   const clip = await page.locator("main").evaluate((main, composerSelector) => {
     const regions = [main, ...main.querySelectorAll(`[data-message-author-role="user"],[data-message-author-role="assistant"],[data-message-author-role="tool"],[data-turn-key] [data-user-message-bubble],[data-turn-key] [data-markdown-text-style="assistant-message"],${composerSelector}`)].flatMap(element => {
       const style = getComputedStyle(element);
@@ -63,18 +65,56 @@ export async function captureVisibleConversationImage(page: Page): Promise<Buffe
     return { x, y, width: Math.max(...regions.map(rect => rect.right)) - x, height: Math.max(...regions.map(rect => rect.bottom)) - y };
   }, CHATGPT_COMPOSER_SELECTOR, { timeout: 3000 });
   if (!Object.values(clip).every(Number.isFinite) || clip.width <= 0 || clip.height <= 0) throw new Error("Conversation is outside the visible viewport");
+  return clip;
+}
+
+/** Capture the current viewport intersection without scrolling or waiting for layout stability. */
+export async function captureVisibleConversationImage(page: Page): Promise<Buffer> {
+  const clip = await visibleConversationClip(page);
   // Disabling animations fast-forwards finite animations and dispatches their finish handlers.
   // Evidence collection must observe the app, not trigger its pending UI transitions.
   return await page.screenshot({ clip, animations: "allow", caret: "hide", timeout: 3000, type: "png" });
 }
 
-/** Retry one transient Chromium timeout only after the caller revalidates privacy and URL ownership. */
-export async function captureVisibleConversationImageWithRetry(page: Page, revalidate: () => Promise<boolean>): Promise<Buffer | null> {
+/** A direct Chromium capture bypasses Playwright's font/animation preparation after its bounded retries. */
+async function captureVisibleConversationImageViaCdp(page: Page): Promise<Buffer> {
+  const clip = await visibleConversationClip(page);
+  const session = await page.context().newCDPSession(page);
+  let timeout: ReturnType<typeof setTimeout> | undefined;
+  try {
+    const response = await Promise.race([
+      session.send("Page.captureScreenshot", { format: "png", captureBeyondViewport: false, clip: { ...clip, scale: 1 } }),
+      new Promise<never>((_resolve, reject) => {
+        timeout = setTimeout(() => reject(Object.assign(new Error("Direct conversation capture timed out"), { name: "TimeoutError" })), 5000);
+      }),
+    ]);
+    return Buffer.from(response.data, "base64");
+  } finally {
+    if (timeout) clearTimeout(timeout);
+    // Try to release an outstanding CDP command without letting cleanup stall the native turn.
+    let detachTimeout: ReturnType<typeof setTimeout> | undefined;
+    try {
+      await Promise.race([
+        session.detach().catch(() => {}),
+        new Promise<void>(resolve => { detachTimeout = setTimeout(resolve, 1000); }),
+      ]);
+    } finally { if (detachTimeout) clearTimeout(detachTimeout); }
+  }
+}
+
+/** Retry transient Chromium timeouts only after privacy and URL ownership are revalidated. */
+export async function captureVisibleConversationImageWithRetry(page: Page, revalidate: (next: "retry" | "direct") => Promise<boolean>): Promise<Buffer | null> {
   try { return await captureVisibleConversationImage(page); }
   catch (error) {
     if (!(error instanceof Error) || error.name !== "TimeoutError") throw error;
-    if (!await revalidate()) return null;
-    return await captureVisibleConversationImage(page);
+    if (!await revalidate("retry")) return null;
+    try { return await captureVisibleConversationImage(page); }
+    catch (retryError) {
+      if (!(retryError instanceof Error) || retryError.name !== "TimeoutError") throw retryError;
+      if (!await revalidate("direct")) return null;
+      if (typeof page.context !== "function") throw retryError;
+      return await captureVisibleConversationImageViaCdp(page);
+    }
   }
 }
 
@@ -209,10 +249,12 @@ export async function captureBrowserCheckpoint(page: Page, checkpoint: string, f
       }
     }
     collectionStage = "screenshot";
-    const png = campaign ? await captureVisibleConversationImageWithRetry(page, async () => {
-      if (!await validateCapturedSurface("screenshot-retry-validation")) return false;
-      collectionStage = "screenshot-retry";
-      diagnostics.event("capture.retry", "Conversation screenshot timed out once; retrying after surface validation", { checkpoint, collectionStage }, "warning");
+    const png = campaign ? await captureVisibleConversationImageWithRetry(page, async next => {
+      if (!await validateCapturedSurface(next === "retry" ? "screenshot-retry-validation" : "screenshot-direct-validation")) return false;
+      collectionStage = next === "retry" ? "screenshot-retry" : "screenshot-direct";
+      diagnostics.event(next === "retry" ? "capture.retry" : "capture.fallback", next === "retry"
+        ? "Conversation screenshot timed out once; retrying after surface validation"
+        : "Conversation screenshot timed out twice; trying bounded direct Chromium capture after surface validation", { checkpoint, collectionStage }, "warning");
       return true;
     }) : await page.screenshot({ animations: "allow", caret: "hide", timeout: 3000, type: "png" });
     if (!png) return;

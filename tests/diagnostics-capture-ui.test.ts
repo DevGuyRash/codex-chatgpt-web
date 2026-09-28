@@ -18,6 +18,33 @@ test("a timed-out campaign screenshot retries only after the caller validates it
   const stalledPage = { ...page, screenshot: async () => { repeated++; throw timeout; } } as unknown as Page;
   await expect(captureVisibleConversationImageWithRetry(stalledPage, async () => true)).rejects.toMatchObject({ name: "TimeoutError" });
   expect(repeated).toBe(2);
+  let surfaceChecks = 0;
+  const rejectedDirect = { ...stalledPage, context: () => { throw new Error("Direct capture must not start after surface rejection"); } } as unknown as Page;
+  expect(await captureVisibleConversationImageWithRetry(rejectedDirect, async () => ++surfaceChecks === 1)).toBeNull();
+  expect(surfaceChecks).toBe(2);
+});
+
+test("a twice-timed-out Playwright screenshot falls back to a clipped Chromium capture", async () => {
+  const browser = await chromium.launch({ executablePath: process.env.CHATGPT_TEST_CHROME_EXECUTABLE, headless: true });
+  try {
+    const page = await browser.newPage({ viewport: { width: 800, height: 600 } });
+    await page.route("**/*", route => route.fulfill({ contentType: "text/html", body: '<main></main><textarea id="prompt-textarea"></textarea>' }));
+    await page.goto("https://chatgpt.com/c/fixture");
+    await page.setContent('<style>body{margin:0}aside{position:absolute;width:200px;height:600px;background:red}main{position:absolute;left:200px;width:600px;height:600px;background:blue}</style><aside>Unrelated sidebar</aside><main>Visible conversation</main><textarea id="prompt-textarea"></textarea>');
+    let screenshots = 0, validations = 0, fallbacks = 0;
+    const screenshot = page.screenshot;
+    page.screenshot = async () => { screenshots++; throw Object.assign(new Error("Synthetic renderer timeout"), { name: "TimeoutError" }); };
+    try {
+      const image = await captureVisibleConversationImageWithRetry(page, async next => {
+        validations++;
+        if (next === "direct") fallbacks++;
+        return (await inspectCaptureSurface(page)).allowed;
+      });
+      expect(image?.readUInt32BE(16)).toBe(600);
+      expect(image?.readUInt32BE(20)).toBe(600);
+      expect({ screenshots, validations, fallbacks }).toEqual({ screenshots: 2, validations: 2, fallbacks: 1 });
+    } finally { page.screenshot = screenshot; }
+  } finally { await browser.close(); }
 });
 import { visibleChatGptAlertSummary } from "../src/adapters/chatgpt-web/browser-worker";
 

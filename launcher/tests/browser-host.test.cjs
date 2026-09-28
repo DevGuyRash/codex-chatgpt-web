@@ -529,6 +529,22 @@ test("session inspection reports an authentication route before launching a help
   assert.equal(helperStarted, false);
 });
 
+test("session inspection reports sign-in before joining a stalled saved-session refresh", async () => {
+  const fixture = Object.assign(Object.create(BrowserHost.prototype), {
+    sessionRefreshOperation: new Promise(() => {}),
+    view: { webContents: { getURL: () => "https://chatgpt.com/auth/login" } },
+    logger: { warn() {} },
+    withManualOperation: async () => { throw new Error("inspection acquired the browser"); },
+  });
+  let timer;
+  try {
+    await assert.rejects(Promise.race([
+      BrowserHost.prototype.inspectSession.call(fixture, true),
+      new Promise((_, reject) => { timer = setTimeout(() => reject(new Error("inspection waited for refresh")), 100); }),
+    ]), error => error.code === "chatgpt_authentication_required");
+  } finally { clearTimeout(timer); }
+});
+
 test("home reload reapplies its hidden viewport before capability inspection", async () => {
   const calls = [];
   const fixture = {
@@ -1014,6 +1030,7 @@ test("session inspection joins the existing refresh and preserves its failure be
       return await action();
     },
     runSessionInspection: async capabilities => { calls.push(capabilities); return { authenticated: true }; },
+    assertSessionInspectionNotAuthenticationRoute() {},
   };
   const inspecting = BrowserHost.prototype.inspectSession.call(fixture, true);
   void inspecting.catch(() => {});

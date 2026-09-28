@@ -2982,6 +2982,10 @@ class BrowserHost {
 
   async inspectSession(detectCapabilities = false) {
     requireAutomaticBrowserInspection(this, "ChatGPT session and capability inspection");
+    // A stale saved-session refresh can still be awaiting a navigation or renderer callback after
+    // ChatGPT has already sent the owned page to sign-in. Do not make the control request wait for
+    // that unrelated work when the current document already proves authentication is required.
+    this.assertSessionInspectionNotAuthenticationRoute();
     if (this.sessionRefreshOperation) {
       await this.sessionRefreshOperation;
       requireAutomaticBrowserInspection(this, "ChatGPT session and capability inspection");
@@ -2992,16 +2996,20 @@ class BrowserHost {
     return await this.withManualOperation("session inspection", () => this.runSessionInspection(detectCapabilities));
   }
 
-  async runSessionInspection(detectCapabilities = false) {
-    requireAutomaticBrowserInspection(this, "ChatGPT session and capability inspection");
-    const connectorName = this.connectorName();
-    const initialUrl = this.view.webContents.getURL();
-    if (allowedAuthUrl(initialUrl)) {
+  assertSessionInspectionNotAuthenticationRoute() {
+    if (allowedAuthUrl(this.view?.webContents?.getURL?.())) {
       const error = new Error("ChatGPT sign-in is required in the launcher before session inspection");
       error.code = "chatgpt_authentication_required";
       this.logger.warn("browser.session_inspection_auth_required", { route: "authentication" });
       throw error;
     }
+  }
+
+  async runSessionInspection(detectCapabilities = false) {
+    requireAutomaticBrowserInspection(this, "ChatGPT session and capability inspection");
+    const connectorName = this.connectorName();
+    const initialUrl = this.view.webContents.getURL();
+    this.assertSessionInspectionNotAuthenticationRoute();
     const startedIdle = initialUrl === IDLE_BROWSER_URL;
     if (detectCapabilities && (!this.visible || !this.surfaceActive)) {
       // A hidden WebContentsView can lose its emulated viewport without navigation. Give the

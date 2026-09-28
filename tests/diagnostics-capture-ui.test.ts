@@ -1,6 +1,24 @@
 import { expect, test } from "bun:test";
-import { chromium } from "playwright-core";
-import { isPrivateCaptureSurface, visibleConversationState, captureVisibleConversationImage, captureVisibleChatGptAlertImages, visibleChatGptAlertTexts, inspectCaptureSurface } from "../src/diagnostics/browser-capture";
+import { chromium, type Page } from "playwright-core";
+import { isPrivateCaptureSurface, visibleConversationState, captureVisibleConversationImage, captureVisibleConversationImageWithRetry, captureVisibleChatGptAlertImages, visibleChatGptAlertTexts, inspectCaptureSurface } from "../src/diagnostics/browser-capture";
+
+test("a timed-out campaign screenshot retries only after the caller validates its unchanged surface", async () => {
+  let screenshots = 0, validations = 0;
+  const timeout = Object.assign(new Error("Synthetic renderer timeout"), { name: "TimeoutError" });
+  const page = {
+    locator: () => ({ evaluate: async () => ({ x: 0, y: 0, width: 100, height: 80 }) }),
+    screenshot: async () => { if (++screenshots === 1) throw timeout; return Buffer.from("synthetic image"); },
+  } as unknown as Page;
+  expect(await captureVisibleConversationImageWithRetry(page, async () => { validations++; return true; })).toEqual(Buffer.from("synthetic image"));
+  expect({ screenshots, validations }).toEqual({ screenshots: 2, validations: 1 });
+  screenshots = 0;
+  expect(await captureVisibleConversationImageWithRetry(page, async () => { validations++; return false; })).toBeNull();
+  expect({ screenshots, validations }).toEqual({ screenshots: 1, validations: 2 });
+  let repeated = 0;
+  const stalledPage = { ...page, screenshot: async () => { repeated++; throw timeout; } } as unknown as Page;
+  await expect(captureVisibleConversationImageWithRetry(stalledPage, async () => true)).rejects.toMatchObject({ name: "TimeoutError" });
+  expect(repeated).toBe(2);
+});
 import { visibleChatGptAlertSummary } from "../src/adapters/chatgpt-web/browser-worker";
 
 test("rendered capture gate excludes credential controls even when their input type is generic", async () => {

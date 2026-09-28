@@ -68,6 +68,16 @@ export async function captureVisibleConversationImage(page: Page): Promise<Buffe
   return await page.screenshot({ clip, animations: "allow", caret: "hide", timeout: 3000, type: "png" });
 }
 
+/** Retry one transient Chromium timeout only after the caller revalidates privacy and URL ownership. */
+export async function captureVisibleConversationImageWithRetry(page: Page, revalidate: () => Promise<boolean>): Promise<Buffer | null> {
+  try { return await captureVisibleConversationImage(page); }
+  catch (error) {
+    if (!(error instanceof Error) || error.name !== "TimeoutError") throw error;
+    if (!await revalidate()) return null;
+    return await captureVisibleConversationImage(page);
+  }
+}
+
 /** Capture only visible alert rectangles after a failed owned turn; never scroll or include the sidebar. */
 export async function captureVisibleChatGptAlertImages(page: Page): Promise<Buffer[]> {
   const regions = await page.locator('[role="alert"]').evaluateAll(elements => elements.flatMap(element => {
@@ -199,7 +209,13 @@ export async function captureBrowserCheckpoint(page: Page, checkpoint: string, f
       }
     }
     collectionStage = "screenshot";
-    const png = campaign ? await captureVisibleConversationImage(page) : await page.screenshot({ animations: "allow", caret: "hide", timeout: 3000, type: "png" });
+    const png = campaign ? await captureVisibleConversationImageWithRetry(page, async () => {
+      if (!await validateCapturedSurface("screenshot-retry-validation")) return false;
+      collectionStage = "screenshot-retry";
+      diagnostics.event("capture.retry", "Conversation screenshot timed out once; retrying after surface validation", { checkpoint, collectionStage }, "warning");
+      return true;
+    }) : await page.screenshot({ animations: "allow", caret: "hide", timeout: 3000, type: "png" });
+    if (!png) return;
     if (!await validateCapturedSurface("screenshot-validation")) return;
     if (campaign) {
       collectionStage = "screenshot-storage";

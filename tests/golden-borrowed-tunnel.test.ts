@@ -12,7 +12,7 @@ test("borrowing the configured tunnel requires inactive production and rejects o
   const binary = join(root, "tunnel"), mode = join(root, "mode"), calls = join(root, "calls");
   const tunnelId = `tunnel_${"b".repeat(32)}`;
   writeFileSync(mode, "stopped");
-  writeFileSync(binary, `#!${process.execPath}\nimport { appendFileSync, readFileSync } from "node:fs";\nconst action=process.argv[3], alias=process.argv[4], mode=readFileSync(${JSON.stringify(mode)},"utf8");\nappendFileSync(${JSON.stringify(calls)}, action + "\\n");\nif(action === "list") console.log(JSON.stringify({aliases:[{alias:"source",tunnel_id:${JSON.stringify(tunnelId)}},{alias:"other",tunnel_id:${JSON.stringify(tunnelId)}}]}));\nelse if(action === "status") console.log(JSON.stringify(mode === "unknown" ? {} : {runtime_state:mode === "active" && alias === "other" ? "ready" : "stopped",process_running:mode === "active" && alias === "other",healthy:false,ready:false}));\nelse process.exit(99);\n`, { mode: 0o700 }); chmodSync(binary, 0o700);
+  writeFileSync(binary, `#!${process.execPath}\nimport { appendFileSync, readFileSync } from "node:fs";\nconst action=process.argv[3], alias=process.argv[4], mode=readFileSync(${JSON.stringify(mode)},"utf8");\nappendFileSync(${JSON.stringify(calls)}, action + "\\n");\nif(action === "list") console.log(JSON.stringify({aliases:[{alias:"source",tunnel_id:${JSON.stringify(tunnelId)}},{alias:"other",tunnel_id:${JSON.stringify(tunnelId)}}]}));\nelse if(action === "status") console.log(JSON.stringify(mode === "unknown" ? {} : {runtime_state:mode === "active" && alias === "other" ? "ready" : mode === "starting" && alias === "source" ? "starting" : "stopped",process_running:mode === "active" && alias === "other",healthy:false,ready:false}));\nelse process.exit(99);\n`, { mode: 0o700 }); chmodSync(binary, 0o700);
   const server = createServer();
   await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
   const address = server.address(); if (!address || typeof address === "string") throw new Error("Fixture port missing");
@@ -27,9 +27,11 @@ test("borrowing the configured tunnel requires inactive production and rejects o
     await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve()));
     await assertBorrowedTunnelInactive(sourceHome, isolated, selected);
     writeFileSync(mode, "active");
-    await expect(assertBorrowedTunnelInactive(sourceHome, isolated, selected)).rejects.toThrow("active or cannot");
+    await expect(assertBorrowedTunnelInactive(sourceHome, isolated, selected)).rejects.toMatchObject({ code: "borrowed_tunnel_active" });
+    writeFileSync(mode, "starting");
+    await expect(assertBorrowedTunnelInactive(sourceHome, isolated, selected)).rejects.toMatchObject({ code: "borrowed_tunnel_state_uncertain", message: expect.stringContaining("starting") });
     writeFileSync(mode, "unknown");
-    await expect(assertBorrowedTunnelInactive(sourceHome, isolated, selected)).rejects.toThrow("active or cannot");
+    await expect(assertBorrowedTunnelInactive(sourceHome, isolated, selected)).rejects.toMatchObject({ code: "borrowed_tunnel_state_uncertain", message: expect.stringContaining("unknown") });
     mkdirSync(join(sourceHome, "runtime"));
     writeFileSync(source.brokerSocketPath, "unresolved socket owner");
     await expect(assertBorrowedTunnelInactive(sourceHome, isolated, selected)).rejects.toThrow("broker still exists");

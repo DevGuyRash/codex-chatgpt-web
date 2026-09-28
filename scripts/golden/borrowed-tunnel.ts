@@ -4,6 +4,9 @@ import { loadConfig, type AppConfig } from "../../src/config";
 import { containsPath } from "../../src/diagnostics/paths";
 import { runCommand } from "../../src/process";
 import { tunnelStatus } from "../../src/tunnel";
+import { DiagnosticError } from "../../src/diagnostics/problems";
+
+const KNOWN_RUNTIME_STATES = new Set(["stopped", "starting", "ready", "stopping", "failed"]);
 
 export function readBorrowedTunnel(home: string, isolatedRoot: string, selected: Pick<AppConfig, "appName" | "tunnel">): AppConfig {
   if (realpathSync(home) !== home || containsPath(isolatedRoot, home)) throw new Error("The borrowed tunnel source must remain outside the isolated workspace");
@@ -43,6 +46,18 @@ export async function assertBorrowedTunnelInactive(home: string, isolatedRoot: s
   for (const alias of aliases) {
     const status = tunnelStatus({ ...source, tunnel: { ...original, alias } });
     const absent = /not found|unknown alias|\balias\b[^\r\n]{0,160}\bis not known\b/i.test(status.detail);
-    if (status.processRunning || (!absent && status.state !== "stopped")) throw new Error("A runtime for the borrowed tunnel is active or cannot be established as stopped");
+    if (status.processRunning) throw new DiagnosticError({
+      code: "borrowed_tunnel_active", message: "A runtime for the borrowed tunnel is still running; live borrowing is held",
+      origin: "tunnel", retryable: false,
+    });
+    if (!absent && status.state !== "stopped") {
+      const state = status.state && KNOWN_RUNTIME_STATES.has(status.state) ? status.state : "unknown";
+      throw new DiagnosticError({
+        code: "borrowed_tunnel_state_uncertain",
+        message: `The borrowed tunnel alias reports ${state} without a confirmed stopped state; live borrowing is held`,
+        origin: "tunnel", retryable: false,
+        evidenceMissing: "The alias has no running local process, but its tunnel-client state has not settled to stopped.",
+      });
+    }
   }
 }

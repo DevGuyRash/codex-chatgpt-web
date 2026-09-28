@@ -105,3 +105,26 @@ test("pausing an installed provider unloads it for this session and resume valid
     assert.equal(extensions.status().active, true);
   } finally { extensions.destroy(); fs.rmSync(root, { recursive: true, force: true }); }
 });
+
+test("opening a paused provider resumes its reviewed worker before showing its popup", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "extension-open-paused-"));
+  const id = "aeblfdkhhhdcdjpifhhbdiojplfjncoa";
+  const extensionPath = path.join(root, id, "8.12.37.1_0");
+  fs.mkdirSync(extensionPath, { recursive: true });
+  fs.writeFileSync(path.join(extensionPath, "manifest.json"), JSON.stringify({ manifest_version: 3, permissions: [], version: "8.12.37.1" }));
+  const { extensions, browserSession, windows } = extensionFixture();
+  let loads = 0;
+  browserSession.extensions = {
+    removeExtension() {},
+    async loadExtension(value) { loads++; return { id, path: value, version: "8.12.37.1", manifest: { action: { default_popup: "popup.html" } } }; },
+  };
+  extensions.loaded.set(id, { id, path: extensionPath, version: "8.12.37.1", manifest: { action: { default_popup: "popup.html" } } });
+  try {
+    extensions.pause(id);
+    await extensions.open(id);
+    assert.equal(loads, 1);
+    assert.equal(extensions.status().active, true);
+    assert.equal(windows.length, 1);
+    assert.equal(windows[0].isDestroyed(), false);
+  } finally { extensions.destroy(); fs.rmSync(root, { recursive: true, force: true }); }
+});

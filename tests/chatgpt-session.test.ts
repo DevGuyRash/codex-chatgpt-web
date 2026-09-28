@@ -1,5 +1,8 @@
 import { expect, test } from "bun:test";
-import { ChatGptBrowserWorker } from "../src/adapters/chatgpt-web/browser-worker";
+import { ChatGptBrowserWorker, navigateTemporaryChatFromIdle } from "../src/adapters/chatgpt-web/browser-worker";
+import { LAUNCHER_BROWSER_IDLE_URL } from "../src/launcher-browser-host";
+import { CHATGPT_TEMPORARY_CHAT_URL } from "../src/chatgpt-session";
+import type { Page } from "playwright-core";
 import { problemFor, runtimeFailure } from "../src/diagnostics/problems";
 import { adapterErrorEvent } from "../src/lib/errors";
 import {
@@ -10,6 +13,28 @@ import {
   activateChatGptEffortMenu,
   detectChatGptAccountCapabilities,
 } from "../src/chatgpt-session";
+
+test("a displaced pre-Send navigation retries once only from the owned idle document", async () => {
+  let url = LAUNCHER_BROWSER_IDLE_URL, navigations = 0, observations = 0;
+  const displaced = new Error("page.goto: net::ERR_ABORTED");
+  const page = {
+    url: () => url, isClosed: () => false,
+    goto: async () => { if (++navigations === 1) throw displaced; url = CHATGPT_TEMPORARY_CHAT_URL; },
+    waitForURL: async () => { observations++; throw new Error("exact destination did not settle"); },
+  } as unknown as Page;
+  expect(await navigateTemporaryChatFromIdle(page)).toBe(true);
+  expect({ navigations, observations, url }).toEqual({ navigations: 2, observations: 1, url: CHATGPT_TEMPORARY_CHAT_URL });
+
+  url = LAUNCHER_BROWSER_IDLE_URL; navigations = 0; observations = 0;
+  const foreign = { ...page, goto: async () => { navigations++; url = "https://auth.openai.com/"; throw displaced; } } as unknown as Page;
+  await expect(navigateTemporaryChatFromIdle(foreign)).rejects.toBe(displaced);
+  expect({ navigations, observations }).toEqual({ navigations: 1, observations: 0 });
+
+  url = LAUNCHER_BROWSER_IDLE_URL; navigations = 0;
+  const repeated = { ...page, goto: async () => { navigations++; throw displaced; } } as unknown as Page;
+  await expect(navigateTemporaryChatFromIdle(repeated)).rejects.toBe(displaced);
+  expect(navigations).toBe(2);
+});
 
 test("composer and effort selectors exclude unrelated editable fields and menu buttons", () => {
   const { createDocument } = require("@mixmark-io/domino") as { createDocument(html: string): Document };

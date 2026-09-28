@@ -343,6 +343,71 @@ function loadCommittedBrowserSurface(
   });
 }
 
+/** A saved session may redirect to sign-in before Electron's loadURL promise settles. */
+function loadSavedSessionSurface(contents, timeoutMs = BROWSER_NAVIGATION_TIMEOUT_MS) {
+  if (!contents || contents.isDestroyed()) return Promise.reject(new Error("ChatGPT browser closed during saved-session refresh"));
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const cleanup = () => {
+      clearTimeout(timeout);
+      contents.off("did-navigate", onNavigation);
+      contents.off("did-navigate-in-page", onNavigation);
+      contents.off("did-stop-loading", onReady);
+      contents.off("did-finish-load", onReady);
+      contents.off("did-fail-load", onFailed);
+      contents.off("render-process-gone", onRendererGone);
+      contents.off("destroyed", onDestroyed);
+    };
+    const finish = (result, error) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      if (error) reject(error);
+      else resolve(result);
+    };
+    const onNavigation = () => {
+      if (allowedAuthUrl(contents.getURL())) finish("authentication");
+    };
+    const onReady = () => {
+      onNavigation();
+      if (!settled && isTemporaryChatUrl(contents.getURL())) finish("home");
+    };
+    const onFailed = (_event, code, description, _url, mainFrame) => {
+      if (mainFrame && code !== -3) finish(undefined, new Error(`ChatGPT saved-session navigation failed: ${description} (${code})`));
+    };
+    const onRendererGone = (_event, details) => finish(undefined, new Error(`ChatGPT renderer stopped during saved-session refresh: ${details.reason}`));
+    const onDestroyed = () => finish(undefined, new Error("ChatGPT browser closed during saved-session refresh"));
+    const timeout = setTimeout(() => {
+      finish(undefined, new DiagnosticError({
+        code: "chatgpt_session_refresh_timeout",
+        message: "ChatGPT did not finish checking the saved session. Open sign-in to try again.",
+        origin: "browser", stage: "authentication.refresh", retryable: true,
+        evidenceMissing: "The saved-session navigation did not reach a settled ChatGPT or sign-in document.",
+      }));
+      try { if (!contents.isDestroyed()) contents.stop(); } catch {}
+    }, timeoutMs);
+    timeout.unref?.();
+    contents.on("did-navigate", onNavigation);
+    contents.on("did-navigate-in-page", onNavigation);
+    contents.on("did-stop-loading", onReady);
+    contents.on("did-finish-load", onReady);
+    contents.on("did-fail-load", onFailed);
+    contents.on("render-process-gone", onRendererGone);
+    contents.on("destroyed", onDestroyed);
+    try {
+      Promise.resolve(contents.loadURL(TEMPORARY_CHAT_URL)).then(
+        () => finish(allowedAuthUrl(contents.getURL()) ? "authentication" : "home"),
+        error => {
+          if (isAbortedNavigationError(error)) { onNavigation(); return; }
+          finish(undefined, error instanceof Error ? error : new Error(String(error)));
+        },
+      );
+    } catch (error) {
+      finish(undefined, error instanceof Error ? error : new Error(String(error)));
+    }
+  });
+}
+
 class BrowserHost {
   constructor({
     window,
@@ -2747,8 +2812,14 @@ class BrowserHost {
         this.logger.info("browser.session_refresh_signed_out", { evidence: "no_chatgpt_cookies" });
         return this.snapshot();
       }
-      if (!isTemporaryChatUrl(this.view.webContents.getURL())) {
-        await this.view.webContents.loadURL(TEMPORARY_CHAT_URL);
+      const currentUrl = this.view.webContents.getURL();
+      const result = allowedAuthUrl(currentUrl) ? "authentication"
+        : isTemporaryChatUrl(currentUrl) ? "home"
+          : await loadSavedSessionSurface(this.view.webContents);
+      if (result === "authentication") {
+        this.setState({ authenticated: false, loading: false, status: "signed-out", message: "Sign in to ChatGPT" });
+        this.logger.info("browser.session_refresh_signed_out", { evidence: "authentication_route" });
+        return this.snapshot();
       }
       const state = await this.probeAuthentication();
       if (state.authenticated) {
@@ -3168,6 +3239,7 @@ module.exports = {
   isChatGptCloudflareChallengeResponse,
   isTemporaryChatUrl,
   loadCommittedBrowserSurface,
+  loadSavedSessionSurface,
   MANUAL_SUBMIT_TIMEOUT_MS,
   MANUAL_COMPACTION_SUBMIT_TIMEOUT_MS,
   navigationErrorForLog,

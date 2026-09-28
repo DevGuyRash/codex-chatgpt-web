@@ -21,6 +21,7 @@ const {
   isChatGptCloudflareChallengeResponse,
   isTemporaryChatUrl,
   loadCommittedBrowserSurface,
+  loadSavedSessionSurface,
   TEMPORARY_CHAT_URL,
   MANUAL_COMPACTION_SUBMIT_TIMEOUT_MS,
   MANUAL_SUBMIT_TIMEOUT_MS,
@@ -2024,6 +2025,9 @@ test("launcher session refresh resolves persisted authentication before setup ac
     },
     view: {
       webContents: {
+        isDestroyed: () => false,
+        on() {},
+        off() {},
         getURL: () => IDLE_BROWSER_URL,
         loadURL: async (url) => calls.push(["load", url]),
         session: { cookies: { get: async () => [{ domain: ".chatgpt.com" }] } },
@@ -2041,6 +2045,106 @@ test("launcher session refresh resolves persisted authentication before setup ac
     ["probe"],
     ["state", { status: "ready", message: "ChatGPT is ready" }],
   ]);
+});
+
+test("saved-session navigation releases ownership on an authentication redirect", async () => {
+  const contents = new EventEmitter();
+  let url = IDLE_BROWSER_URL;
+  contents.isDestroyed = () => false;
+  contents.getURL = () => url;
+  contents.loadURL = () => new Promise(() => {});
+  contents.stop = () => { throw new Error("an authentication redirect must not be stopped"); };
+  const loading = loadSavedSessionSurface(contents, 100);
+  url = "https://chatgpt.com/auth/login";
+  contents.emit("did-navigate");
+  assert.equal(await loading, "authentication");
+  for (const event of ["did-navigate", "did-navigate-in-page", "did-stop-loading", "did-finish-load", "did-fail-load", "render-process-gone", "destroyed"]) {
+    assert.equal(contents.listenerCount(event), 0);
+  }
+});
+
+test("saved-session navigation tolerates a superseded load before an authentication redirect", async () => {
+  const contents = new EventEmitter();
+  let url = IDLE_BROWSER_URL;
+  contents.isDestroyed = () => false;
+  contents.getURL = () => url;
+  contents.loadURL = async () => { throw new Error("net::ERR_ABORTED"); };
+  contents.stop = () => {};
+  const loading = loadSavedSessionSurface(contents, 100);
+  await Promise.resolve();
+  url = "https://chatgpt.com/auth/login";
+  contents.emit("did-navigate");
+  assert.equal(await loading, "authentication");
+});
+
+test("saved-session redirect settles launcher refresh as signed out without a second probe", async () => {
+  const contents = new EventEmitter();
+  let url = IDLE_BROWSER_URL;
+  let navigationStarted;
+  const started = new Promise(resolve => { navigationStarted = resolve; });
+  contents.isDestroyed = () => false;
+  contents.getURL = () => url;
+  contents.loadURL = () => { navigationStarted(); return new Promise(() => {}); };
+  contents.session = { cookies: { get: async () => [{ domain: ".chatgpt.com" }] } };
+  const updates = [];
+  const fixture = {
+    sessionRefreshOperation: null,
+    manualOperation: null,
+    getLocallySignedOut: () => false,
+    setState: patch => updates.push(patch),
+    snapshot: () => ({ authenticated: false }),
+    probeAuthentication: async () => { throw new Error("authentication redirect was probed again"); },
+    logger: { info() {} },
+    view: { webContents: contents },
+    withManualOperation: async function (name, action) {
+      this.manualOperation = name;
+      try { return await action(); }
+      finally { this.manualOperation = null; }
+    },
+  };
+  const refresh = BrowserHost.prototype.refreshAuthentication.call(fixture);
+  await started;
+  url = "https://chatgpt.com/auth/login";
+  contents.emit("did-navigate");
+  assert.deepEqual(await refresh, { authenticated: false });
+  assert.deepEqual(updates.at(-1), { authenticated: false, loading: false, status: "signed-out", message: "Sign in to ChatGPT" });
+  assert.equal(fixture.manualOperation, null);
+  assert.equal(fixture.sessionRefreshOperation, null);
+});
+
+test("saved-session refresh leaves an existing authentication page available for explicit sign-in", async () => {
+  const contents = new EventEmitter();
+  contents.getURL = () => "https://chatgpt.com/auth/login";
+  contents.session = { cookies: { get: async () => [{ domain: ".chatgpt.com" }] } };
+  contents.loadURL = () => { throw new Error("authentication page was replaced"); };
+  const updates = [];
+  const fixture = {
+    sessionRefreshOperation: null,
+    getLocallySignedOut: () => false,
+    setState: patch => updates.push(patch),
+    snapshot: () => ({ authenticated: false }),
+    probeAuthentication: async () => { throw new Error("authentication page was probed"); },
+    logger: { info() {} },
+    view: { webContents: contents },
+    withManualOperation: async (_name, action) => await action(),
+  };
+  assert.deepEqual(await BrowserHost.prototype.refreshAuthentication.call(fixture), { authenticated: false });
+  assert.equal(updates.at(-1).status, "signed-out");
+  assert.equal(fixture.sessionRefreshOperation, null);
+});
+
+test("saved-session navigation timeout stops the owned load and releases listeners", async () => {
+  const contents = new EventEmitter();
+  let stops = 0;
+  contents.isDestroyed = () => false;
+  contents.getURL = () => IDLE_BROWSER_URL;
+  contents.loadURL = () => new Promise(() => {});
+  contents.stop = () => { stops += 1; };
+  await assert.rejects(loadSavedSessionSurface(contents, 10), error => error.code === "chatgpt_session_refresh_timeout");
+  assert.equal(stops, 1);
+  for (const event of ["did-navigate", "did-navigate-in-page", "did-stop-loading", "did-finish-load", "did-fail-load", "render-process-gone", "destroyed"]) {
+    assert.equal(contents.listenerCount(event), 0);
+  }
 });
 
 test("concurrent launcher session refresh requests share one browser operation", async () => {

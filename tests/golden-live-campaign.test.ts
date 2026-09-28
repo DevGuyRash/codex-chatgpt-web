@@ -84,6 +84,14 @@ test("a pre-native batch failure preserves its typed cause instead of reporting 
   let failure: unknown;
   try { liveBatchOutcomes(cells, batch); } catch (error) { failure = error; }
   expect(problemFor(failure)).toEqual(batch.problem);
+  batch.generationAdmitted = false;
+  expect([...liveBatchOutcomes(cells, batch).values()].map(outcome => outcome.status)).toEqual(["failed", "failed"]);
+  expect(liveBatchOutcomes(cells, batch).get(cells[0]!.id)).toMatchObject({ evidence: batch.evidence, reason: expect.stringContaining("tunnel_control_timeout") });
+  batch.generationAdmitted = true;
+  expect(() => liveBatchOutcomes(cells, batch)).toThrow("Local tunnel health discovery timed out");
+  batch.generationAdmitted = false; batch.incomplete = true;
+  expect(() => liveBatchOutcomes(cells, batch)).toThrow("Local tunnel health discovery timed out");
+  batch.incomplete = false;
   delete batch.problem;
   expect(() => liveBatchOutcomes(cells, batch)).toThrow("exact owned cells");
 });

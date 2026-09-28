@@ -13,7 +13,7 @@ import { DiagnosticError } from "../../src/diagnostics/problems";
 
 type LiveBatchResult = Awaited<ReturnType<typeof runLiveBatch>>;
 type LiveCellResult = LiveBatchResult["cells"][number];
-type LiveBatchSettlement = Pick<LiveBatchResult, "cells" | "protocol" | "incomplete" | "evidenceExport" | "problem" | "bundleSha256" | "evidence" | "admission">;
+type LiveBatchSettlement = Pick<LiveBatchResult, "cells" | "protocol" | "incomplete" | "evidenceExport" | "problem" | "bundleSha256" | "evidence" | "admission"> & { generationAdmitted?: boolean };
 const multipartContext = (value: unknown): value is { records: number; notes: number; sha256: string } =>
   value !== null && typeof value === "object" && "records" in value && typeof value.records === "number"
   && "notes" in value && typeof value.notes === "number" && "sha256" in value && typeof value.sha256 === "string";
@@ -121,7 +121,20 @@ function finiteCellOutcome(cell: GoldenCell, result: LiveCellResult, batch: Live
 
 /** Convert only settled producer/export results; any uncertainty preserves all batch claims. */
 export function liveBatchOutcomes(cells: readonly GoldenCell[], result: LiveBatchSettlement): ReadonlyMap<string, GoldenOutcome> {
-  if (!result.cells.length && result.problem) throw new DiagnosticError(result.problem);
+  if (!result.cells.length && result.problem) {
+    if (result.admission) throw new GoldenAdmissionSuspended(result.admission);
+    if (result.generationAdmitted === false && !result.incomplete && result.evidenceExport === "complete"
+      && typeof result.evidence === "string" && result.evidence.length > 0 && /^[a-f\d]{64}$/.test(result.bundleSha256)
+      && cells.length >= 1 && cells.length <= 2 && new Set(cells.map(cell => cell.id)).size === cells.length
+      && cells.every(cell => canExecuteLiveCell(cell) && cell.protocol === result.protocol)) {
+      return new Map(cells.map(cell => [cell.id, {
+        status: "failed" as const,
+        reason: `The owned batch failed before any native generation was admitted (${result.problem!.code}); inspect its complete diagnostic export before a distinct attempt`,
+        evidence: result.evidence,
+      }]));
+    }
+    throw new DiagnosticError(result.problem);
+  }
   if (result.cells.length !== cells.length || new Set(result.cells.map(cell => cell.id)).size !== cells.length || result.cells.some(item => !cells.some(cell => cell.id === item.id))) throw new Error("Live batch results do not match their exact owned cells");
   for (const item of result.cells) {
     const cell = cells.find(cell => cell.id === item.id)!;

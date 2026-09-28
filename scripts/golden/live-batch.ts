@@ -139,6 +139,7 @@ export async function runLiveBatch(options: {
     type CellResult = { id: string; routeSlug: string; workload: WorkloadLevel; variant: string; work: string; traceId: string; passed: boolean; nativeFailure?: NativeScenarioFailure["nativeFailure"]; nativeExecFailure?: NativeExecFailure["nativeExecFailure"]; result?: { terminal: Awaited<ReturnType<typeof runNativeScenario>>; oracle: ReturnType<typeof evaluateWorkload>; commit: ReturnType<typeof verifyArtifactCommit> }; selections?: ReturnType<typeof verifyGoldenModelSelections> | ReturnType<typeof verifyGoldenModelSequence>; receipts?: ReturnType<typeof verifyGoldenToolReceipts>; titles?: ReturnType<typeof verifyGoldenTuiTitles>; progress?: Awaited<ReturnType<GoldenCaptureLane["finishBatch"]>>; error?: ReturnType<typeof problemFor> };
     const captureLanes = new Map<string, GoldenCaptureLane>();
     let failed = false, failure: unknown, results: CellResult[] = [], admission: AdmissionObservation | undefined;
+    let generationAdmitted = false;
     const nativeThreads = new Set<string>();
     try {
       await evidence.bind(operation.context.traceId);
@@ -199,6 +200,7 @@ export async function runLiveBatch(options: {
                 const ready = response.ok && health.service === "codex-chatgpt-web" && health.pid === process.pid && health.accepting_turns === true;
                 await captureLane.record("transport", JSON.stringify({ localProviderHealth: { stage: "before-generation", ready, status: response.status, pidMatches: health.pid === process.pid } }));
                 if (!ready) throw new DiagnosticError({ code: "golden_local_provider_unavailable", message: "The owned local Responses listener was not ready before native submission", origin: "golden", stage: "generation_admission", retryable: false });
+                generationAdmitted = true;
               },
               onNativeReconnect: async () => {
                 let status = 0, ready = false;
@@ -299,7 +301,7 @@ export async function runLiveBatch(options: {
       }
       operation.end(failed || results.some(item => !item.passed) ? "failed" : "succeeded"); await closeRuntimeDiagnostics();
     }
-    const pending = { boundary, protocol, work, campaignId, nativeHome: home, nativeCatalogSha256, cells: results, passed: false, incomplete: true, evidenceExport: "pending", diagnostics: await client.status(), ...(failed ? { problem: problemFor(failure) } : {}), ...(admission ? { admission } : {}) };
+    const pending = { boundary, protocol, work, campaignId, nativeHome: home, nativeCatalogSha256, cells: results, generationAdmitted, passed: false, incomplete: true, evidenceExport: "pending", diagnostics: await client.status(), ...(failed ? { problem: problemFor(failure) } : {}), ...(admission ? { admission } : {}) };
     writeFileSync(join(work, "result.json"), JSON.stringify(pending, null, 2), { mode: 0o600 });
     const exported = await finishGoldenEvidence(evidence, client, invocation, operation.context.traceId, join(work, "evidence.zip"));
     const summary = { ...pending, cells: results.map(item => ({ ...item, passed: item.passed && !failed && !exported.incomplete })), evidenceExport: "complete", evidence: exported.destination, bundleSha256: exported.bundleSha256, incomplete: exported.incomplete, passed: !failed && !exported.incomplete && results.length === cells.length && results.every(item => item.passed) };

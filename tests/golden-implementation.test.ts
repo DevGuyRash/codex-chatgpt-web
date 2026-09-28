@@ -10,10 +10,11 @@ test("campaign identity covers uncommitted executable changes and the selected d
   try {
     expect(spawnSync("git", ["-C", root, "init", "-q"]).status).toBe(0);
     mkdirSync(join(root, "src")); mkdirSync(join(root, "scripts/golden"), { recursive: true });
-    mkdirSync(join(root, "launcher/scripts"), { recursive: true }); mkdirSync(join(root, "native/electron"), { recursive: true });
+    mkdirSync(join(root, "launcher/scripts"), { recursive: true }); mkdirSync(join(root, "launcher/patches"), { recursive: true }); mkdirSync(join(root, "native/electron"), { recursive: true });
     writeFileSync(join(root, "src/main.ts"), "export const value = 1;\n");
     writeFileSync(join(root, "scripts/golden/main.ts"), "export const acceptance = true;\n");
     writeFileSync(join(root, "launcher/scripts/native-electron.cjs"), "module.exports = {};\n");
+    writeFileSync(join(root, "launcher/patches/extension-adapter.patch"), "reviewed adapter patch\n");
     writeFileSync(join(root, "native/electron/webauthn.patch"), "reviewed patch\n");
     const deployed = join(root, "helper.cjs"); writeFileSync(deployed, "one");
     const before = goldenImplementationIdentity(root, [deployed]);
@@ -27,9 +28,13 @@ test("campaign identity covers uncommitted executable changes and the selected d
     expect(artifactChange.sha256).not.toBe(sourceChange.sha256);
     expect(before.records.map(record => record.name)).toContain("scripts/golden/main.ts");
     expect(before.records.map(record => record.name)).toContain("launcher/scripts/native-electron.cjs");
+    expect(before.records.map(record => record.name)).toContain("launcher/patches/extension-adapter.patch");
     expect(before.records.map(record => record.name)).toContain("native/electron/webauthn.patch");
     writeFileSync(join(root, "native/electron/webauthn.patch"), "updated patch\n");
     expect(goldenImplementationIdentity(root, [deployed]).sha256).not.toBe(artifactChange.sha256);
+    const nativePatchChange = goldenImplementationIdentity(root, [deployed]);
+    writeFileSync(join(root, "launcher/patches/extension-adapter.patch"), "updated adapter patch\n");
+    expect(goldenImplementationIdentity(root, [deployed]).sha256).not.toBe(nativePatchChange.sha256);
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 

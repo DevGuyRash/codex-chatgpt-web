@@ -1,6 +1,7 @@
 import { expect, test } from "bun:test";
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { GOLDEN_UNICODE_WITNESS, GOLDEN_RECOVERABLE_FAILURE_FILE, GOLDEN_LARGE_TOOL_RESULT_FILE } from "../scripts/golden/workloads";
+import { CHATGPT_WEB_LUNA_MODEL_ROUTES } from "../src/chatgpt-web-models";
 import { buildGoldenMatrix } from "../scripts/golden/catalog";
 import { canExecuteLiveCell, liveBatchOutcomes, liveCampaignExecutor } from "../scripts/golden/live-campaign";
 import { nativePlanHashes } from "../scripts/golden/app-server";
@@ -261,6 +262,29 @@ test("large tool result requires one complete command output and its committed d
   expect(() => liveBatchOutcomes([cell], batch)).toThrow("Large tool result coverage requires");
   Object.assign(item.result!.terminal, { largeResultWitness: { invocations: 1, count: 1, bytes: 1024, sha256 } });
   expect(() => liveBatchOutcomes([cell], batch)).toThrow("Large tool result coverage requires");
+});
+
+test("retained conversation change requires two native turns, changed artifacts and same-tab reuse", () => {
+  const cell = { ...cells[0]!, variant: { id: "retained-conversation-change", driver: "exec" as const } };
+  expect(canExecuteLiveCell(cell)).toBeTrue();
+  const luna = { ...cell, route: CHATGPT_WEB_LUNA_MODEL_ROUTES[0]! };
+  expect(canExecuteLiveCell(luna)).toBeFalse();
+  const batch = completedBatch(); batch.cells = [batch.cells[0]!];
+  const item = batch.cells[0]!;
+  item.variant = "retained-conversation-change";
+  item.result!.terminal.variant = "retained-conversation-change";
+  item.selections!.turns = 2;
+  const threadId = item.result!.terminal.threadId!;
+  expect(() => liveBatchOutcomes([cell], batch)).toThrow("Resumed coverage requires");
+  const historySha256 = "d".repeat(64), revisionSha256 = "e".repeat(64);
+  Object.assign(item.result!.terminal, { preparation: { status: "completed", threadId }, historyWitnessSha256: historySha256, revisionWitnessSha256: revisionSha256 });
+  item.result!.oracle.artifacts.push({ path: "output/history-witness.txt", bytes: 42, sha256: historySha256 });
+  item.result!.oracle.artifacts.push({ path: "output/revision.txt", bytes: 42, sha256: revisionSha256 });
+  expect(() => liveBatchOutcomes([cell], batch)).toThrow("Retained conversation change requires");
+  item.retainedTab = { passed: true, failures: [], threadId, turnIds: [randomUUID(), randomUUID()], tabId: "same-tab" };
+  expect(liveBatchOutcomes([cell], batch).get(cell.id)?.status).toBe("passed");
+  item.retainedTab = { ...item.retainedTab!, tabId: undefined };
+  expect(() => liveBatchOutcomes([cell], batch)).toThrow("Retained conversation change requires");
 });
 
 test("verified provider admission survives incomplete exec evidence without inferring a limit from native prose", () => {

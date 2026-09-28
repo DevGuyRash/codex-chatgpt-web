@@ -1,11 +1,11 @@
-import type { ChatGptWebModelRoute } from "../../src/chatgpt-web-models";
+import { CHATGPT_WEB_LUNA_BACKEND_MODEL, type ChatGptWebModelRoute } from "../../src/chatgpt-web-models";
 import { existsSync, lstatSync, readFileSync, realpathSync } from "node:fs";
 import { join } from "node:path";
 import { createHash } from "node:crypto";
 import { GoldenAppServer } from "./app-server";
 import { NativeExecFailure, runNativeExec } from "./exec";
 import { runStructuredScenario } from "./structured-scenarios";
-import { GOLDEN_UNICODE_WITNESS, GOLDEN_RECOVERABLE_FAILURE_FILE, GOLDEN_RECOVERABLE_FAILURE_CONTENT, GOLDEN_RECOVERABLE_FAILURE_MARKER, GOLDEN_LARGE_TOOL_RESULT_FILE, largeToolResultContent, largeToolResultOutput, largeToolResultSha256, largeHistoryWitness, structuredScenarioPrompts, type GoldenWorkload } from "./workloads";
+import { GOLDEN_UNICODE_WITNESS, GOLDEN_RECOVERABLE_FAILURE_FILE, GOLDEN_RECOVERABLE_FAILURE_CONTENT, GOLDEN_RECOVERABLE_FAILURE_MARKER, GOLDEN_LARGE_TOOL_RESULT_FILE, largeToolResultContent, largeToolResultOutput, largeToolResultSha256, largeHistoryWitness, retainedConversationRevision, structuredScenarioPrompts, type GoldenWorkload } from "./workloads";
 import { ownedProcessIdentity, type OwnedProcess } from "./workspace";
 import type { ProgressPhase } from "./progress";
 import { runTuiScenario } from "./tui-scenarios";
@@ -28,7 +28,7 @@ export function ownedNativeActivity(frame: { direction: string; message: ObjectV
   return { tool, phase };
 }
 export const finiteNativeScenarios = {
-  fresh: 1, formats: 1, unicode: 1, "tool-image": 1, "tool-failure": 1, "large-tool-result": 1, "large-history": 2, continued: 2, compaction: 2, resumed: 2, "archived-history": 2, "model-switch": 2, "plan-revise-execute": 3, "plan-stream-interrupt": 2, "plan-tui-execute": 2,
+  fresh: 1, formats: 1, unicode: 1, "tool-image": 1, "tool-failure": 1, "large-tool-result": 1, "large-history": 2, "retained-conversation-change": 2, continued: 2, compaction: 2, resumed: 2, "archived-history": 2, "model-switch": 2, "plan-revise-execute": 3, "plan-stream-interrupt": 2, "plan-tui-execute": 2,
   "steer-reasoning": 2, "steer-generation": 2, "steer-tools": 2,
   "stop-reasoning-continue": 2, "stop-generation-continue": 2, "stop-tools-continue": 2,
 } as const;
@@ -47,7 +47,8 @@ export async function runNativeScenario(options: {
   exerciseMultipartTransport?: boolean;
 }) {
   options.signal.throwIfAborted();
-  if (!["fresh", "formats", "unicode", "tool-image", "tool-failure", "large-tool-result", "large-history", "continued", "compaction", "resumed", "archived-history", "model-switch", "plan-revise-execute", "plan-stream-interrupt", "plan-tui-execute"].includes(options.variant) && !/^(?:steer|stop)-(?:reasoning|generation|tools|queue)(?:-image|-continue)?$/.test(options.variant)) throw new Error(`No native scenario implementation for ${options.variant}`);
+  if (!["fresh", "formats", "unicode", "tool-image", "tool-failure", "large-tool-result", "large-history", "retained-conversation-change", "continued", "compaction", "resumed", "archived-history", "model-switch", "plan-revise-execute", "plan-stream-interrupt", "plan-tui-execute"].includes(options.variant) && !/^(?:steer|stop)-(?:reasoning|generation|tools|queue)(?:-image|-continue)?$/.test(options.variant)) throw new Error(`No native scenario implementation for ${options.variant}`);
+  if (options.variant === "retained-conversation-change" && options.route.backendModel === CHATGPT_WEB_LUNA_BACKEND_MODEL) throw new Error("Retained conversation change requires the Sol retained-browser path; Luna uses rolling checkpoints");
   if (["formats", "tool-image"].includes(options.variant) && options.workload.formatCoverage !== "all") throw new Error("Format and native image coverage require the full shared fixture set at every workload level");
   if (options.resumeId && options.variant !== "resumed") throw new Error("Resume requires the exact prior native task and its declared scenario");
   if (options.variant === "model-switch" && (!options.modelSwitch || options.modelSwitch.to.slug !== options.route.slug)) throw new Error("Model-switch continuation must target the cell's requested route");
@@ -76,7 +77,7 @@ export async function runNativeScenario(options: {
     if (!native) throw new Error("Native scenario process ownership is unavailable");
     await options.checkpoint({ native, ...turn });
   };
-  if (options.variant === "fresh" || options.variant === "formats" || options.variant === "unicode" || options.variant === "tool-image" || options.variant === "tool-failure" || options.variant === "large-tool-result" || options.variant === "large-history" || options.variant === "resumed" || options.variant === "archived-history") {
+  if (options.variant === "fresh" || options.variant === "formats" || options.variant === "unicode" || options.variant === "tool-image" || options.variant === "tool-failure" || options.variant === "large-tool-result" || options.variant === "large-history" || options.variant === "retained-conversation-change" || options.variant === "resumed" || options.variant === "archived-history") {
     const execute = async (prompt: string, resumeId?: string, phase: "preparation" | "execution" = "execution") => {
       await options.beforeGeneration?.(options.signal);
       const outcome = await runNativeExec({ ...options, resumeId, artifactRepository: options.cwd, prompt,
@@ -109,18 +110,23 @@ export async function runNativeScenario(options: {
     let preparation: Awaited<ReturnType<typeof execute>> | undefined;
     let resumeId = options.resumeId;
     const prompts = structuredScenarioPrompts(options.workload);
-    if (["resumed", "archived-history", "large-history"].includes(options.variant) && !resumeId) {
+    if (["resumed", "archived-history", "large-history", "retained-conversation-change"].includes(options.variant) && !resumeId) {
       const historyWitness = largeHistoryWitness(options.workload);
       const historyNotes = Array.from({ length: 160 }, (_, index) =>
         `Context note ${index + 1}: ${createHash("sha256").update(`${options.workload.id}:${index}`).digest("hex")} is background material for this same task; preserve the earlier witness without copying these notes into an artifact.`).join("\n");
       const preparationPrompt = options.variant === "large-history"
         ? `${prompts.prepare}\n\nRetain this exact private-to-the-turn fact for the continuation: ${historyWitness}. Do not write files or commit during preparation.\n${historyNotes}`
+        : options.variant === "retained-conversation-change"
+          ? `${prompts.prepare}\n\nRetain this exact private-to-the-turn fact for a changed follow-up instruction: ${historyWitness}. Do not write files or commit during preparation.`
         : prompts.prepare;
       preparation = await execute(preparationPrompt, undefined, "preparation");
       resumeId = preparation.threadId;
       options.signal.throwIfAborted();
       if (options.variant === "large-history" && existsSync(join(options.cwd, "output/history-witness.txt"))) {
         throw new Error("Large-history preparation wrote its witness before the retained continuation");
+      }
+      if (options.variant === "retained-conversation-change" && ["output/history-witness.txt", "output/revision.txt"].some(path => existsSync(join(options.cwd, path)))) {
+        throw new Error("Retained conversation preparation wrote its follow-up artifacts before the changed instruction");
       }
     }
     let archive: { threadId: string; archived: true; restored: true } | undefined;
@@ -158,12 +164,16 @@ export async function runNativeScenario(options: {
     const largeResultPrompt = `${options.workload.prompt}\nBefore implementing, run \`bun ${GOLDEN_LARGE_TOOL_RESULT_FILE}\` once through exec_command with max_output_tokens 20000. Observe the full tool result, including its final marker. Write output/large-tool-result.sha256 with the SHA-256 of that command's stdout followed by one newline, and include it in the artifact commit. Leave the runner-owned script unchanged.`;
     const continuationPrompt = options.variant === "large-history"
       ? `${prompts.continue} Also write output/history-witness.txt with the exact fact from the preceding turn followed by a newline; do not guess it from repository files.`
+      : options.variant === "retained-conversation-change"
+        ? `${prompts.continue} Change of instruction: also write output/history-witness.txt with the exact private fact from the preceding turn followed by a newline, and write output/revision.txt containing exactly ${retainedConversationRevision(options.workload)} followed by a newline. Include both files in the artifact commit; the earlier private fact is deliberately not repeated here.`
       : prompts.continue;
     const terminal = await execute(preparation ? continuationPrompt : options.variant === "unicode" ? unicodePrompt : options.variant === "tool-image" ? imagePrompt : options.variant === "tool-failure" ? failurePrompt : options.variant === "large-tool-result" ? largeResultPrompt : options.workload.prompt, resumeId);
-    const historyWitnessSha256 = options.variant === "large-history"
+    const historyWitnessSha256 = ["large-history", "retained-conversation-change"].includes(options.variant)
       ? createHash("sha256").update(`${largeHistoryWitness(options.workload)}\n`).digest("hex") : undefined;
+    const revisionWitnessSha256 = options.variant === "retained-conversation-change"
+      ? createHash("sha256").update(`${retainedConversationRevision(options.workload)}\n`).digest("hex") : undefined;
     return { ...terminal, variant: options.variant, toolItems, ...(preparation ? { preparation } : {}), ...(archive ? { archive } : {}),
-      ...(historyWitnessSha256 ? { historyWitnessSha256 } : {}), ...(attachedImageSha256 ? { attachedImageSha256 } : {}),
+      ...(historyWitnessSha256 ? { historyWitnessSha256 } : {}), ...(revisionWitnessSha256 ? { revisionWitnessSha256 } : {}), ...(attachedImageSha256 ? { attachedImageSha256 } : {}),
       ...(options.variant === "tool-failure" ? { failureWitness: { count: recoverableFailureCount, expectedExitCode: 17 } } : {}),
       ...(expectedLargeResult ? { largeResultWitness: { invocations: largeResultInvocations, count: largeResultCount, bytes: Buffer.byteLength(expectedLargeResult), sha256: largeToolResultSha256(options.workload) } } : {}) };
   }

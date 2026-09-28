@@ -4,8 +4,8 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { createHash, randomUUID } from "node:crypto";
 import { ownedNativeActivity, runNativeScenario } from "../scripts/golden/native-scenarios";
-import { GOLDEN_UNICODE_WITNESS, GOLDEN_RECOVERABLE_FAILURE_FILE, GOLDEN_RECOVERABLE_FAILURE_CONTENT, GOLDEN_LARGE_TOOL_RESULT_FILE, createWorkload, largeToolResultContent, largeToolResultOutput, largeToolResultSha256, largeHistoryWitness, materializeWorkload } from "../scripts/golden/workloads";
-import { CHATGPT_WEB_MODEL_ROUTES } from "../src/chatgpt-web-models";
+import { GOLDEN_UNICODE_WITNESS, GOLDEN_RECOVERABLE_FAILURE_FILE, GOLDEN_RECOVERABLE_FAILURE_CONTENT, GOLDEN_LARGE_TOOL_RESULT_FILE, createWorkload, largeToolResultContent, largeToolResultOutput, largeToolResultSha256, largeHistoryWitness, retainedConversationRevision, materializeWorkload } from "../scripts/golden/workloads";
+import { CHATGPT_WEB_MODEL_ROUTES, CHATGPT_WEB_LUNA_MODEL_ROUTES } from "../src/chatgpt-web-models";
 import { GoldenAppServer, initializeGoldenNativeHome } from "../scripts/golden/app-server";
 import { findNativeExecFailure, runNativeExec } from "../scripts/golden/exec";
 import { extractCodexTurnIdentityFromBody } from "../src/adapters/chatgpt-web/environment";
@@ -118,7 +118,6 @@ console.log(JSON.stringify({type:"thread.started",thread_id:"11111111-1111-7111-
 console.log(JSON.stringify({type:"turn.started"}));
 console.log(JSON.stringify({type:"turn.completed"}));
 });
-
 `, { mode: 0o700 });
   const workload = createWorkload({ level: 1, seed: "large-history-lifecycle", batch: 0 });
   try {
@@ -135,6 +134,42 @@ console.log(JSON.stringify({type:"turn.completed"}));
     expect(prompts[1]!.prompt).not.toContain(largeHistoryWitness(workload));
     await expect(runNativeScenario({ executable: peer, cwd: root, env: { EARLY_WRITE: "1" }, route: CHATGPT_WEB_MODEL_ROUTES[0]!, workload, variant: "large-history", signal: new AbortController().signal, timeoutMs: 2000,
       onRecord: async () => {}, checkpoint: () => {} })).rejects.toThrow("Large-history preparation wrote its witness before the retained continuation");
+    expect(readFileSync(log, "utf8").trim().split("\n")).toHaveLength(3);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("retained conversation change uses one native task and requires the second instruction", async () => {
+  const root = mkdtempSync(join(tmpdir(), "golden-retained-change-")), peer = join(root, "peer"), log = join(root, "prompts.jsonl");
+  mkdirSync(join(root, ".git"));
+  writeFileSync(peer, `#!${process.execPath}
+import {appendFileSync,mkdirSync,writeFileSync} from "node:fs";
+let prompt="";process.stdin.on("data",chunk=>prompt+=chunk);process.stdin.on("end",()=>{
+ appendFileSync(${JSON.stringify(log)},JSON.stringify({resumed:process.argv.includes("resume"),prompt})+"\\n");
+ if(process.env.EARLY_WRITE==="1"&&!process.argv.includes("resume")){mkdirSync(${JSON.stringify(join(root,"output"))},{recursive:true});writeFileSync(${JSON.stringify(join(root,"output/revision.txt"))},"premature\\n");}
+ const send=value=>console.log(JSON.stringify(value));
+ send({type:"thread.started",thread_id:"11111111-1111-7111-8111-111111111111"});send({type:"turn.started"});
+ send({type:"item.completed",item:{type:"command_execution",id:"observed-tool",command:"pwd",exit_code:0,aggregated_output:process.cwd()}});
+ send({type:"turn.completed"});
+});
+`, { mode: 0o700 });
+  const workload = createWorkload({ level: 1, seed: "retained-change-lifecycle", batch: 0 });
+  const options = { executable: peer, cwd: root, env: {}, route: CHATGPT_WEB_MODEL_ROUTES[0]!, workload, variant: "retained-conversation-change", signal: new AbortController().signal, timeoutMs: 2000,
+    onRecord: async () => {}, checkpoint: () => {} };
+  try {
+    const result = await runNativeScenario(options);
+    expect(result).toMatchObject({ status: "completed", threadId: "11111111-1111-7111-8111-111111111111", variant: "retained-conversation-change", toolItems: 2,
+      preparation: { status: "completed" }, historyWitnessSha256: createHash("sha256").update(`${largeHistoryWitness(workload)}\n`).digest("hex"),
+      revisionWitnessSha256: createHash("sha256").update(`${retainedConversationRevision(workload)}\n`).digest("hex") });
+    const prompts = readFileSync(log, "utf8").trim().split("\n").map(line => JSON.parse(line) as { resumed: boolean; prompt: string });
+    expect(prompts).toHaveLength(2);
+    expect(prompts[0]!.resumed).toBe(false);
+    expect(prompts[0]!.prompt).toContain(largeHistoryWitness(workload));
+    expect(prompts[0]!.prompt).not.toContain(retainedConversationRevision(workload));
+    expect(prompts[1]!.resumed).toBe(true);
+    expect(prompts[1]!.prompt).not.toContain(largeHistoryWitness(workload));
+    expect(prompts[1]!.prompt).toContain(retainedConversationRevision(workload));
+    await expect(runNativeScenario({ ...options, route: CHATGPT_WEB_LUNA_MODEL_ROUTES[0]! })).rejects.toThrow("Sol retained-browser path");
+    await expect(runNativeScenario({ ...options, env: { EARLY_WRITE: "1" } })).rejects.toThrow("before the changed instruction");
     expect(readFileSync(log, "utf8").trim().split("\n")).toHaveLength(3);
   } finally { rmSync(root, { recursive: true, force: true }); }
 });

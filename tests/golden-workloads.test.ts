@@ -3,7 +3,7 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { GOLDEN_UNICODE_WITNESS, GOLDEN_LARGE_TOOL_RESULT_FILE, createWorkload, evaluateWorkload, largeToolResultContent, largeToolResultOutput, largeToolResultSha256, largeHistoryWitness, materializeWorkload } from "../scripts/golden/workloads";
+import { GOLDEN_UNICODE_WITNESS, GOLDEN_LARGE_TOOL_RESULT_FILE, createWorkload, evaluateWorkload, largeToolResultContent, largeToolResultOutput, largeToolResultSha256, largeHistoryWitness, retainedConversationRevision, materializeWorkload } from "../scripts/golden/workloads";
 
 test("shared workloads are deterministic, vary across batches, and preserve Unicode input", () => {
   for (const level of [1, 2, 3, 4, 5] as const) {
@@ -90,6 +90,11 @@ test.each([undefined, "all"] as const)("the independent artifact oracle rejects 
     const history = evaluateWorkload(root, workload, undefined, "large-history");
     expect(history.passed).toBe(true);
     expect(history.artifacts.map(artifact => artifact.path)).toContain("output/history-witness.txt");
+    expect(evaluateWorkload(root, workload, undefined, "retained-conversation-change").passed).toBe(false);
+    writeFileSync(join(root, "output/revision.txt"), "wrong-revision\n");
+    expect(evaluateWorkload(root, workload, undefined, "retained-conversation-change").failures).toContain("Changed conversation instruction differs from its required revision artifact");
+    writeFileSync(join(root, "output/revision.txt"), `${retainedConversationRevision(workload)}\n`);
+    expect(evaluateWorkload(root, workload, undefined, "retained-conversation-change")).toMatchObject({ passed: true, artifacts: expect.arrayContaining([expect.objectContaining({ path: "output/revision.txt" })]) });
     expect(evaluateWorkload(root, workload, undefined, "compaction")).toMatchObject({ passed: true,
       artifacts: expect.arrayContaining([expect.objectContaining({ path: "output/history-witness.txt" })]) });
     expect(evaluateWorkload(root, workload, undefined, "steer-generation").passed).toBe(false);

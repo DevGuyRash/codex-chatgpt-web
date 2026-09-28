@@ -47,6 +47,51 @@ export function selectGoldenNativeThreadEvents(events: readonly DiagnosticEvent[
   return { events: selected, traceIds: [...traceIds], turnIds: [...turnIds] };
 }
 
+/** One native follow-up must reuse the first turn's retained launcher tab, not a foreign surface. */
+export function verifyGoldenRetainedTabReuse(events: readonly DiagnosticEvent[], threadId: string) {
+  if (!nativeUuid.test(threadId)) throw new Error("Retained tab evidence requires the captured native task UUID");
+  const failures: string[] = [];
+  const turns = new Map<string, { firstAt: number; traces: Set<string> }>();
+  for (const event of events) {
+    if (event.kind !== "span" || event.name !== "http.responses" || !event.traceId || !event.taskId) continue;
+    const [thread, turn, extra] = event.taskId.split(":");
+    if (thread !== threadId || !turn || extra !== undefined || !nativeUuid.test(turn)) continue;
+    const owner = turns.get(turn) ?? { firstAt: event.time, traces: new Set<string>() };
+    owner.firstAt = Math.min(owner.firstAt, event.time);
+    owner.traces.add(event.traceId);
+    turns.set(turn, owner);
+  }
+  const ordered = [...turns].sort((left, right) => left[1].firstAt - right[1].firstAt);
+  if (ordered.length !== 2 || ordered[0]?.[0] === ordered[1]?.[0]) failures.push("Retained conversation requires two distinct native turns in one task");
+  type TabEvent = { id: string; time: number };
+  const tabs: Array<{ created?: TabEvent; retained?: TabEvent; reused?: TabEvent }> = [];
+  for (const [turnId, owner] of ordered) {
+    const selections = events.filter(event => event.name === "browser.model_selection" && event.component === "browser-helper"
+      && event.kind === "log" && event.traceId && owner.traces.has(event.traceId) && event.taskId);
+    if (selections.length !== 1) { failures.push(`Native turn ${turnId} lacks one owned browser selection`); tabs.push({}); continue; }
+    const selection = selections[0]!;
+    const lifecycle = events.filter(event => event.component === "launcher" && event.kind === "log"
+      && event.traceId && owner.traces.has(event.traceId) && event.taskId === selection.taskId
+      && event.attributes.traceId === selection.taskId);
+    const tabEvent = (name: string): TabEvent | undefined => {
+      const matching = lifecycle.filter(event => event.name === name);
+      if (matching.length !== 1 || typeof matching[0]!.attributes.tabId !== "string" || !matching[0]!.attributes.tabId) {
+        if (matching.length) failures.push(`Native turn ${turnId} has ambiguous ${name} ownership`);
+        return undefined;
+      }
+      return { id: matching[0]!.attributes.tabId as string, time: matching[0]!.time };
+    };
+    tabs.push({ created: tabEvent("browser.tab_created"), retained: tabEvent("browser.tab_retained"), reused: tabEvent("browser.tab_reused") });
+  }
+  const first = tabs[0], second = tabs[1];
+  if (!first?.created || !first.retained || first.created.id !== first.retained.id || first.reused
+    || !second?.reused || second.created || second.reused.id !== first.created.id
+    || first.created.time > first.retained.time || first.retained.time > second.reused.time) {
+    failures.push("The follow-up did not reuse the first native turn's retained launcher tab");
+  }
+  return { passed: failures.length === 0, failures, threadId, turnIds: ordered.map(([turnId]) => turnId), tabId: first?.created?.id };
+}
+
 /** Verify observed broker invocation/receipt identities, not uninstrumented external side effects. */
 export function verifyGoldenToolReceipts(events: readonly DiagnosticEvent[], expectedTerminations: readonly GoldenToolTermination[] = []) {
   const failures: string[] = [], stages = new Map<string, DiagnosticEvent[]>(), calls = new Set<string>();

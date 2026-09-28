@@ -5,7 +5,7 @@ import { spawnSync } from "node:child_process";
 import { homedir } from "node:os";
 import { z } from "zod";
 import { loadConfig } from "../../src/config";
-import { availableChatGptWebModelRoutes, CHATGPT_WEB_MODEL_ROUTES, CHATGPT_WEB_LUNA_MODEL_ROUTES } from "../../src/chatgpt-web-models";
+import { availableChatGptWebModelRoutes, CHATGPT_WEB_MODEL_ROUTES, CHATGPT_WEB_LUNA_MODEL_ROUTES, CHATGPT_WEB_LUNA_BACKEND_MODEL } from "../../src/chatgpt-web-models";
 import { isProGeneration } from "../../src/campaign-policy";
 import { augmentNativeModelCatalog } from "../../src/model-catalog";
 import { inspectLauncherBrowserHost, readLauncherBrowserHostDescriptor } from "../../src/launcher-browser-host";
@@ -20,7 +20,7 @@ import { findNativeScenarioFailure, type NativeScenarioFailure } from "./structu
 import { findNativeTuiTitleFailure } from "./tui-scenarios";
 import { findNativeExecFailure, type NativeExecFailure } from "./exec";
 import { initializeGoldenNativeHome } from "./app-server";
-import { goldenScenarioTerminations, readGoldenEvents, readGoldenAdmissionEvents, selectGoldenNativeThreadEvents, verifyGoldenModelSelections, verifyGoldenModelSequence, verifyGoldenToolReceipts, verifyGoldenTuiTitles } from "./observations";
+import { goldenScenarioTerminations, readGoldenEvents, readGoldenAdmissionEvents, selectGoldenNativeThreadEvents, verifyGoldenModelSelections, verifyGoldenModelSequence, verifyGoldenToolReceipts, verifyGoldenRetainedTabReuse, verifyGoldenTuiTitles } from "./observations";
 import { goldenNativeConfig, goldenNativeEnvironment } from "./runtime-config";
 import { withGoldenRuntime } from "./runtime";
 import { assertBorrowedTunnelInactive } from "./borrowed-tunnel";
@@ -81,6 +81,7 @@ export async function runLiveBatch(options: {
     const route = [...CHATGPT_WEB_MODEL_ROUTES, ...CHATGPT_WEB_LUNA_MODEL_ROUTES].find(route => route.slug === cell.routeSlug);
     if (!/^[a-f\d]{64}$/.test(cell.id) || ![1, 2, 3, 4].includes(cell.workload) || !Object.hasOwn(finiteNativeScenarios, cell.variant)) throw new Error("The live batch requires implemented finite workload cells; sustained and other scenario coordinators remain separate");
     if (!route || isProGeneration(route) || route.interactionMode !== "automatic") throw new Error("The live batch requires permitted automatic non-Pro routes");
+    if (cell.variant === "retained-conversation-change" && route.backendModel === CHATGPT_WEB_LUNA_BACKEND_MODEL) throw new Error("Retained conversation change requires the Sol retained-browser path; Luna uses rolling checkpoints");
     return { ...cell, route };
   });
   if (options.experimentalBiggerContext && requests.some(cell => cell.variant !== "compaction" || cell.route.backendModel === "gpt-5.6-luna")) throw new Error("Golden Bigger Context opt-in requires only non-Luna compaction cells");
@@ -138,7 +139,7 @@ export async function runLiveBatch(options: {
     const diagnostics = initializeRuntimeDiagnostics({ component: "golden", sink: client });
     if (!diagnostics) throw new Error("The live batch has no diagnostic owner");
     const operation = diagnostics.begin("golden.live_batch", { boundary, protocol, nativeCatalogSha256, browserHelperSha256: helperBuild.sha256, cells: cells.length });
-    type CellResult = { id: string; routeSlug: string; workload: WorkloadLevel; variant: string; work: string; traceId: string; passed: boolean; nativeFailure?: NativeScenarioFailure["nativeFailure"]; nativeExecFailure?: NativeExecFailure["nativeExecFailure"]; result?: { terminal: Awaited<ReturnType<typeof runNativeScenario>>; oracle: ReturnType<typeof evaluateWorkload>; commit: ReturnType<typeof verifyArtifactCommit> }; selections?: ReturnType<typeof verifyGoldenModelSelections> | ReturnType<typeof verifyGoldenModelSequence>; receipts?: ReturnType<typeof verifyGoldenToolReceipts>; titles?: ReturnType<typeof verifyGoldenTuiTitles>; progress?: Awaited<ReturnType<GoldenCaptureLane["finishBatch"]>>; error?: ReturnType<typeof problemFor> };
+    type CellResult = { id: string; routeSlug: string; workload: WorkloadLevel; variant: string; work: string; traceId: string; passed: boolean; nativeFailure?: NativeScenarioFailure["nativeFailure"]; nativeExecFailure?: NativeExecFailure["nativeExecFailure"]; result?: { terminal: Awaited<ReturnType<typeof runNativeScenario>>; oracle: ReturnType<typeof evaluateWorkload>; commit: ReturnType<typeof verifyArtifactCommit> }; selections?: ReturnType<typeof verifyGoldenModelSelections> | ReturnType<typeof verifyGoldenModelSequence>; receipts?: ReturnType<typeof verifyGoldenToolReceipts>; retainedTab?: ReturnType<typeof verifyGoldenRetainedTabReuse>; titles?: ReturnType<typeof verifyGoldenTuiTitles>; progress?: Awaited<ReturnType<GoldenCaptureLane["finishBatch"]>>; error?: ReturnType<typeof problemFor> };
     const captureLanes = new Map<string, GoldenCaptureLane>();
     let failed = false, failure: unknown, results: CellResult[] = [], admission: AdmissionObservation | undefined;
     let generationAdmitted = false;
@@ -286,12 +287,15 @@ export async function runLiveBatch(options: {
         } else item.selections = verifyGoldenModelSelections(nativeEvents.events, cell.request.route, finiteNativeScenarios[cell.request.variant]);
         item.receipts = verifyGoldenToolReceipts(nativeEvents.events, goldenScenarioTerminations(cell.request.variant, item.result.terminal));
         const terminal = item.result.terminal;
+        if (cell.request.variant === "retained-conversation-change") item.retainedTab = verifyGoldenRetainedTabReuse(nativeEvents.events, terminal.threadId!);
         if (cell.request.variant === "plan-tui-execute" && "scenario" in terminal && terminal.scenario && "titleTasks" in terminal.scenario) item.titles = verifyGoldenTuiTitles(observed.events, terminal.threadId!, terminal.scenario.titleTasks, cell.request.route);
-        item.passed = item.selections.passed && item.receipts.passed && (cell.request.variant !== "plan-tui-execute" || item.titles?.passed === true);
+        item.passed = item.selections.passed && item.receipts.passed
+          && (cell.request.variant !== "retained-conversation-change" || item.retainedTab?.passed === true)
+          && (cell.request.variant !== "plan-tui-execute" || item.titles?.passed === true);
         // Persist observed intervals before any campaign may turn them into a duration claim.
         // Finite cells never credit level-five time; that requires a separate sustained owner.
         item.progress = await captureLanes.get(item.id)!.finishBatch(false);
-        await evidence.capture(item.traceId, "oracle", JSON.stringify({ nativeTraceIds: nativeEvents.traceIds, nativeTurnIds: nativeEvents.turnIds, selections: item.selections, receipts: item.receipts, ...(item.titles ? { titles: item.titles } : {}), progress: item.progress, passed: item.passed }));
+        await evidence.capture(item.traceId, "oracle", JSON.stringify({ nativeTraceIds: nativeEvents.traceIds, nativeTurnIds: nativeEvents.turnIds, selections: item.selections, receipts: item.receipts, ...(item.retainedTab ? { retainedTab: item.retainedTab } : {}), ...(item.titles ? { titles: item.titles } : {}), progress: item.progress, passed: item.passed }));
       }
     } catch (error) {
       failed = true; failure = error; operation.problem(error);

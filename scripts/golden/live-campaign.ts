@@ -1,4 +1,5 @@
 import { isProGeneration } from "../../src/campaign-policy";
+import { CHATGPT_WEB_LUNA_BACKEND_MODEL } from "../../src/chatgpt-web-models";
 import type { GoldenCell } from "./catalog";
 import { finiteNativeScenarios, type FiniteNativeScenario } from "./native-scenarios";
 import { runLiveBatch } from "./live-batch";
@@ -21,6 +22,7 @@ const multipartContext = (value: unknown): value is { records: number; notes: nu
 /** Availability is separate from applicability: unavailable coordinators stay pending in the full matrix. */
 export function canExecuteLiveCell(cell: GoldenCell): boolean {
   return !cell.exclusion && !isProGeneration(cell.route) && cell.route.interactionMode === "automatic"
+    && !(cell.variant.id === "retained-conversation-change" && cell.route.backendModel === CHATGPT_WEB_LUNA_BACKEND_MODEL)
     && cell.workload < 5 && Object.hasOwn(finiteNativeScenarios, cell.variant.id);
 }
 
@@ -103,7 +105,21 @@ function finiteCellOutcome(cell: GoldenCell, result: LiveCellResult, batch: Live
       throw new Error("Compaction coverage requires the exact native item and terminal between completed same-task turns, plus a committed retained-context witness");
     }
   }
-  if (["resumed", "archived-history", "large-history"].includes(cell.variant.id) && (!("preparation" in proof.terminal) || proof.terminal.preparation?.status !== "completed" || proof.terminal.preparation.threadId !== proof.terminal.threadId)) throw new Error("Resumed coverage requires completed preparation in the same native task");
+  if (["resumed", "archived-history", "large-history", "retained-conversation-change"].includes(cell.variant.id) && (!("preparation" in proof.terminal) || proof.terminal.preparation?.status !== "completed" || proof.terminal.preparation.threadId !== proof.terminal.threadId)) throw new Error("Resumed coverage requires completed preparation in the same native task");
+  if (cell.variant.id === "retained-conversation-change") {
+    const historySha256 = "historyWitnessSha256" in proof.terminal ? proof.terminal.historyWitnessSha256 : undefined;
+    const revisionSha256 = "revisionWitnessSha256" in proof.terminal ? proof.terminal.revisionWitnessSha256 : undefined;
+    if (typeof historySha256 !== "string" || !/^[a-f\d]{64}$/.test(historySha256)
+      || typeof revisionSha256 !== "string" || !/^[a-f\d]{64}$/.test(revisionSha256)
+      || !proof.oracle.artifacts.some(artifact => artifact.path === "output/history-witness.txt" && artifact.sha256 === historySha256)
+      || !proof.oracle.artifacts.some(artifact => artifact.path === "output/revision.txt" && artifact.sha256 === revisionSha256)
+      || !result.retainedTab?.passed || result.retainedTab.threadId !== proof.terminal.threadId
+      || result.retainedTab.turnIds.length !== 2 || new Set(result.retainedTab.turnIds).size !== 2
+      || result.retainedTab.turnIds.some(turnId => !/^[a-f\d]{8}(?:-[a-f\d]{4}){3}-[a-f\d]{12}$/i.test(turnId))
+      || !result.retainedTab.tabId) {
+      throw new Error("Retained conversation change requires a completed same-task follow-up, both committed witnesses and exact launcher tab reuse");
+    }
+  }
   if (cell.variant.id === "archived-history" && (!("archive" in proof.terminal) || proof.terminal.archive?.threadId !== proof.terminal.threadId || !proof.terminal.archive.archived || !proof.terminal.archive.restored)) throw new Error("Archived coverage requires observed archive and restoration of the same native task");
   if (["continued", "plan-revise-execute", "plan-tui-execute"].includes(cell.variant.id) && (!("scenario" in proof.terminal) || proof.terminal.scenario?.turns.length !== finiteNativeScenarios[cell.variant.id as FiniteNativeScenario] || proof.terminal.scenario.turns.some(turn => turn.status !== "completed"))) throw new Error("Sequential scenario coverage requires every native turn to complete");
   if (cell.variant.id === "plan-tui-execute") {

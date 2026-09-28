@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { GoldenQueue } from "../scripts/golden/queue";
 import { expect, test } from "bun:test";
 import { retainLiveAdmissionFailure, runLiveBatch, type LiveBatchCell } from "../scripts/golden/live-batch";
-import { CHATGPT_WEB_MODEL_ROUTES } from "../src/chatgpt-web-models";
+import { CHATGPT_WEB_MODEL_ROUTES, CHATGPT_WEB_LUNA_MODEL_ROUTES } from "../src/chatgpt-web-models";
 import { isProGeneration } from "../src/campaign-policy";
 import { nativeRateLimited } from "../scripts/golden/structured-scenarios";
 
@@ -23,6 +23,7 @@ test("batch admission rejects prohibited or unsupported work before inspecting a
   await expect(runLiveBatch({ ...input, cells: [cell, cell] })).rejects.toThrow("distinct");
   const pro = CHATGPT_WEB_MODEL_ROUTES.find(isProGeneration)!;
   await expect(runLiveBatch({ ...input, cells: [{ ...cell, routeSlug: pro.slug }] })).rejects.toThrow("non-Pro");
+  await expect(runLiveBatch({ ...input, cells: [{ ...cell, routeSlug: CHATGPT_WEB_LUNA_MODEL_ROUTES[0]!.slug, variant: "retained-conversation-change" }] })).rejects.toThrow("Sol retained-browser path");
   await expect(runLiveBatch({ ...input, cells: [{ ...cell, workload: 5 }] })).rejects.toThrow("sustained");
   const cancelled = new AbortController(); cancelled.abort(new Error("Cancelled before admission"));
   await expect(runLiveBatch({ ...input, signal: cancelled.signal, cells: [cell] })).rejects.toThrow("Cancelled before admission");

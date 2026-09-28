@@ -6,7 +6,7 @@ import { join, resolve } from "node:path";
 import { DiagnosticsClient } from "../src/diagnostics/client";
 import { Diagnostics } from "../src/diagnostics/instrumentation";
 import { CHATGPT_WEB_MODEL_ROUTES } from "../src/chatgpt-web-models";
-import { goldenScenarioTerminations, readGoldenEvents, readGoldenAdmissionEvents, selectGoldenNativeThreadEvents, verifyGoldenModelSelections, verifyGoldenModelSequence, verifyGoldenToolReceipts, verifyGoldenTuiTitles } from "../scripts/golden/observations";
+import { goldenScenarioTerminations, readGoldenEvents, readGoldenAdmissionEvents, selectGoldenNativeThreadEvents, verifyGoldenModelSelections, verifyGoldenModelSequence, verifyGoldenToolReceipts, verifyGoldenRetainedTabReuse, verifyGoldenTuiTitles } from "../scripts/golden/observations";
 import type { DiagnosticEvent } from "../src/diagnostics/contracts";
 import { problemFor, DiagnosticError } from "../src/diagnostics/problems";
 import { diagnosticAdmissionObservation } from "../scripts/golden/admission";
@@ -36,6 +36,34 @@ test("model-switch acceptance binds each observed route to its exact native turn
     expect(() => verifyGoldenModelSequence(events, threadId, [expected[0]!, expected[0]!])).toThrow("distinct bounded");
     expect(verifyGoldenModelSequence(events.filter(event => event.name !== "browser.model_selection" || event.attributes.effort !== "medium"), threadId, expected).passed).toBeFalse();
   } finally { await runtime.close(); await browser.close(); }
+});
+
+test("retained conversation proof joins two native turns to one exact launcher tab", async () => {
+  const events: DiagnosticEvent[] = [], sink = { emit(event: DiagnosticEvent) { events.push(event); } };
+  const runtime = new Diagnostics(sink, { component: "runtime", target: "fixture", environment: "test" });
+  const browser = new Diagnostics(sink, { component: "browser-helper", target: "fixture", environment: "test" });
+  const launcher = new Diagnostics(sink, { component: "launcher", target: "fixture", environment: "test" });
+  const threadId = randomUUID(), turnIds = [randomUUID(), randomUUID()], tabId = "retained-fixture-tab";
+  try {
+    turnIds.forEach((turnId, index) => {
+      const request = runtime.begin("http.responses", {}, null, { id: `${threadId}:${turnId}` });
+      const browserTask = `browser-task-${index}`;
+      launcher.withContext({ ...request.context, taskId: browserTask }, () => launcher.event(index === 0 ? "browser.tab_created" : "browser.tab_reused", "Owned tab", { tabId, traceId: browserTask }));
+      const selection = browser.begin("browser.effort_selection", {}, request.context, { id: browserTask });
+      selection.run(() => browser.event("browser.model_selection", "Owned model", { model: "gpt-5.6-sol", effort: "low" }));
+      selection.end();
+      launcher.withContext({ ...request.context, taskId: browserTask }, () => launcher.event("browser.tab_retained", "Owned tab", { tabId, traceId: browserTask }));
+      request.end();
+    });
+    const selected = selectGoldenNativeThreadEvents(events, threadId);
+    expect(verifyGoldenRetainedTabReuse(selected.events, threadId)).toMatchObject({ passed: true, tabId, turnIds });
+    const reused = events.find(event => event.name === "browser.tab_reused")!;
+    expect(verifyGoldenRetainedTabReuse(selected.events.map(event => event === reused ? { ...event, attributes: { ...event.attributes, tabId: "foreign-tab" } } : event), threadId).passed).toBeFalse();
+    expect(verifyGoldenRetainedTabReuse(selected.events.map(event => event === reused ? { ...event, taskId: "foreign-browser-task" } : event), threadId).passed).toBeFalse();
+    expect(verifyGoldenRetainedTabReuse(selected.events.map(event => event === reused ? { ...event, time: 0 } : event), threadId).passed).toBeFalse();
+    expect(verifyGoldenRetainedTabReuse(selected.events.filter(event => event.name !== "browser.tab_retained"), threadId).passed).toBeFalse();
+    expect(verifyGoldenRetainedTabReuse([...selected.events, reused], threadId).passed).toBeFalse();
+  } finally { await runtime.close(); await browser.close(); await launcher.close(); }
 });
 
 test("expected interruption requires native control outcome and exact task/turn broker evidence", async () => {

@@ -297,6 +297,25 @@ test("launcher session verification uses the authenticated control channel inste
   }
 });
 
+test("launcher session inspection preserves the typed sign-in cause without raw helper text", async () => {
+  const server = createServer(async (request, response) => {
+    for await (const _chunk of request) { /* consume request */ }
+    response.writeHead(409, { "content-type": "application/json" });
+    response.end(JSON.stringify({ code: "chatgpt_authentication_required", error: "private helper response must not cross" }));
+  });
+  await new Promise<void>((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(0, "127.0.0.1", resolve);
+  });
+  try {
+    const address = server.address();
+    if (!address || typeof address === "string") throw new Error("test server has no port");
+    const path = descriptorFile(`http://127.0.0.1:${address.port}`);
+    await expect(inspectLauncherBrowserHost(path, { detectCapabilities: true }))
+      .rejects.toMatchObject({ code: "chatgpt_authentication_required", message: "ChatGPT sign-in is required in the launcher before session inspection" });
+  } finally { await new Promise<void>(resolve => server.close(() => resolve())); }
+});
+
 test("launcher liveness verification checks only owned process and loopback CDP metadata", async () => {
   let requests = 0;
   const server = createServer((request, response) => {

@@ -443,10 +443,11 @@ class BrowserControlServer {
       const manualInspectionDisabled = error?.code === "manual_browser_inspection_disabled";
       const manualOwnerLost = error?.code === "manual_turn_owner_lost";
       const manualTimedOut = error?.code === "manual_turn_timed_out";
+      const chatGptAuthenticationRequired = isSessionInspect && error?.code === "chatgpt_authentication_required";
       const admissionCode = ["browser_queue_full", "browser_page_capacity_exhausted", "browser_admission_owner_mismatch"].includes(error?.code) ? error.code : undefined;
       writeJson(
         response,
-        cancelled || retainedUnavailable || manualInspectionDisabled || manualOwnerLost || admissionCode
+        cancelled || retainedUnavailable || manualInspectionDisabled || manualOwnerLost || admissionCode || chatGptAuthenticationRequired
           ? 409
           : manualTimedOut ? 408 : 400,
         {
@@ -457,6 +458,7 @@ class BrowserControlServer {
         ...(manualInspectionDisabled ? { code: "manual_browser_inspection_disabled" } : {}),
         ...(manualOwnerLost ? { code: "manual_turn_owner_lost" } : {}),
         ...(manualTimedOut ? { code: "manual_turn_timed_out" } : {}),
+        ...(chatGptAuthenticationRequired ? { code: "chatgpt_authentication_required" } : {}),
         },
       );
     }

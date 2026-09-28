@@ -364,6 +364,30 @@ test("manual control rejects session inspection before any browser helper can ru
   }
 });
 
+test("session inspection exposes only the typed sign-in requirement", async () => {
+  const server = await new BrowserControlServer({
+    logger: { info() {}, warn() {}, error() {} },
+    getBrowserHost: () => ({ browserInteractionMode: () => "automatic", inspectSession() {
+      const error = new Error("ChatGPT sign-in is required in the launcher before session inspection");
+      error.code = "chatgpt_authentication_required";
+      throw error;
+    } }),
+    getPreferences: () => ({ browserInteractionMode: "automatic" }),
+  }).start();
+  const descriptor = server.descriptor();
+  try {
+    const response = await fetch(`${descriptor.endpoint}/v1/session/inspect`, {
+      method: "POST", headers: { authorization: `Bearer ${descriptor.token}`, "content-type": "application/json" },
+      body: JSON.stringify({ detectCapabilities: true }),
+    });
+    assert.equal(response.status, 409);
+    assert.deepEqual(await response.json(), {
+      error: "ChatGPT sign-in is required in the launcher before session inspection",
+      code: "chatgpt_authentication_required",
+    });
+  } finally { await server.close(); }
+});
+
 test("manual-to-automatic transaction exposes capability inspection and preserves tabs on rollback", async () => {
   const retained = { id: "manual-ready", status: "ready", interactionMode: "manual" };
   const removed = [];

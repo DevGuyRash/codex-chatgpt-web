@@ -516,6 +516,19 @@ test("session inspection fails closed on incomplete shared-helper capability evi
   );
 });
 
+test("session inspection reports an authentication route before launching a helper", async () => {
+  let helperStarted = false;
+  const fixture = Object.assign(Object.create(BrowserHost.prototype), {
+    getConnectorName: () => "Codex Native2 DEV",
+    view: { webContents: { getURL: () => "https://chatgpt.com/auth/login" } },
+    logger: { warn() {} },
+    runBrowserHelperOperation: async () => { helperStarted = true; },
+  });
+  await assert.rejects(BrowserHost.prototype.runSessionInspection.call(fixture, true), error =>
+    error.code === "chatgpt_authentication_required" && /sign-in is required/.test(error.message));
+  assert.equal(helperStarted, false);
+});
+
 test("home reload reapplies its hidden viewport before capability inspection", async () => {
   const calls = [];
   const fixture = {

@@ -350,7 +350,12 @@ export async function inspectLauncherBrowserHost(
       signal: controller.signal,
     });
     const body = await response.json().catch(() => ({})) as Record<string, unknown>;
-    if (!response.ok) throw inspectionFailure("launcher_session_inspection_rejected", `Launcher rejected ChatGPT session inspection (HTTP ${response.status})`, response.status);
+    if (!response.ok) {
+      if (response.status === 409 && body.code === "chatgpt_authentication_required") {
+        throw inspectionFailure("chatgpt_authentication_required", "ChatGPT sign-in is required in the launcher before session inspection", response.status);
+      }
+      throw inspectionFailure("launcher_session_inspection_rejected", `Launcher rejected ChatGPT session inspection (HTTP ${response.status})`, response.status);
+    }
     if (body.authenticated !== true || body.temporary !== true || typeof body.url !== "string") {
       throw inspectionFailure("launcher_session_evidence_invalid", "Launcher returned invalid ChatGPT session evidence");
     }

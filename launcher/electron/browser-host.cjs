@@ -2996,6 +2996,12 @@ class BrowserHost {
     requireAutomaticBrowserInspection(this, "ChatGPT session and capability inspection");
     const connectorName = this.connectorName();
     const initialUrl = this.view.webContents.getURL();
+    if (allowedAuthUrl(initialUrl)) {
+      const error = new Error("ChatGPT sign-in is required in the launcher before session inspection");
+      error.code = "chatgpt_authentication_required";
+      this.logger.warn("browser.session_inspection_auth_required", { route: "authentication" });
+      throw error;
+    }
     const startedIdle = initialUrl === IDLE_BROWSER_URL;
     if (detectCapabilities && (!this.visible || !this.surfaceActive)) {
       // A hidden WebContentsView can lose its emulated viewport without navigation. Give the

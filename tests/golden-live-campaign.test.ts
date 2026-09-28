@@ -49,6 +49,25 @@ test("live campaign settlement separates failed artifacts from missing terminal 
   expect(() => liveBatchOutcomes(resumedCells, forgedResume)).toThrow("completed preparation");
 });
 
+test("complete evidence blocks a known failed native terminal without replaying its tools", () => {
+  const batch = completedBatch();
+  const item = batch.cells[0]!;
+  item.passed = false;
+  delete item.result;
+  item.error = problemFor(new DiagnosticError({ code: "chatgpt_completion_unconfirmed", message: "Exact assistant turn had no completed footer", origin: "chatgpt-ui", retryable: false }));
+  item.nativeFailure = { threadId: "owned-task", turns: [{ id: "submitted-turn", status: "failed", items: [] }] };
+  expect([...liveBatchOutcomes(cells, batch).values()].map(outcome => outcome.status)).toEqual(["blocked", "passed"]);
+  expect(liveBatchOutcomes(cells, batch).get(item.id)).toMatchObject({ status: "blocked", evidence: batch.evidence, reason: expect.stringContaining("chatgpt_completion_unconfirmed") });
+  item.nativeFailure.turns[0]!.status = "inProgress";
+  expect(() => liveBatchOutcomes(cells, batch)).toThrow("Native terminal evidence requires reconciliation");
+
+  delete item.nativeFailure;
+  item.nativeExecFailure = { phase: "execution", outcome: { threadId: "owned-task", status: "failed", terminal: { type: "turn.failed", error: { message: "Synthetic unconfirmed completion" } }, observedItems: 1, exit: { code: 1, signal: null } } };
+  expect(liveBatchOutcomes(cells, batch).get(item.id)?.status).toBe("blocked");
+  const missingEvidence = { ...batch, evidence: undefined } as unknown as Parameters<typeof liveBatchOutcomes>[1];
+  expect(() => liveBatchOutcomes(cells, missingEvidence)).toThrow("Native terminal evidence requires reconciliation");
+});
+
 test("live campaign admission refuses Pro, sustained and unimplemented scenarios without model work", async () => {
   const executor = liveCampaignExecutor({ root: "/nonexistent", sourceHome: "/nonexistent", executable: "/nonexistent", turnTimeoutMs: 1000 });
   for (const cell of [matrix.find(cell => cell.exclusion?.includes("Pro generation"))!, matrix.find(cell => cell.workload === 5)!, matrix.find(cell => cell.variant.id === "nested-delegation")!]) {

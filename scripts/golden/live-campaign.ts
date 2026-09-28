@@ -28,7 +28,18 @@ function finiteCellOutcome(cell: GoldenCell, result: LiveCellResult, batch: Live
   if (!canExecuteLiveCell(cell) || result.id !== cell.id || result.routeSlug !== cell.route.slug || result.workload !== cell.workload || result.variant !== cell.variant.id || batch.protocol !== cell.protocol) throw new Error("Live evidence does not match the exact claimed campaign cell");
   const proof = result.result;
   // A stopped process or a completed export cannot establish an unobserved native terminal.
-  if (!proof || proof.terminal.status !== "completed" || !proof.terminal.threadId) throw new Error("Native terminal evidence requires reconciliation before campaign settlement");
+  if (!proof || proof.terminal.status !== "completed" || !proof.terminal.threadId) {
+    const scenarioTerminal = result.nativeFailure?.turns.at(-1);
+    const execTerminal = result.nativeExecFailure?.outcome;
+    const terminal = scenarioTerminal && ["completed", "failed", "interrupted"].includes(scenarioTerminal.status)
+      && result.nativeFailure?.threadId ? scenarioTerminal
+      : execTerminal && ["failed", "interrupted"].includes(execTerminal.status)
+        && execTerminal.threadId ? execTerminal : undefined;
+    if (terminal && result.error && typeof batch.evidence === "string" && batch.evidence.length > 0) {
+      return { status: "blocked", reason: `The exact native task ended ${terminal.status} with ${result.error.code}; inspect its retained submission and tool effects before any distinct attempt`, evidence: batch.evidence };
+    }
+    throw new Error("Native terminal evidence requires reconciliation before campaign settlement");
+  }
   if (!result.passed) return { status: "failed", reason: result.error?.message ?? "The completed native task failed independent workload, commit, selection or receipt acceptance", evidence: batch.evidence };
   if (result.error || !proof.terminal.toolItems || !proof.oracle.passed || !proof.commit.passed || !result.selections?.passed || !result.receipts?.passed || !result.receipts.calls
     || !Number.isSafeInteger(result.receipts.returned) || result.receipts.returned < 0

@@ -71,6 +71,23 @@ test("current-turn MCP progress wait remains abortable", async () => {
   await expect(waiting).rejects.toMatchObject({ name: "AbortError" });
 });
 
+test("retiring MCP progress releases unabortable observers and rejects later waits", async () => {
+  const idle = new ChatGptExternalTurnProgress();
+  const idleWait = idle.waitForChange(0);
+  const idleFailure = new Error("idle turn retired");
+  idle.retire(idleFailure);
+  await expect(idleWait).rejects.toBe(idleFailure);
+  await expect(idle.waitForChange(0)).rejects.toBe(idleFailure);
+
+  const active = new ChatGptExternalTurnProgress();
+  active.recordToolBatch(1, 1_000);
+  const activeWait = active.waitForChange(1);
+  const activeFailure = new Error("active turn retired");
+  active.retire(activeFailure);
+  expect(await activeWait).toEqual({ revision: 2, lastToolBatchRevision: 1, activeToolCalls: 0, lastProgressAt: 1_000 });
+  await expect(active.waitForChange(2)).rejects.toBe(activeFailure);
+});
+
 test("tool-boundary observation wait is cancelled by browser settlement", async () => {
   const progress = new ChatGptExternalTurnProgress();
   const revision = progress.recordToolBatch(1);

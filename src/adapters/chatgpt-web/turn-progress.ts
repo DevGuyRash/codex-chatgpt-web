@@ -81,6 +81,14 @@ abstract class ChatGptTurnProgressBroadcaster implements ChatGptTurnProgressRead
       waiter.resolve(snapshot);
     }
   }
+
+  protected rejectWaiters(error: Error): void {
+    for (const waiter of this.waiters) {
+      if (waiter.signal && waiter.onAbort) waiter.signal.removeEventListener("abort", waiter.onAbort);
+      waiter.reject(error);
+    }
+    this.waiters.clear();
+  }
 }
 
 export class ChatGptExternalTurnProgress extends ChatGptTurnProgressBroadcaster {
@@ -100,6 +108,11 @@ export class ChatGptExternalTurnProgress extends ChatGptTurnProgressBroadcaster 
       activeToolCalls: this.activeToolCalls,
       ...(this.lastProgressAt !== undefined ? { lastProgressAt: this.lastProgressAt } : {}),
     };
+  }
+
+  override waitForChange(afterRevision: number, signal?: AbortSignal): Promise<ChatGptExternalTurnProgressSnapshot> {
+    if (this.retirementError) return Promise.reject(this.retirementError);
+    return super.waitForChange(afterRevision, signal);
   }
 
   recordToolBatch(count: number, now = Date.now()): number {
@@ -182,12 +195,16 @@ export class ChatGptExternalTurnProgress extends ChatGptTurnProgressBroadcaster 
       waiter.reject(error);
     }
     this.toolBatchObservationWaiters.clear();
-    if (this.activeToolCalls === 0) return true;
+    if (this.activeToolCalls === 0) {
+      this.rejectWaiters(error);
+      return true;
+    }
     this.activeToolCalls = 0;
     // Retirement is not fresh model progress. Advance the transport revision so the browser mirror
     // drops its completion veto, while preserving the timestamp of the last proven MCP activity.
     this.revision += 1;
     this.notify(this.snapshot());
+    this.rejectWaiters(error);
     return true;
   }
 

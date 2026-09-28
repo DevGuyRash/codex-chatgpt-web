@@ -1,7 +1,7 @@
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { loadConfig } from "../../src/config";
-import { readLauncherBrowserHostDescriptor } from "../../src/launcher-browser-host";
+import { inspectLauncherBrowserHost, readLauncherBrowserHostDescriptor } from "../../src/launcher-browser-host";
 import { buildGoldenMatrix } from "./catalog";
 import { assertBorrowedTunnelInactive } from "./borrowed-tunnel";
 import { goldenImplementationIdentity, verifyGoldenBrowserHelper } from "./implementation";
@@ -27,6 +27,9 @@ export async function runSelectedGoldenCell(options: { root: string; executable:
     if (identity.sha256 !== queue.implementationSha256) throw new Error("The selected golden implementation requires reviewed reconciliation");
     verifyGoldenBrowserHelper(resolve(import.meta.dir, "../.."), descriptor.helper.script);
     await assertBorrowedTunnelInactive(sourceHome, root, loadConfig(sourceHome));
+    // Avoid consuming a durable cell claim for an already signed-out launcher. The
+    // batch still performs a fresh inspection after its owned restart.
+    await inspectLauncherBrowserHost(workspace.descriptorPath);
     const runner = queue.acquireRunner();
     try {
       const claim = queue.claim({ lane: cell.lane, protocol: cell.protocol, runnerToken: runner, eligible: candidate => candidate.id === cell.id });

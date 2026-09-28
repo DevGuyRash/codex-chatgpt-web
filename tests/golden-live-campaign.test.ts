@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import { createHash } from "node:crypto";
-import { GOLDEN_UNICODE_WITNESS, GOLDEN_RECOVERABLE_FAILURE_FILE } from "../scripts/golden/workloads";
+import { GOLDEN_UNICODE_WITNESS, GOLDEN_RECOVERABLE_FAILURE_FILE, GOLDEN_LARGE_TOOL_RESULT_FILE } from "../scripts/golden/workloads";
 import { buildGoldenMatrix } from "../scripts/golden/catalog";
 import { canExecuteLiveCell, liveBatchOutcomes, liveCampaignExecutor } from "../scripts/golden/live-campaign";
 import { nativePlanHashes } from "../scripts/golden/app-server";
@@ -241,6 +241,26 @@ test("recoverable tool failure requires one observed failed native command and i
   item.passed = false;
   item.error = problemFor(new DiagnosticError({ code: "golden_recoverable_failure_missing", message: "Expected failed command was not uniquely observed", origin: "golden-native" }));
   expect(liveBatchOutcomes([cell], batch).get(cell.id)?.status).toBe("failed");
+});
+
+test("large tool result requires one complete command output and its committed digest", () => {
+  const cell = { ...cells[0]!, variant: { id: "large-tool-result", driver: "exec" as const } };
+  expect(canExecuteLiveCell(cell)).toBe(true);
+  const batch = completedBatch();
+  batch.cells = [batch.cells[0]!];
+  const item = batch.cells[0]!;
+  item.variant = "large-tool-result";
+  item.result!.terminal.variant = "large-tool-result";
+  expect(() => liveBatchOutcomes([cell], batch)).toThrow("Large tool result coverage requires");
+  const sha256 = "e".repeat(64);
+  Object.assign(item.result!.terminal, { largeResultWitness: { invocations: 1, count: 1, bytes: 39_449, sha256 } });
+  item.result!.oracle.artifacts.push({ path: GOLDEN_LARGE_TOOL_RESULT_FILE, bytes: 250, sha256: "c".repeat(64) });
+  item.result!.oracle.artifacts.push({ path: "output/large-tool-result.sha256", bytes: 65, sha256: createHash("sha256").update(`${sha256}\n`).digest("hex") });
+  expect(liveBatchOutcomes([cell], batch).get(cell.id)?.status).toBe("passed");
+  Object.assign(item.result!.terminal, { largeResultWitness: { invocations: 2, count: 1, bytes: 39_449, sha256 } });
+  expect(() => liveBatchOutcomes([cell], batch)).toThrow("Large tool result coverage requires");
+  Object.assign(item.result!.terminal, { largeResultWitness: { invocations: 1, count: 1, bytes: 1024, sha256 } });
+  expect(() => liveBatchOutcomes([cell], batch)).toThrow("Large tool result coverage requires");
 });
 
 test("verified provider admission survives incomplete exec evidence without inferring a limit from native prose", () => {

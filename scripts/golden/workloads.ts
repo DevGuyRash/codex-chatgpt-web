@@ -11,6 +11,18 @@ export const GOLDEN_UNICODE_WITNESS = "東京 → café → Δοκιμή → م�
 export const GOLDEN_RECOVERABLE_FAILURE_FILE = "input/expected-failure.sh";
 export const GOLDEN_RECOVERABLE_FAILURE_MARKER = "GOLDEN_EXPECTED_RECOVERABLE_FAILURE_V1";
 export const GOLDEN_RECOVERABLE_FAILURE_CONTENT = `#!/bin/sh\nprintf '%s\\n' '${GOLDEN_RECOVERABLE_FAILURE_MARKER}' >&2\nexit 17\n`;
+export const GOLDEN_LARGE_TOOL_RESULT_FILE = "input/large-tool-result.ts";
+export const GOLDEN_LARGE_TOOL_RESULT_MARKER = "GOLDEN_LARGE_TOOL_END_V1";
+const GOLDEN_LARGE_TOOL_RESULT_RECORDS = 512;
+export function largeToolResultContent(workload: GoldenWorkload): string {
+  return `const datasetId = ${JSON.stringify(workload.id)};\nfor (let index = 0; index < ${GOLDEN_LARGE_TOOL_RESULT_RECORDS}; index++) console.log(\`record-\${String(index).padStart(4, "0")}:\${datasetId}\`);\nconsole.log(${JSON.stringify(GOLDEN_LARGE_TOOL_RESULT_MARKER)});\n`;
+}
+export function largeToolResultOutput(workload: GoldenWorkload): string {
+  return Array.from({ length: GOLDEN_LARGE_TOOL_RESULT_RECORDS }, (_, index) => `record-${String(index).padStart(4, "0")}:${workload.id}\n`).join("") + `${GOLDEN_LARGE_TOOL_RESULT_MARKER}\n`;
+}
+export function largeToolResultSha256(workload: GoldenWorkload): string {
+  return sha256(largeToolResultOutput(workload));
+}
 export function largeHistoryWitness(workload: GoldenWorkload): string {
   // The generated seed is runner-owned and absent from the disposable repository.
   // A public dataset ID must not let the continuation recompute its witness.
@@ -179,6 +191,10 @@ export function evaluateWorkload(rootInput: string, workload: GoldenWorkload, pr
   if (variant === "unicode") {
     const witness = read("output/unicode.txt", 1024);
     if (witness !== undefined && witness !== `${GOLDEN_UNICODE_WITNESS}\n`) failures.push("Unicode witness differs from the required UTF-8 artifact");
+  }
+  if (variant === "large-tool-result") {
+    const digest = read("output/large-tool-result.sha256", 1024);
+    if (digest !== undefined && digest !== `${largeToolResultSha256(workload)}\n`) failures.push("Large tool result digest differs from the independently generated output");
   }
   if (variant.startsWith("steer-")) {
     const witness = read("output/steering.txt", 1024);

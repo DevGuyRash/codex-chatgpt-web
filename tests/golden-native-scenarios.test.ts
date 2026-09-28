@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { createHash, randomUUID } from "node:crypto";
 import { ownedNativeActivity, runNativeScenario } from "../scripts/golden/native-scenarios";
-import { GOLDEN_UNICODE_WITNESS, GOLDEN_RECOVERABLE_FAILURE_FILE, GOLDEN_RECOVERABLE_FAILURE_CONTENT, createWorkload, largeHistoryWitness, materializeWorkload } from "../scripts/golden/workloads";
+import { GOLDEN_UNICODE_WITNESS, GOLDEN_RECOVERABLE_FAILURE_FILE, GOLDEN_RECOVERABLE_FAILURE_CONTENT, GOLDEN_LARGE_TOOL_RESULT_FILE, createWorkload, largeToolResultContent, largeToolResultOutput, largeToolResultSha256, largeHistoryWitness, materializeWorkload } from "../scripts/golden/workloads";
 import { CHATGPT_WEB_MODEL_ROUTES } from "../src/chatgpt-web-models";
 import { GoldenAppServer, initializeGoldenNativeHome } from "../scripts/golden/app-server";
 import { findNativeExecFailure, runNativeExec } from "../scripts/golden/exec";
@@ -66,6 +66,43 @@ let input="";process.stdin.on("data",chunk=>input+=chunk);process.stdin.on("end"
     expect(result).toMatchObject({ status: "completed", variant: "tool-failure", toolItems: 1, failureWitness: { count: 1, expectedExitCode: 17 } });
     await expect(runNativeScenario({ executable: peer, cwd: root, env: {}, route: CHATGPT_WEB_MODEL_ROUTES[0]!, workload: createWorkload({ level: 1, seed: "missing-failure-fixture", batch: 0 }), variant: "tool-failure", signal: new AbortController().signal, timeoutMs: 2000,
       onRecord: async () => {}, checkpoint: () => {} })).rejects.toThrow("runner-owned input fixture");
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("large tool result coordinator observes one complete native command instead of prose or a truncated result", async () => {
+  const root = mkdtempSync(join(tmpdir(), "golden-large-tool-result-")), peer = join(root, "peer"), promptPath = join(root, "prompt.txt");
+  const workload = createWorkload({ level: 1, seed: "large-tool-result", batch: 0 });
+  workload.files[GOLDEN_LARGE_TOOL_RESULT_FILE] = largeToolResultContent(workload);
+  materializeWorkload(root, workload);
+  mkdirSync(join(root, ".git"));
+  writeFileSync(peer, `#!${process.execPath}
+import {spawnSync} from "node:child_process";
+import {writeFileSync} from "node:fs";
+let prompt="";process.stdin.on("data",chunk=>prompt+=chunk);process.stdin.on("end",()=>{
+ writeFileSync(${JSON.stringify(promptPath)},prompt);
+ const command="bun input/large-tool-result.ts";
+ const run=spawnSync(process.execPath,["input/large-tool-result.ts"],{cwd:process.cwd(),encoding:"utf8",maxBuffer:1024*1024});
+ const output=process.env.TRUNCATE==="1"?run.stdout.slice(0,1024):run.stdout;
+ const send=value=>console.log(JSON.stringify(value));
+ send({type:"thread.started",thread_id:"11111111-1111-7111-8111-111111111111"});send({type:"turn.started"});
+ const item={type:"item.completed",item:{type:"command_execution",id:"large-result",command,exit_code:run.status,aggregated_output:output}};
+ send(item);if(process.env.DUPLICATE==="1")send(item);
+ send({type:"turn.completed"});
+});
+`, { mode: 0o700 });
+  const options = { executable: peer, cwd: root, env: {}, route: CHATGPT_WEB_MODEL_ROUTES[0]!, workload, variant: "large-tool-result", signal: new AbortController().signal, timeoutMs: 2000,
+    onRecord: async () => {}, checkpoint: () => {} };
+  try {
+    const result = await runNativeScenario(options);
+    expect(result).toMatchObject({ status: "completed", variant: "large-tool-result", toolItems: 1,
+      largeResultWitness: { invocations: 1, count: 1, bytes: Buffer.byteLength(largeToolResultOutput(workload)), sha256: largeToolResultSha256(workload) } });
+    expect(readFileSync(promptPath, "utf8")).toContain("max_output_tokens 20000");
+    const truncated = await runNativeScenario({ ...options, env: { TRUNCATE: "1" } });
+    expect("largeResultWitness" in truncated ? truncated.largeResultWitness : undefined).toMatchObject({ invocations: 1, count: 0 });
+    const duplicated = await runNativeScenario({ ...options, env: { DUPLICATE: "1" } });
+    expect("largeResultWitness" in duplicated ? duplicated.largeResultWitness : undefined).toMatchObject({ invocations: 2, count: 2 });
+    const missing = { ...workload, files: { ...workload.files, [GOLDEN_LARGE_TOOL_RESULT_FILE]: "changed" } };
+    await expect(runNativeScenario({ ...options, workload: missing })).rejects.toThrow("runner-owned input fixture");
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 

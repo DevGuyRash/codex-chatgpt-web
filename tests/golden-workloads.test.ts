@@ -1,8 +1,9 @@
 import { expect, test } from "bun:test";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { GOLDEN_UNICODE_WITNESS, createWorkload, evaluateWorkload, largeHistoryWitness, materializeWorkload } from "../scripts/golden/workloads";
+import { GOLDEN_UNICODE_WITNESS, GOLDEN_LARGE_TOOL_RESULT_FILE, createWorkload, evaluateWorkload, largeToolResultContent, largeToolResultOutput, largeToolResultSha256, largeHistoryWitness, materializeWorkload } from "../scripts/golden/workloads";
 
 test("shared workloads are deterministic, vary across batches, and preserve Unicode input", () => {
   for (const level of [1, 2, 3, 4, 5] as const) {
@@ -19,6 +20,24 @@ test("shared workloads are deterministic, vary across batches, and preserve Unic
     expect(formats.files["input/spec.md"]).toContain("output/attachments.json");
     expect(formats.files["input/spec.md"]).toContain("output/teams.csv");
   }
+});
+
+test("large tool fixture emits the independently expected 39 KB result and requires its digest artifact", () => {
+  const root = mkdtempSync(join(tmpdir(), "golden-large-result-workload-"));
+  try {
+    const workload = createWorkload({ level: 1, seed: "large-result-fixture", batch: 0 });
+    workload.files[GOLDEN_LARGE_TOOL_RESULT_FILE] = largeToolResultContent(workload);
+    materializeWorkload(root, workload);
+    const output = spawnSync(process.execPath, [GOLDEN_LARGE_TOOL_RESULT_FILE], { cwd: root, encoding: "utf8", maxBuffer: 1024 * 1024 });
+    expect(output.status).toBe(0);
+    expect(output.stdout).toBe(largeToolResultOutput(workload));
+    expect(Buffer.byteLength(output.stdout)).toBeGreaterThan(32_000);
+    expect(evaluateWorkload(root, workload, undefined, "large-tool-result").failures).toContain("Missing, oversized, or aliased artifact: output/large-tool-result.sha256");
+    writeFileSync(join(root, "output/large-tool-result.sha256"), "wrong\n");
+    expect(evaluateWorkload(root, workload, undefined, "large-tool-result").failures).toContain("Large tool result digest differs from the independently generated output");
+    writeFileSync(join(root, "output/large-tool-result.sha256"), `${largeToolResultSha256(workload)}\n`);
+    expect(evaluateWorkload(root, workload, undefined, "large-tool-result").failures).not.toContain("Large tool result digest differs from the independently generated output");
+  } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
 test.each([undefined, "all"] as const)("the independent artifact oracle rejects fabricated completion, incorrect arithmetic and changed inputs (formats=%s)", formatCoverage => {

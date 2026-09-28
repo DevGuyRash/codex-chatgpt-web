@@ -7,7 +7,7 @@ import type { GoldenAttempt } from "./runner";
 import { goldenScenarioTerminations } from "./observations";
 import { GoldenAdmissionSuspended, nativeAdmissionObservation } from "./admission";
 import { nativePlanHashes, type NativeCompaction } from "./app-server";
-import { GOLDEN_UNICODE_WITNESS, GOLDEN_RECOVERABLE_FAILURE_FILE } from "./workloads";
+import { GOLDEN_UNICODE_WITNESS, GOLDEN_RECOVERABLE_FAILURE_FILE, GOLDEN_LARGE_TOOL_RESULT_FILE } from "./workloads";
 import { createHash } from "node:crypto";
 import { DiagnosticError } from "../../src/diagnostics/problems";
 
@@ -66,6 +66,17 @@ function finiteCellOutcome(cell: GoldenCell, result: LiveCellResult, batch: Live
     if (!failure || failure.count !== 1 || failure.expectedExitCode !== 17
       || !proof.oracle.artifacts.some(artifact => artifact.path === GOLDEN_RECOVERABLE_FAILURE_FILE && artifact.bytes > 0)) {
       throw new Error("Recoverable tool failure requires one actual failed native command and its unchanged runner-owned fixture");
+    }
+  }
+  if (cell.variant.id === "large-tool-result") {
+    const witness = "largeResultWitness" in proof.terminal ? proof.terminal.largeResultWitness : undefined;
+    const digestArtifact = witness && typeof witness.sha256 === "string"
+      ? createHash("sha256").update(`${witness.sha256}\n`).digest("hex") : undefined;
+    if (!witness || witness.invocations !== 1 || witness.count !== 1 || witness.bytes < 32_000
+      || !/^[a-f\d]{64}$/.test(witness.sha256)
+      || !proof.oracle.artifacts.some(artifact => artifact.path === GOLDEN_LARGE_TOOL_RESULT_FILE && artifact.bytes > 0)
+      || !proof.oracle.artifacts.some(artifact => artifact.path === "output/large-tool-result.sha256" && artifact.sha256 === digestArtifact)) {
+      throw new Error("Large tool result coverage requires one complete native command result and its independently validated committed digest");
     }
   }
   if (cell.variant.id === "large-history") {

@@ -1,18 +1,56 @@
 diff --git a/dist/chrome-extension-api.preload.js b/dist/chrome-extension-api.preload.js
-index 67d3be4b5026069ec4ae73c1fc6e661f8a19098e..0bcf78dec01e38533070b4c8ad7a9720fade3179 100644
+index 67d3be4..b4595a5 100644
 --- a/dist/chrome-extension-api.preload.js
 +++ b/dist/chrome-extension-api.preload.js
-@@ -21,9 +21,6 @@
+@@ -15,38 +15,37 @@
+   var formatIpcName = (name) => `crx-${name}`;
+   var listenerMap = /* @__PURE__ */ new Map();
+   var addExtensionListener = (extensionId, name, callback) => {
+-    const listenerCount = listenerMap.get(name) || 0;
+-    if (listenerCount === 0) {
++    const key = `${extensionId}:${name}`;
++    let listeners = listenerMap.get(key);
++    if (listeners?.has(callback)) return;
++    if (!listeners) {
++      listeners = /* @__PURE__ */ new Map();
++      listenerMap.set(key, listeners);
+       import_electron.ipcRenderer.send("crx-add-listener", extensionId, name);
      }
-     listenerMap.set(name, listenerCount + 1);
-     import_electron.ipcRenderer.addListener(formatIpcName(name), function(event, ...args) {
+-    listenerMap.set(name, listenerCount + 1);
+-    import_electron.ipcRenderer.addListener(formatIpcName(name), function(event, ...args) {
 -      if (true) {
 -        console.log(name, "(result)", ...args);
 -      }
++    const wrapped = function(event, ...args) {
        callback(...args);
-     });
+-    });
++    };
++    listeners.set(callback, wrapped);
++    import_electron.ipcRenderer.addListener(formatIpcName(name), wrapped);
    };
-@@ -44,9 +41,6 @@
+   var removeExtensionListener = (extensionId, name, callback) => {
+-    if (listenerMap.has(name)) {
+-      const listenerCount = listenerMap.get(name) || 0;
+-      if (listenerCount <= 1) {
+-        listenerMap.delete(name);
+-        import_electron.ipcRenderer.send("crx-remove-listener", extensionId, name);
+-      } else {
+-        listenerMap.set(name, listenerCount - 1);
+-      }
++    const key = `${extensionId}:${name}`;
++    const listeners = listenerMap.get(key);
++    const wrapped = listeners?.get(callback);
++    if (!wrapped) return;
++    import_electron.ipcRenderer.removeListener(formatIpcName(name), wrapped);
++    listeners.delete(callback);
++    if (listeners.size === 0) {
++      listenerMap.delete(key);
++      import_electron.ipcRenderer.send("crx-remove-listener", extensionId, name);
+     }
+-    import_electron.ipcRenderer.removeListener(formatIpcName(name), callback);
+   };
+ 
+   // src/renderer/index.ts
    var injectExtensionAPIs = () => {
      const invokeExtension = async function(extensionId, fnName, options = {}, ...args) {
        const callback = typeof args[args.length - 1] === "function" ? args.pop() : void 0;
@@ -22,7 +60,7 @@ index 67d3be4b5026069ec4ae73c1fc6e661f8a19098e..0bcf78dec01e38533070b4c8ad7a9720
        if (options.noop) {
          console.warn(`${fnName} is not yet implemented.`);
          if (callback) callback(options.defaultResponse);
-@@ -59,12 +53,9 @@
+@@ -59,12 +58,9 @@
        try {
          result = await import_electron2.ipcRenderer.invoke("crx-msg", extensionId, fnName, ...args);
        } catch (e) {
@@ -36,7 +74,7 @@ index 67d3be4b5026069ec4ae73c1fc6e661f8a19098e..0bcf78dec01e38533070b4c8ad7a9720
        if (callback) {
          callback(result);
        } else {
-@@ -566,11 +557,40 @@
+@@ -566,11 +562,40 @@
            configurable: true
          });
        });
@@ -78,7 +116,7 @@ index 67d3be4b5026069ec4ae73c1fc6e661f8a19098e..0bcf78dec01e38533070b4c8ad7a9720
        mainWorldScript();
        return;
      }
-@@ -585,8 +605,7 @@
+@@ -585,8 +610,7 @@
          import_electron2.webFrame.executeJavaScript(`(${mainWorldScript}());`);
        }
      } catch (error) {
@@ -89,7 +127,7 @@ index 67d3be4b5026069ec4ae73c1fc6e661f8a19098e..0bcf78dec01e38533070b4c8ad7a9720
    };
  
 diff --git a/dist/cjs/index.js b/dist/cjs/index.js
-index b4242b0b847d33d8544832bfb2d8723a884a3072..597d514fb5ddf2533d7af30b70514103dcdc7607 100644
+index b4242b0..597d514 100644
 --- a/dist/cjs/index.js
 +++ b/dist/cjs/index.js
 @@ -605,7 +605,7 @@ var BrowserActionAPI = class {

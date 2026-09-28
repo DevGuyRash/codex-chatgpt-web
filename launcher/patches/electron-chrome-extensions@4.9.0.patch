@@ -127,7 +127,7 @@ index 67d3be4..b4595a5 100644
    };
  
 diff --git a/dist/cjs/index.js b/dist/cjs/index.js
-index b4242b0..597d514 100644
+index b4242b0..28fba69 100644
 --- a/dist/cjs/index.js
 +++ b/dist/cjs/index.js
 @@ -605,7 +605,7 @@ var BrowserActionAPI = class {
@@ -471,13 +471,24 @@ index b4242b0..597d514 100644
        const ses = sessionPartition === DEFAULT_SESSION ? getSessionFromEvent(event) : resolvePartition(sessionPartition);
        const observer = this.sessionMap.get(ses);
        return observer?.onExtensionMessage(event, void 0, handlerName, ...args);
-@@ -2363,13 +2484,19 @@ var ExtensionRouter = class {
+@@ -2360,16 +2481,30 @@ var ExtensionRouter = class {
+     const sessionExtensions = session2.extensions || session2;
+     sessionExtensions.on("extension-unloaded", (event, extension) => {
+       this.filterListeners((listener) => listener.extensionId !== extension.id);
++      const scope = `chrome-extension://${extension.id}/`;
++      for (const worker of this.extensionWorkers) {
++        if (worker.scope?.startsWith(scope)) this.extensionWorkers.delete(worker);
++      }
++      for (const host of this.extensionHosts) {
++        if (host.isDestroyed?.() || getHostUrl(host)?.startsWith(scope)) this.extensionHosts.delete(host);
++      }
      });
      import_electron9.app.on("web-contents-created", (event, webContents2) => {
        if (webContents2.session === this.session && webContents2.getType() === "backgroundPage") {
 -        d8(`storing reference to background host [url:'${webContents2.getURL()}']`);
 +        d8("storing reference to background host; URL omitted");
          this.extensionHosts.add(webContents2);
++        webContents2.once("destroyed", () => this.extensionHosts.delete(webContents2));
        }
      });
      session2.serviceWorkers.on(
@@ -492,7 +503,7 @@ index b4242b0..597d514 100644
          if (runningStatus !== "starting") return;
          const serviceWorker = session2.serviceWorkers.getWorkerFromVersionID(versionId);
          if (!serviceWorker) return;
-@@ -2378,7 +2505,7 @@ var ExtensionRouter = class {
+@@ -2378,7 +2513,7 @@ var ExtensionRouter = class {
          if (this.extensionHosts.has(serviceWorker)) {
            d8("%s running status changed to %s", scope, runningStatus);
          } else {
@@ -501,7 +512,7 @@ index b4242b0..597d514 100644
            this.extensionWorkers.add(serviceWorker);
          }
        }
-@@ -2400,7 +2527,7 @@ var ExtensionRouter = class {
+@@ -2400,7 +2535,7 @@ var ExtensionRouter = class {
    }
    observeListenerHost(host) {
      const hostId = getHostId(host);
@@ -510,7 +521,7 @@ index b4242b0..597d514 100644
      host.once("destroyed", () => {
        d8(`extension host destroyed [id:${hostId}]`);
        this.filterListeners((listener) => listener.type !== "frame" || listener.host !== host);
-@@ -2473,7 +2600,7 @@ var ExtensionRouter = class {
+@@ -2473,7 +2608,7 @@ var ExtensionRouter = class {
      }
      const extEvent = event.type === "frame" ? { type: event.type, sender: event.sender, extension } : { type: event.type, sender: event.serviceWorker, extension };
      const result = await handler.callback(extEvent, ...args);

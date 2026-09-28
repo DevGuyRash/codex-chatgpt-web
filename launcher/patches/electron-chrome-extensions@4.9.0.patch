@@ -127,7 +127,7 @@ index 67d3be4..b4595a5 100644
    };
  
 diff --git a/dist/cjs/index.js b/dist/cjs/index.js
-index b4242b0..28fba69 100644
+index b4242b0..b80098a 100644
 --- a/dist/cjs/index.js
 +++ b/dist/cjs/index.js
 @@ -605,7 +605,7 @@ var BrowserActionAPI = class {
@@ -471,9 +471,15 @@ index b4242b0..28fba69 100644
        const ses = sessionPartition === DEFAULT_SESSION ? getSessionFromEvent(event) : resolvePartition(sessionPartition);
        const observer = this.sessionMap.get(ses);
        return observer?.onExtensionMessage(event, void 0, handlerName, ...args);
-@@ -2360,16 +2481,30 @@ var ExtensionRouter = class {
+@@ -2356,20 +2477,36 @@ var ExtensionRouter = class {
+      */
+     this.extensionHosts = /* @__PURE__ */ new Set();
+     this.extensionWorkers = /* @__PURE__ */ new Set();
++    this.extensionEpochs = /* @__PURE__ */ new Map();
+     this.delegate.addObserver(this);
      const sessionExtensions = session2.extensions || session2;
      sessionExtensions.on("extension-unloaded", (event, extension) => {
++      this.extensionEpochs.set(extension.id, (this.extensionEpochs.get(extension.id) || 0) + 1);
        this.filterListeners((listener) => listener.extensionId !== extension.id);
 +      const scope = `chrome-extension://${extension.id}/`;
 +      for (const worker of this.extensionWorkers) {
@@ -503,7 +509,7 @@ index b4242b0..28fba69 100644
          if (runningStatus !== "starting") return;
          const serviceWorker = session2.serviceWorkers.getWorkerFromVersionID(versionId);
          if (!serviceWorker) return;
-@@ -2378,7 +2513,7 @@ var ExtensionRouter = class {
+@@ -2378,7 +2515,7 @@ var ExtensionRouter = class {
          if (this.extensionHosts.has(serviceWorker)) {
            d8("%s running status changed to %s", scope, runningStatus);
          } else {
@@ -512,7 +518,7 @@ index b4242b0..28fba69 100644
            this.extensionWorkers.add(serviceWorker);
          }
        }
-@@ -2400,7 +2535,7 @@ var ExtensionRouter = class {
+@@ -2400,7 +2537,7 @@ var ExtensionRouter = class {
    }
    observeListenerHost(host) {
      const hostId = getHostId(host);
@@ -521,7 +527,7 @@ index b4242b0..28fba69 100644
      host.once("destroyed", () => {
        d8(`extension host destroyed [id:${hostId}]`);
        this.filterListeners((listener) => listener.type !== "frame" || listener.host !== host);
-@@ -2473,7 +2608,7 @@ var ExtensionRouter = class {
+@@ -2473,7 +2610,7 @@ var ExtensionRouter = class {
      }
      const extEvent = event.type === "frame" ? { type: event.type, sender: event.sender, extension } : { type: event.type, sender: event.serviceWorker, extension };
      const result = await handler.callback(extEvent, ...args);
@@ -530,3 +536,16 @@ index b4242b0..28fba69 100644
      return result;
    }
    handle(name, callback, opts) {
+@@ -2509,7 +2646,12 @@ var ExtensionRouter = class {
+       }
+       if (type === "service-worker") {
+         const scope = `chrome-extension://${extensionId}/`;
++        const sessionExtensions = this.session.extensions || this.session;
++        if (!sessionExtensions.getExtension(extensionId)) continue;
++        const epoch = this.extensionEpochs.get(extensionId) || 0;
+         this.session.serviceWorkers.startWorkerForScope(scope).then((serviceWorker) => {
++          if ((this.extensionEpochs.get(extensionId) || 0) !== epoch
++            || !sessionExtensions.getExtension(extensionId) || serviceWorker.isDestroyed?.()) return;
+           serviceWorker.send(ipcName, ...args);
+         }).catch((error) => {
+           d8("failed to send %s to %s", eventName, extensionId);

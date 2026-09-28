@@ -46,3 +46,31 @@ test("a destroyed background host does not remain pinned by the router", () => {
   host.emit("destroyed");
   assert.equal(router.extensionHosts.size, 0);
 });
+
+test("an unloaded extension cannot deliver an event through a late worker start", async () => {
+  const { router, session } = routerFixture();
+  const id = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+  let loaded = true;
+  session.extensions.getExtension = candidate => loaded && candidate === id ? { id } : undefined;
+  const starts = [];
+  session.serviceWorkers.startWorkerForScope = scope => new Promise(resolve => starts.push({ scope, resolve }));
+  router.listeners.set("tabs.onUpdated", [{ type: "service-worker", extensionId: id }]);
+  const delivered = [];
+  const worker = { isDestroyed: () => false, send: (...args) => delivered.push(args) };
+  router.sendEvent(id, "tabs.onUpdated", 1);
+  assert.equal(starts.length, 1);
+  loaded = false;
+  session.extensions.emit("extension-unloaded", {}, { id });
+  loaded = true; // The same provider can resume before the old start promise settles.
+  starts[0].resolve(worker);
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(delivered.length, 0);
+
+  router.listeners.set("tabs.onUpdated", [{ type: "service-worker", extensionId: id }]);
+  router.sendEvent(id, "tabs.onUpdated", 2);
+  assert.equal(starts.length, 2);
+  starts[1].resolve(worker);
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(delivered.length, 1);
+  assert.deepEqual(Array.from(delivered[0]), ["crx-tabs.onUpdated", 2]);
+});

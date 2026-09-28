@@ -171,8 +171,17 @@ mv -f "$WRAPPER_NEXT" "$WRAPPER"
 
 APPLICATIONS_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/applications"
 ICON_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/icons/hicolor/512x512/apps"
+ICON_FILE="${XDG_DATA_HOME:-$HOME/.local/share}/icons/codex-web-gpt-launcher.png"
+case "$ICON_FILE" in
+  /*) ;;
+  *) echo "The desktop icon destination must be absolute" >&2; exit 1 ;;
+esac
 mkdir -p "$APPLICATIONS_DIR" "$ICON_DIR"
 install -m 0644 "$ICON_SOURCE" "$ICON_DIR/codex-web-gpt.png"
+ICON_NEXT="$ICON_FILE.next.$$"
+trap 'rm -rf "$TEMP_DIR"; rm -f "$TARGET_NEXT" "$WRAPPER_NEXT" "$RUNNER_NEXT" "$ICON_NEXT"' EXIT HUP INT TERM
+install -m 0644 "$ICON_SOURCE" "$ICON_NEXT"
+mv -f "$ICON_NEXT" "$ICON_FILE"
 DESKTOP_WRAPPER="$(printf '%s' "$WRAPPER" | sed \
   -e 's/\\/\\\\/g' \
   -e 's/"/\\"/g' \
@@ -186,7 +195,7 @@ Version=1.0
 Name=Codex Web GPT
 Comment=ChatGPT Web models inside the native Codex harness
 Exec="$DESKTOP_WRAPPER"
-Icon=codex-web-gpt
+Icon=$ICON_FILE
 Terminal=false
 Categories=Development;
 StartupWMClass=codex-web-gpt

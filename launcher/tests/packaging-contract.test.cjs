@@ -66,6 +66,9 @@ test("release installers resolve checksummed native launcher assets", () => {
   assert.match(shellInstaller, /--appimage-extract/);
   assert.match(shellInstaller, /squashfs-root\/codex-web-gpt\.png/);
   assert.doesNotMatch(shellInstaller, /-name '\*\.png'/);
+  assert.match(shellInstaller, /ICON_FILE="\$\{XDG_DATA_HOME:-\$HOME\/\.local\/share\}\/icons\/codex-web-gpt-launcher\.png"/);
+  assert.match(shellInstaller, /install -m 0644 "\$ICON_SOURCE" "\$ICON_NEXT"/);
+  assert.match(shellInstaller, /Icon=\$ICON_FILE/);
   assert.match(packager, /-linux-x86_64\(\?=\\\.\).*?-linux-x64/);
   assert.match(packager, /const executable = "node"/);
   assert.doesNotMatch(packager, /process\.execPath/);

@@ -1451,6 +1451,55 @@ describe("ChatGPT outer-native harness v4", () => {
     sessions.clear();
   });
 
+  test("a failed physical release does not poison the next turn's owner", async () => {
+    const sessions = new ChatGptTurnSessions();
+    let rejectRelease!: (error: Error) => void;
+    const release = new Promise<void>((_, reject) => { rejectRelease = reject; });
+    sessions.getOrCreate("failed-release", () => ({
+      mode: "read-only",
+      browser: Promise.resolve("done"),
+      physicalSettlement: release,
+      trace: new ChatGptTraceFeed(),
+      text: new ChatGptTextFeed(),
+      cancel: () => {},
+    }), "failed-trace", "shared-owner");
+    const retirement = sessions.retireAndWait("failed-release");
+    let replacementStarts = 0;
+    const waiting = sessions.getOrCreateAfterOwnerRetirement("replacement", "shared-owner", () => {
+      replacementStarts += 1;
+      return {
+        mode: "read-only" as const,
+        browser: Promise.resolve("replacement"),
+        physicalSettlement: Promise.resolve(),
+        trace: new ChatGptTraceFeed(),
+        text: new ChatGptTextFeed(),
+        cancel: () => {},
+      };
+    });
+    const retirementOutcome = retirement.then(() => undefined, error => error);
+    const waitingOutcome = waiting.then(() => undefined, error => error);
+    const failure = new Error("launcher release failed");
+    rejectRelease(failure);
+    expect(await retirementOutcome).toBe(failure);
+    expect(await waitingOutcome).toBe(failure);
+    expect(replacementStarts).toBe(0);
+
+    const replacement = await sessions.getOrCreateAfterOwnerRetirement("replacement", "shared-owner", () => {
+      replacementStarts += 1;
+      return {
+        mode: "read-only" as const,
+        browser: Promise.resolve("replacement"),
+        physicalSettlement: Promise.resolve(),
+        trace: new ChatGptTraceFeed(),
+        text: new ChatGptTextFeed(),
+        cancel: () => {},
+      };
+    });
+    expect(replacement.traceId).toBeUndefined();
+    expect(replacementStarts).toBe(1);
+    sessions.clear();
+  });
+
   test("keeps inline images out of the context JSON and prepares native browser attachments", () => {
     const imageUrl = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAYAAABytg0kAAAAE0lEQVR4nGP4z8DwHwwZGP6DAQBJyAn3FGMynQAAAABJRU5ErkJggg==";
     const request = parsed();

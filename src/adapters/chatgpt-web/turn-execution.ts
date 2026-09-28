@@ -327,6 +327,9 @@ export class ChatGptTurnSession {
         throw error;
       },
     );
+    // Physical release may fail before a native observer reaches its cleanup branch. Keep the
+    // rejecting promise available to those observers without letting it crash the daemon first.
+    void this.physicalSettlement.catch(() => {});
     this.browserOutcome = runtime.browser
       .then(answer => ({ type: "final", answer }) as ChatGptBrowserOutcome)
       .catch(error => ({ type: "error", error: error instanceof Error ? error : new Error(String(error)) }) as ChatGptBrowserOutcome)
@@ -893,20 +896,22 @@ export class ChatGptTurnSessions {
     session.cancel(reason);
     const retirement = session.physicalSettlement;
     this.retirements.set(key, retirement);
-    void retirement.then(() => {
+    const forgetRetirement = () => {
       if (this.retirements.get(key) === retirement) this.retirements.delete(key);
-    });
+    };
+    void retirement.then(forgetRetirement, forgetRetirement);
     if (session.ownerKey) {
       const previous = this.ownerRetirements.get(session.ownerKey);
       const ownerRetirement = previous
         ? Promise.all([previous, retirement]).then(() => undefined)
         : retirement;
       this.ownerRetirements.set(session.ownerKey, ownerRetirement);
-      void ownerRetirement.then(() => {
+      const forgetOwnerRetirement = () => {
         if (this.ownerRetirements.get(session.ownerKey!) === ownerRetirement) {
           this.ownerRetirements.delete(session.ownerKey!);
         }
-      });
+      };
+      void ownerRetirement.then(forgetOwnerRetirement, forgetOwnerRetirement);
     }
     if (conversationKey) {
       const previous = this.conversationRetirements.get(conversationKey);

@@ -70,6 +70,7 @@ import {
 import { loginVerificationMarkerPath } from "../../browser-login";
 import {
   connectLauncherBrowserHost,
+  LAUNCHER_BROWSER_IDLE_URL,
   LauncherBrowserTurnCancelledError,
   LauncherRetainedConversationUnavailableError,
   LAUNCHER_TURN_HEARTBEAT_INTERVAL_MS,
@@ -1963,6 +1964,27 @@ export function browserDiagnosticCheckpoint(value: string): string {
   return safe || "checkpoint";
 }
 
+/** Recover only a pre-Send navigation displaced while the exact launcher tab is still idle. */
+export async function navigateTemporaryChatFromIdle(page: Page): Promise<boolean> {
+  if (page.url() === CHATGPT_TEMPORARY_CHAT_URL) return false;
+  const navigate = () => page.goto(CHATGPT_TEMPORARY_CHAT_URL, { waitUntil: "domcontentloaded" as const, timeout: 60_000 });
+  try { await navigate(); return false; }
+  catch (error) {
+    if (!(error instanceof Error) || !/net::ERR_ABORTED\b/.test(error.message) || page.isClosed()) throw error;
+    const idle = (url: string) => url === "about:blank" || url === LAUNCHER_BROWSER_IDLE_URL;
+    if (page.url() !== CHATGPT_TEMPORARY_CHAT_URL && !idle(page.url())) throw error;
+    // The first navigation may still complete after Playwright reports an abort.
+    // Observing its exact destination avoids a needless second navigation.
+    try {
+      await page.waitForURL(CHATGPT_TEMPORARY_CHAT_URL, { waitUntil: "domcontentloaded", timeout: 5_000 });
+      return true;
+    } catch { /* A missing exact destination permits one retry only from the owned idle document. */ }
+    if (page.isClosed() || !idle(page.url())) throw error;
+    await navigate();
+    return true;
+  }
+}
+
 class ChatGptBrowserDiagnostics {
   constructor(_traceId: string, _root: string, _appName: string) {}
   async capture(page: Page, checkpoint: string, error?: unknown, afterSend = false): Promise<void> {
@@ -2595,10 +2617,12 @@ export class ChatGptBrowserWorker {
     // document and made the first verification race a second SPA bootstrap. A leased turn starts on
     // about:blank and therefore still performs exactly one navigation through this same method.
     if (page.url() !== CHATGPT_TEMPORARY_CHAT_URL) {
-      await page.goto(CHATGPT_TEMPORARY_CHAT_URL, {
-        waitUntil: "domcontentloaded",
-        timeout: 60_000,
-      });
+      if (await navigateTemporaryChatFromIdle(page)) runtimeDiagnostics()?.event(
+        "browser.temporary_chat_navigation_recovered",
+        "The owned idle tab recovered a displaced Temporary Chat navigation before Send",
+        { destination: "temporary-chat", retryLimit: 1 },
+        "warning",
+      );
       await captureDiagnostic?.("temporary-chat-navigation-complete");
     }
     let composer: Locator;

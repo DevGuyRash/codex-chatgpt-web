@@ -823,6 +823,19 @@ class RuntimeSupervisor {
     return this.tunnelHealthBaseUrl;
   }
 
+  async prepareTunnelMonitorHealth(config) {
+    if (this.tunnelHealthBaseUrl) return;
+    try { await this.discoverTunnelHealthBaseUrl(config); }
+    catch (error) {
+      // A verified managed tunnel may still run when its optional local locator is
+      // unavailable. The monitor keeps its bounded native inventory fallback.
+      this.logger?.warn?.("runtime.tunnel_monitor_local_discovery_unavailable", {
+        code: typeof error?.code === "string" ? error.code : "tunnel_health_discovery_failed",
+        errorType: error?.name || "Error",
+      });
+    }
+  }
+
   async waitForTunnelMcpTransport(config, timeoutMs = 10_000) {
     if (!this.tunnelHealthBaseUrl) await this.discoverTunnelHealthBaseUrl(config);
     const deadline = Date.now() + timeoutMs;
@@ -981,6 +994,7 @@ class RuntimeSupervisor {
           signalCode: null,
           managed: true,
         };
+        await this.prepareTunnelMonitorHealth(config);
         this.startTunnelMonitor(config);
         this.logger.info("runtime.tunnel_adopted", { pid: existing.pid });
         return;
@@ -1004,6 +1018,7 @@ class RuntimeSupervisor {
       await this.waitForTunnel(config, TUNNEL_START_TIMEOUT_MS, operationName);
       if (!this.tunnel) throw new Error("Tunnel runtime became ready without a managed process identity");
       if (forceRestart) await this.waitForTunnelMcpTransport(config);
+      await this.prepareTunnelMonitorHealth(config);
       this.startTunnelMonitor(config);
     } catch (error) {
       let cleanupError;

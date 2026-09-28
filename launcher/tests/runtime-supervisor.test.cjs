@@ -772,6 +772,7 @@ test("launcher adopts a healthy native managed tunnel without spawning a foregro
   });
   let connects = 0;
   let monitors = 0;
+  let discoveries = 0;
   supervisor.readTunnelHealth = async () => ({
     ready: true,
     pid: 123_456_778,
@@ -781,6 +782,11 @@ test("launcher adopts a healthy native managed tunnel without spawning a foregro
   supervisor.runTunnelConnectCommand = async () => {
     connects += 1;
     return { code: 0, output: "{}" };
+  };
+  supervisor.discoverTunnelHealthBaseUrl = async () => {
+    discoveries += 1;
+    supervisor.tunnelHealthBaseUrl = "http://127.0.0.1:43127";
+    return supervisor.tunnelHealthBaseUrl;
   };
   supervisor.startTunnelMonitor = () => { monitors += 1; };
   try {
@@ -794,12 +800,30 @@ test("launcher adopts a healthy native managed tunnel without spawning a foregro
       },
     });
     assert.equal(connects, 0);
+    assert.equal(discoveries, 1);
+    assert.equal(supervisor.tunnelHealthBaseUrl, "http://127.0.0.1:43127");
     assert.equal(monitors, 1);
     assert.equal(supervisor.tunnel?.pid, 123_456_778);
     assert.equal(supervisor.tunnel?.managed, true);
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }
+});
+
+test("an adopted tunnel keeps monitored fallback when its local health locator is unavailable", async () => {
+  const warnings = [];
+  const supervisor = new RuntimeSupervisor({ coreHome: os.tmpdir(), logger: { info() {}, warn(name, details) { warnings.push({ name, details }); } } });
+  supervisor.assertTunnelClientReady = () => {};
+  supervisor.waitForKnownTunnelStatus = async () => ({ ready: true, pid: 123_456_778, statusKnown: true });
+  supervisor.discoverTunnelHealthBaseUrl = async () => { throw Object.assign(new Error("synthetic locator failure"), { code: "tunnel_health_endpoint_invalid" }); };
+  let monitors = 0;
+  supervisor.startTunnelMonitor = () => { monitors += 1; };
+  await supervisor.startTunnel({ mode: "full", tunnel: {} });
+  assert.equal(monitors, 1);
+  assert.equal(supervisor.tunnel?.pid, 123_456_778);
+  assert.deepEqual(warnings, [{ name: "runtime.tunnel_monitor_local_discovery_unavailable", details: {
+    code: "tunnel_health_endpoint_invalid", errorType: "Error",
+  } }]);
 });
 
 test("tunnel recovery replaces a false-green managed runtime and proves the fresh MCP transport", async () => {

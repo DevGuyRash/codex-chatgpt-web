@@ -8,6 +8,8 @@ The Linux hidden-workspace launcher requires `CODEX_WEB_GPT_ELECTRON_EXECUTABLE`
 
 The `formats` scenario adds the full PDF, DOCX, XLSX and PNG fixture set at every level, alongside the shared text, Markdown, JSON and CSV inputs. The native exec driver performs one task; the independent oracle checks extracted document references, the visual two-digit code, transformed JSON and CSV, and unchanged source files. Format coverage has a distinct workload identity and cannot accept an ordinary level-one workload without its attachments. These are native file/tool interpretation checks; they do not establish browser-upload compatibility for every document type. Level-five execution still requires the sustained coordinator and progress evidence.
 
+Campaign implementation identity includes tracked source, native Electron patches, launcher extension-adapter patches and the selected native Codex, Bun and deployed browser-helper artifacts. A changed identity requires a reviewed queue reconciliation before live admission. Reconciliation preserves blocked and failed attempts; it does not authorize replay of uncertain submissions or side effects.
+
 ## Native interfaces
 
 `exec.ts` invokes `codex exec --json` with an explicit route, effort, provider and workspace sandbox. Resume uses the exact captured task UUID. Prompt capture and process ownership are established before stdin submission. Completion requires a terminal native event as well as a successful process exit; cancellation, missing terminal evidence and deadline expiry cannot trigger an automatic replay.

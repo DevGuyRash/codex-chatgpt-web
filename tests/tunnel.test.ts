@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { TUNNEL_VERSION, parseTunnelStatus, tunnelClientInstallAction, tunnelCommandOutput, tunnelConnectLaunchError, tunnelConnectFailureCategory } from "../src/tunnel";
+import { TUNNEL_VERSION, parseTunnelStatus, tunnelClientInstallAction, tunnelCommandOutput, tunnelConnectLaunchError, tunnelConnectLaunchPending, tunnelConnectFailureCategory } from "../src/tunnel";
 
 test("pins the fixed tunnel-client and migrates only the previously shipped version", () => {
   expect(TUNNEL_VERSION).toBe("0.0.12");
@@ -87,6 +87,14 @@ describe("tunnel status boundary", () => {
     }))).toContain("running=true; healthy=false; ready=false");
 
     expect(tunnelConnectLaunchError("not json")).toBe("tunnel-client returned non-JSON connect output");
+  });
+
+  test("defers only an explicitly owned in-progress launch to the bounded readiness probe", () => {
+    expect(tunnelConnectLaunchPending(JSON.stringify({ running: true, healthy: false, ready: false }))).toBe(true);
+    expect(tunnelConnectLaunchPending(JSON.stringify({ running: false, healthy: false, ready: false }))).toBe(false);
+    expect(tunnelConnectLaunchPending(JSON.stringify({ running: true, healthy: false, ready: false, remote_error: "rejected" }))).toBe(false);
+    expect(tunnelConnectLaunchPending(JSON.stringify({ running: true, healthy: false, ready: false, launch_diagnostics: { exit_code: 2 } }))).toBe(false);
+    expect(tunnelConnectLaunchPending("not-json")).toBe(false);
   });
 
   test("includes the managed runtime log tail in stopped status diagnostics", () => {

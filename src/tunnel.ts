@@ -258,7 +258,13 @@ export function connectTunnel(config: AppConfig): void {
   const launchError = structuredOutput
     ? tunnelConnectLaunchError(structuredOutput)
     : undefined;
+  // Some tunnel-client builds return a nonzero command status while their managed
+  // process is still starting. Callers always perform the bounded health/readiness
+  // check next; only defer this CLI result when it reports an owned process and no
+  // explicit launch failure. The later check must prove readiness before use.
+  const provisional = result.status !== 0 && tunnelConnectLaunchPending(structuredOutput);
   if (result.status !== 0) {
+    if (provisional) return;
     throw new DiagnosticError({ code: "tunnel_connect_failed", message: "The configured tunnel runtime could not start",
       origin: "tunnel-client", stage: "tunnel.connect", retryable: false,
       ...(Number.isInteger(result.status) ? { exitCode: result.status } : {}),
@@ -271,6 +277,16 @@ export function connectTunnel(config: AppConfig): void {
     findings: [{ message: tunnelConnectFailureCategory(result.stdout, result.stderr) }],
     evidenceMissing: "The tunnel client's raw output is excluded from diagnostics; inspect its local runtime status before another attempt.",
   });
+}
+
+export function tunnelConnectLaunchPending(output: string): boolean {
+  let parsed: Record<string, unknown>;
+  try { parsed = JSON.parse(output) as Record<string, unknown>; }
+  catch { return false; }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return false;
+  return parsed.running === true && parsed.healthy !== true && parsed.ready !== true
+    && !parsed.error && !parsed.remote_error && !parsed.launch_diagnostics
+    && !runtimeLogTail(parsed);
 }
 
 /** Preserve only bounded structural connect evidence; remote errors and log tails are untrusted. */

@@ -219,6 +219,12 @@ class BrowserControlServer {
       if (!Number.isInteger(body.helperPid) || body.helperPid < 1) {
         throw new Error("browser helper pid is invalid");
       }
+      // Queued admission may start after this HTTP handler returns. Re-enter the authenticated
+      // parent's exact turn context so tab creation, retention and reuse join its native timeline.
+      const ownedDiagnosticContext = diagnosticParent ? { ...diagnosticParent, taskId: body.traceId } : undefined;
+      const withOwnedTurnContext = action => ownedDiagnosticContext && this.logger.diagnostics?.withContext
+        ? this.logger.diagnostics.withContext(ownedDiagnosticContext, action)
+        : action();
       if (body.conversationKey !== undefined && !/^[a-f0-9]{64}$/.test(body.conversationKey)) {
         throw new Error("conversationKey is invalid");
       }
@@ -271,14 +277,14 @@ class BrowserControlServer {
             writeJson(response, 409, { error: "Manual turn is waiting for browser capacity; no prompt was submitted", code: "browser_admission_busy" });
             return;
           }
-          const lease = host.beginManualTurn(
+          const lease = await withOwnedTurnContext(() => host.beginManualTurn(
             body.traceId,
             body.helperPid,
             body.prompt,
             body.conversationKey,
             body.resumePrompt,
             body.compaction === true,
-          );
+          ));
           this.logger.info("browser.manual_control_started", {
             traceId: body.traceId,
             reused: lease.reused,
@@ -347,12 +353,12 @@ class BrowserControlServer {
         if (!['completed', 'failed', 'aborted'].includes(body.status)) {
           throw new Error("manual turn status is invalid");
         }
-        const release = host.endManualTurn(
+        const release = await withOwnedTurnContext(() => host.endManualTurn(
           body.traceId,
           body.helperPid,
           body.status,
           body.retain === true,
-        );
+        ));
         writeJson(response, 200, { ok: true, ...release });
         return;
       }
@@ -360,14 +366,14 @@ class BrowserControlServer {
         if (host.browserInteractionMode() === "manual") {
           throw new Error("Automatic browser interaction is disabled");
         }
-        const start = () => host.beginTurn(
+        const start = () => withOwnedTurnContext(() => host.beginTurn(
           body.traceId,
           preferences.showBrowserDuringTurns === true,
           body.helperPid,
           body.conversationKey,
           body.connectorIdentity,
           body.requireRetainedConversation === true,
-        );
+        ));
         let admission = this.admissions.get(host);
         if (!admission) {
           const runningTabs = () => [...(host.turnTabs?.values() ?? [])].filter(tab => tab.status === "running");
@@ -419,7 +425,7 @@ class BrowserControlServer {
           writeJson(response, 200, { ok: true, cancelledByUser: true });
           return;
         }
-        const release = await host.endTurn(
+        const release = await withOwnedTurnContext(() => host.endTurn(
           body.traceId,
           body.helperPid,
           body.status,
@@ -427,7 +433,7 @@ class BrowserControlServer {
           body.message,
           body.retain === true,
           body.connectorBound === true,
-        );
+        ));
         if (!admission?.reportOwned(body.traceId, body.helperPid, "browser.turn_ended", { traceId: body.traceId, status: body.status })) {
           this.logger.info("browser.turn_ended", { traceId: body.traceId, status: body.status });
         }

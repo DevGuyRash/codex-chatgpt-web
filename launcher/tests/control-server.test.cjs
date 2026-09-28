@@ -177,6 +177,52 @@ test("browser control server authenticates and owns turn visibility", async () =
   }
 });
 
+test("launcher tab lifecycle logs inherit the exact authenticated browser-turn context", async () => {
+  const observed = [];
+  let currentContext, interactionMode = "automatic";
+  const logger = {
+    info(name) { if (name.startsWith("browser.tab_")) observed.push({ name, context: currentContext }); },
+    warn() {},
+    diagnostics: {
+      async withContext(context, action) {
+        const previous = currentContext;
+        currentContext = context;
+        try { return await action(); }
+        finally { currentContext = previous; }
+      },
+      event() {},
+    },
+  };
+  const host = {
+    browserInteractionMode: () => interactionMode,
+    turnTabs: new Map(),
+    beginTurn: async () => { logger.info("browser.tab_created"); return { surfaceId: "owned-surface", reused: false, connectorBound: false }; },
+    endTurn: async () => { logger.info("browser.tab_retained"); return { cancelledByUser: false }; },
+    beginManualTurn: () => { logger.info("browser.tab_reused"); return { surfaceId: "manual-surface", reused: true }; },
+    endManualTurn: () => { logger.info("browser.tab_released"); return { cancelledByUser: false }; },
+  };
+  const server = await new BrowserControlServer({ logger, getBrowserHost: () => host, getPreferences: () => ({}) }).start();
+  const { endpoint, token } = server.descriptor();
+  const post = (path, traceId, extra = {}) => fetch(`${endpoint}${path}`, {
+    method: "POST",
+    headers: { authorization: `Bearer ${token}`, "content-type": "application/json", traceparent: "00-11111111111111111111111111111111-2222222222222222-01" },
+    body: JSON.stringify({ traceId, helperPid: process.pid, ...extra }),
+  });
+  try {
+    assert.equal((await post("/v1/turn/start", "automatic-one")).status, 200);
+    assert.equal((await post("/v1/turn/end", "automatic-one", { status: "completed", retain: true })).status, 200);
+    interactionMode = "manual";
+    assert.equal((await post("/v1/manual/start", "manual-one", { prompt: "Synthetic manual turn" })).status, 200);
+    assert.equal((await post("/v1/manual/end", "manual-one", { status: "completed" })).status, 200);
+    assert.deepEqual(observed.map(({ name, context }) => [name, context?.traceId, context?.taskId]), [
+      ["browser.tab_created", "11111111111111111111111111111111", "automatic-one"],
+      ["browser.tab_retained", "11111111111111111111111111111111", "automatic-one"],
+      ["browser.tab_reused", "11111111111111111111111111111111", "manual-one"],
+      ["browser.tab_released", "11111111111111111111111111111111", "manual-one"],
+    ]);
+  } finally { await server.close(); }
+});
+
 test("browser control server withholds a new turn lease until its browser surface is ready", async () => {
   let releaseSurface;
   let reportBegin;

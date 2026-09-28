@@ -205,3 +205,54 @@ test("launcher admission events preserve HTTP correlation through queueing, defe
     rmSync(root, { recursive: true, force: true });
   }
 }, 15000);
+
+test("retained launcher tab creation and reuse stay correlated across native turns in production query and export", async () => {
+  const root = mkdtempSync(join(tmpdir(), "diagnostics-retained-tab-"));
+  const { BrowserControlServer } = createRequire(import.meta.url)(resolve("launcher/electron/control-server.cjs"));
+  const logger = host.createLogger({ filePath: join(root, "launcher.jsonl"), invocation: { executable: process.execPath, args: [resolve("src/cli.ts"), "--home", root, "diagnostics", "worker"] }, environment: "test" });
+  const tabId = "owned-retained-tab", tabs = new Map<string, { traceId: string; helperPid: number; status: string }>();
+  let retained = false;
+  const browser = {
+    turnTabs: tabs,
+    browserInteractionMode: () => "automatic",
+    beginTurn: async (traceId: string, _visible: boolean, helperPid: number) => {
+      tabs.set(tabId, { traceId, helperPid, status: "running" });
+      logger.info(retained ? "browser.tab_reused" : "browser.tab_created", { tabId, traceId });
+      return { surfaceId: "retained-surface", tabId, reused: retained, connectorBound: true };
+    },
+    endTurn: async (traceId: string, _helperPid: number, _status: string, _visible: boolean, _message: string, keep: boolean) => {
+      if (keep) { retained = true; tabs.get(tabId)!.status = "ready"; logger.info("browser.tab_retained", { tabId, traceId }); }
+      else { tabs.delete(tabId); logger.info("browser.tab_released", { tabId, traceId }); }
+      return { cancelledByUser: false };
+    },
+  };
+  const server = await new BrowserControlServer({ logger, getBrowserHost: () => browser, getPreferences: () => ({}) }).start();
+  const { endpoint, token } = server.descriptor();
+  const owners = [{ turn: "retained-first", trace: "a".repeat(32), span: "1".repeat(16) }, { turn: "retained-second", trace: "b".repeat(32), span: "2".repeat(16) }];
+  const post = (owner: typeof owners[number], phase: "start" | "end", keep = false) => fetch(`${endpoint}/v1/turn/${phase}`, {
+    method: "POST",
+    headers: { authorization: `Bearer ${token}`, "content-type": "application/json", traceparent: `00-${owner.trace}-${owner.span}-01` },
+    body: JSON.stringify({ traceId: owner.turn, helperPid: process.pid, ...(phase === "end" ? { status: "completed", retain: keep, connectorBound: true } : {}) }),
+  });
+  try {
+    await logger.ready;
+    for (const [index, owner] of owners.entries()) {
+      let start = await post(owner, "start");
+      for (let count = 0; start.status === 202 && count < 50; count++) { await Bun.sleep(10); start = await post(owner, "start"); }
+      expect(start.status).toBe(200);
+      expect((await start.json()).tabId).toBe(tabId);
+      expect((await post(owner, "end", index === 0)).status).toBe(200);
+    }
+    await logger.client!.flush();
+    for (const [index, owner] of owners.entries()) {
+      const query = await logger.client!.query({ traceId: owner.trace, taskId: owner.turn, ascending: true, limit: 100 });
+      expect(query.incomplete).toBeFalse(); expect(query.notices).toEqual([]);
+      const expected = index === 0 ? ["browser.tab_created", "browser.tab_retained"] : ["browser.tab_reused", "browser.tab_released"];
+      for (const name of expected) expect(query.events.find(event => event.name === name)).toMatchObject({ traceId: owner.trace, spanId: owner.span, taskId: owner.turn, attributes: { tabId, traceId: owner.turn } });
+    }
+    const destination = join(root, "retained-tabs.json");
+    await logger.client!.export({ format: "json", query: { traceIds: owners.map(owner => owner.trace) } }, destination);
+    const report = readFileSync(destination, "utf8");
+    for (const name of ["browser.tab_created", "browser.tab_retained", "browser.tab_reused", "browser.tab_released"]) expect(report).toContain(name);
+  } finally { await server.close(); await logger.close(); rmSync(root, { recursive: true, force: true }); }
+}, 15000);

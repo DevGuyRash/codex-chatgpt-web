@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import { createHash } from "node:crypto";
-import { GOLDEN_UNICODE_WITNESS } from "../scripts/golden/workloads";
+import { GOLDEN_UNICODE_WITNESS, GOLDEN_RECOVERABLE_FAILURE_FILE } from "../scripts/golden/workloads";
 import { buildGoldenMatrix } from "../scripts/golden/catalog";
 import { canExecuteLiveCell, liveBatchOutcomes, liveCampaignExecutor } from "../scripts/golden/live-campaign";
 import { nativePlanHashes } from "../scripts/golden/app-server";
@@ -222,6 +222,25 @@ test("native image campaign coverage requires the attached fixture and interpret
   expect(() => liveBatchOutcomes([cell], batch)).toThrow("Native image coverage lacks its exact attached fixture");
   item.result!.oracle.artifacts.push({ path: "output/attachments.json", bytes: 100, sha256: "d".repeat(64) });
   expect(liveBatchOutcomes([cell], batch).get(cell.id)?.status).toBe("passed");
+});
+
+test("recoverable tool failure requires one observed failed native command and its preserved fixture", () => {
+  const cell = { ...cells[0]!, variant: { id: "tool-failure", driver: "exec" as const } };
+  expect(canExecuteLiveCell(cell)).toBe(true);
+  const batch = completedBatch();
+  batch.cells = [batch.cells[0]!];
+  const item = batch.cells[0]!;
+  item.variant = "tool-failure";
+  item.result!.terminal.variant = "tool-failure";
+  expect(() => liveBatchOutcomes([cell], batch)).toThrow("Recoverable tool failure requires");
+  Object.assign(item.result!.terminal, { failureWitness: { count: 1, expectedExitCode: 17 } });
+  item.result!.oracle.artifacts.push({ path: GOLDEN_RECOVERABLE_FAILURE_FILE, bytes: 64, sha256: "d".repeat(64) });
+  expect(liveBatchOutcomes([cell], batch).get(cell.id)?.status).toBe("passed");
+  Object.assign(item.result!.terminal, { failureWitness: { count: 2, expectedExitCode: 17 } });
+  expect(() => liveBatchOutcomes([cell], batch)).toThrow("Recoverable tool failure requires");
+  item.passed = false;
+  item.error = problemFor(new DiagnosticError({ code: "golden_recoverable_failure_missing", message: "Expected failed command was not uniquely observed", origin: "golden-native" }));
+  expect(liveBatchOutcomes([cell], batch).get(cell.id)?.status).toBe("failed");
 });
 
 test("verified provider admission survives incomplete exec evidence without inferring a limit from native prose", () => {

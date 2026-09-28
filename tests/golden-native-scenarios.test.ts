@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { createHash, randomUUID } from "node:crypto";
 import { ownedNativeActivity, runNativeScenario } from "../scripts/golden/native-scenarios";
-import { GOLDEN_UNICODE_WITNESS, createWorkload, largeHistoryWitness, materializeWorkload } from "../scripts/golden/workloads";
+import { GOLDEN_UNICODE_WITNESS, GOLDEN_RECOVERABLE_FAILURE_FILE, GOLDEN_RECOVERABLE_FAILURE_CONTENT, createWorkload, largeHistoryWitness, materializeWorkload } from "../scripts/golden/workloads";
 import { CHATGPT_WEB_MODEL_ROUTES } from "../src/chatgpt-web-models";
 import { GoldenAppServer, initializeGoldenNativeHome } from "../scripts/golden/app-server";
 import { findNativeExecFailure, runNativeExec } from "../scripts/golden/exec";
@@ -29,6 +29,8 @@ console.log(JSON.stringify({type:"thread.started",thread_id:"11111111-1111-7111-
 console.log(JSON.stringify({type:"turn.started"}));
 console.log(JSON.stringify({type:"turn.completed"}));
 });
+
+
 `, { mode: 0o700 });
   try {
     const result = await runNativeScenario({ executable: peer, cwd: root, env: {}, route: CHATGPT_WEB_MODEL_ROUTES[0]!, workload: createWorkload({ level: 1, seed: "unicode-lifecycle", batch: 0 }), variant: "unicode", signal: new AbortController().signal, timeoutMs: 2000,
@@ -37,6 +39,33 @@ console.log(JSON.stringify({type:"turn.completed"}));
     const prompt = readFileSync(promptPath, "utf8");
     expect(prompt).toContain("output/unicode.txt");
     expect(prompt).toContain(GOLDEN_UNICODE_WITNESS);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("recoverable tool failure observes one actual nonzero native command before completion", async () => {
+  const root = mkdtempSync(join(tmpdir(), "golden-tool-failure-")), peer = join(root, "peer");
+  mkdirSync(join(root, ".git"));
+  const workload = createWorkload({ level: 1, seed: "recoverable-tool-failure", batch: 0 });
+  workload.files[GOLDEN_RECOVERABLE_FAILURE_FILE] = GOLDEN_RECOVERABLE_FAILURE_CONTENT;
+  materializeWorkload(root, workload);
+  writeFileSync(peer, `#!${process.execPath}
+import {spawnSync} from "node:child_process";
+const send=value=>console.log(JSON.stringify(value));
+let input="";process.stdin.on("data",chunk=>input+=chunk);process.stdin.on("end",()=>{
+ const command="bash input/expected-failure.sh";
+ const result=spawnSync("bash",["input/expected-failure.sh"],{cwd:process.cwd(),encoding:"utf8"});
+ send({type:"thread.started",thread_id:"11111111-1111-7111-8111-111111111111"});
+ send({type:"turn.started"});
+ send({type:"item.completed",item:{type:"command_execution",id:"expected-failure",command,exit_code:result.status,aggregated_output:result.stderr}});
+ send({type:"turn.completed"});
+});
+`, { mode: 0o700 });
+  try {
+    const result = await runNativeScenario({ executable: peer, cwd: root, env: {}, route: CHATGPT_WEB_MODEL_ROUTES[0]!, workload, variant: "tool-failure", signal: new AbortController().signal, timeoutMs: 2000,
+      onRecord: async () => {}, checkpoint: () => {} });
+    expect(result).toMatchObject({ status: "completed", variant: "tool-failure", toolItems: 1, failureWitness: { count: 1, expectedExitCode: 17 } });
+    await expect(runNativeScenario({ executable: peer, cwd: root, env: {}, route: CHATGPT_WEB_MODEL_ROUTES[0]!, workload: createWorkload({ level: 1, seed: "missing-failure-fixture", batch: 0 }), variant: "tool-failure", signal: new AbortController().signal, timeoutMs: 2000,
+      onRecord: async () => {}, checkpoint: () => {} })).rejects.toThrow("runner-owned input fixture");
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 

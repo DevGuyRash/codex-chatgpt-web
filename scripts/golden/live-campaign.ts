@@ -7,7 +7,7 @@ import type { GoldenAttempt } from "./runner";
 import { goldenScenarioTerminations } from "./observations";
 import { GoldenAdmissionSuspended, nativeAdmissionObservation } from "./admission";
 import { nativePlanHashes, type NativeCompaction } from "./app-server";
-import { GOLDEN_UNICODE_WITNESS } from "./workloads";
+import { GOLDEN_UNICODE_WITNESS, GOLDEN_RECOVERABLE_FAILURE_FILE } from "./workloads";
 import { createHash } from "node:crypto";
 import { DiagnosticError } from "../../src/diagnostics/problems";
 
@@ -59,6 +59,13 @@ function finiteCellOutcome(cell: GoldenCell, result: LiveCellResult, batch: Live
       || !proof.oracle.artifacts.some(artifact => artifact.path === "input/label.png" && artifact.sha256 === attachedSha256)
       || !proof.oracle.artifacts.some(artifact => artifact.path === "output/attachments.json" && artifact.bytes > 0)) {
       throw new Error("Native image coverage lacks its exact attached fixture and independently validated result");
+    }
+  }
+  if (cell.variant.id === "tool-failure") {
+    const failure = "failureWitness" in proof.terminal ? proof.terminal.failureWitness : undefined;
+    if (!failure || failure.count !== 1 || failure.expectedExitCode !== 17
+      || !proof.oracle.artifacts.some(artifact => artifact.path === GOLDEN_RECOVERABLE_FAILURE_FILE && artifact.bytes > 0)) {
+      throw new Error("Recoverable tool failure requires one actual failed native command and its unchanged runner-owned fixture");
     }
   }
   if (cell.variant.id === "large-history") {

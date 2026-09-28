@@ -8,6 +8,9 @@ import { createFormatFixtures } from "./formats";
 
 const sha256 = (value: string | Uint8Array) => createHash("sha256").update(value).digest("hex");
 export const GOLDEN_UNICODE_WITNESS = "東京 → café → Δοκιμή → مرحبا";
+export const GOLDEN_RECOVERABLE_FAILURE_FILE = "input/expected-failure.sh";
+export const GOLDEN_RECOVERABLE_FAILURE_MARKER = "GOLDEN_EXPECTED_RECOVERABLE_FAILURE_V1";
+export const GOLDEN_RECOVERABLE_FAILURE_CONTENT = `#!/bin/sh\nprintf '%s\\n' '${GOLDEN_RECOVERABLE_FAILURE_MARKER}' >&2\nexit 17\n`;
 export function largeHistoryWitness(workload: GoldenWorkload): string {
   // The generated seed is runner-owned and absent from the disposable repository.
   // A public dataset ID must not let the continuation recompute its witness.

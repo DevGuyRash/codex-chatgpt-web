@@ -5,7 +5,7 @@ import { createHash } from "node:crypto";
 import { GoldenAppServer } from "./app-server";
 import { NativeExecFailure, runNativeExec } from "./exec";
 import { runStructuredScenario } from "./structured-scenarios";
-import { GOLDEN_UNICODE_WITNESS, largeHistoryWitness, structuredScenarioPrompts, type GoldenWorkload } from "./workloads";
+import { GOLDEN_UNICODE_WITNESS, GOLDEN_RECOVERABLE_FAILURE_FILE, GOLDEN_RECOVERABLE_FAILURE_CONTENT, GOLDEN_RECOVERABLE_FAILURE_MARKER, largeHistoryWitness, structuredScenarioPrompts, type GoldenWorkload } from "./workloads";
 import { ownedProcessIdentity, type OwnedProcess } from "./workspace";
 import type { ProgressPhase } from "./progress";
 import { runTuiScenario } from "./tui-scenarios";
@@ -28,7 +28,7 @@ export function ownedNativeActivity(frame: { direction: string; message: ObjectV
   return { tool, phase };
 }
 export const finiteNativeScenarios = {
-  fresh: 1, formats: 1, unicode: 1, "tool-image": 1, "large-history": 2, continued: 2, compaction: 2, resumed: 2, "archived-history": 2, "model-switch": 2, "plan-revise-execute": 3, "plan-stream-interrupt": 2, "plan-tui-execute": 2,
+  fresh: 1, formats: 1, unicode: 1, "tool-image": 1, "tool-failure": 1, "large-history": 2, continued: 2, compaction: 2, resumed: 2, "archived-history": 2, "model-switch": 2, "plan-revise-execute": 3, "plan-stream-interrupt": 2, "plan-tui-execute": 2,
   "steer-reasoning": 2, "steer-generation": 2, "steer-tools": 2,
   "stop-reasoning-continue": 2, "stop-generation-continue": 2, "stop-tools-continue": 2,
 } as const;
@@ -47,12 +47,16 @@ export async function runNativeScenario(options: {
   exerciseMultipartTransport?: boolean;
 }) {
   options.signal.throwIfAborted();
-  if (!["fresh", "formats", "unicode", "tool-image", "large-history", "continued", "compaction", "resumed", "archived-history", "model-switch", "plan-revise-execute", "plan-stream-interrupt", "plan-tui-execute"].includes(options.variant) && !/^(?:steer|stop)-(?:reasoning|generation|tools|queue)(?:-image|-continue)?$/.test(options.variant)) throw new Error(`No native scenario implementation for ${options.variant}`);
+  if (!["fresh", "formats", "unicode", "tool-image", "tool-failure", "large-history", "continued", "compaction", "resumed", "archived-history", "model-switch", "plan-revise-execute", "plan-stream-interrupt", "plan-tui-execute"].includes(options.variant) && !/^(?:steer|stop)-(?:reasoning|generation|tools|queue)(?:-image|-continue)?$/.test(options.variant)) throw new Error(`No native scenario implementation for ${options.variant}`);
   if (["formats", "tool-image"].includes(options.variant) && options.workload.formatCoverage !== "all") throw new Error("Format and native image coverage require the full shared fixture set at every workload level");
   if (options.resumeId && options.variant !== "resumed") throw new Error("Resume requires the exact prior native task and its declared scenario");
   if (options.variant === "model-switch" && (!options.modelSwitch || options.modelSwitch.to.slug !== options.route.slug)) throw new Error("Model-switch continuation must target the cell's requested route");
   if (options.variant === "plan-tui-execute") return runTuiScenario(options);
   let native: OwnedProcess | undefined, toolItems = 0;
+  let recoverableFailureCount = 0;
+  if (options.variant === "tool-failure" && options.workload.files[GOLDEN_RECOVERABLE_FAILURE_FILE] !== GOLDEN_RECOVERABLE_FAILURE_CONTENT) {
+    throw new Error("Recoverable failure scenario requires its exact runner-owned input fixture");
+  }
   let attachedImageSha256: string | undefined;
   if (options.variant === "tool-image") {
     const expectedPath = join(options.cwd, "input/label.png");
@@ -67,7 +71,7 @@ export async function runNativeScenario(options: {
     if (!native) throw new Error("Native scenario process ownership is unavailable");
     await options.checkpoint({ native, ...turn });
   };
-  if (options.variant === "fresh" || options.variant === "formats" || options.variant === "unicode" || options.variant === "tool-image" || options.variant === "large-history" || options.variant === "resumed" || options.variant === "archived-history") {
+  if (options.variant === "fresh" || options.variant === "formats" || options.variant === "unicode" || options.variant === "tool-image" || options.variant === "tool-failure" || options.variant === "large-history" || options.variant === "resumed" || options.variant === "archived-history") {
     const execute = async (prompt: string, resumeId?: string, phase: "preparation" | "execution" = "execution") => {
       await options.beforeGeneration?.(options.signal);
       const outcome = await runNativeExec({ ...options, resumeId, artifactRepository: options.cwd, prompt,
@@ -78,6 +82,12 @@ export async function runNativeScenario(options: {
         const item = object(event.item) ? event.item : undefined;
         const tool = event.type === "item.completed" && item && ["command_execution", "file_change", "mcp_tool_call"].includes(String(item.type));
         if (tool) toolItems++;
+        if (options.variant === "tool-failure" && event.type === "item.completed" && item?.type === "command_execution"
+          && item.exit_code === 17 && typeof item.command === "string"
+          && /^bash\s+input\/expected-failure\.sh$/.test(item.command.trim())
+          && typeof item.aggregated_output === "string" && item.aggregated_output.includes(GOLDEN_RECOVERABLE_FAILURE_MARKER)) {
+          recoverableFailureCount++;
+        }
         await options.onRecord("transport", JSON.stringify(event), tool ? "tools" : undefined, receivedAtMs);
         if (event.type === "thread.started" && typeof event.thread_id === "string") await checkpoint({ threadId: event.thread_id });
       },
@@ -134,14 +144,16 @@ export async function runNativeScenario(options: {
     }
     const unicodePrompt = `${options.workload.prompt}\nAlso write output/unicode.txt containing exactly ${GOLDEN_UNICODE_WITNESS} followed by a newline, and include it in the artifact commit.`;
     const imagePrompt = `${options.workload.prompt}\nUse the image attached to this native turn to read its two-digit visual code, preserve any leading zero, and include the independently required attachment result in the artifact commit.`;
+    const failurePrompt = `${options.workload.prompt}\nBefore implementing, run exactly \`bash ${GOLDEN_RECOVERABLE_FAILURE_FILE}\` once as a recoverable check. It is expected to exit nonzero. Observe the actual command result, leave the fixture unchanged, and then complete the task from the authoritative source inputs. Do not treat this expected check as the final task outcome.`;
     const continuationPrompt = options.variant === "large-history"
       ? `${prompts.continue} Also write output/history-witness.txt with the exact fact from the preceding turn followed by a newline; do not guess it from repository files.`
       : prompts.continue;
-    const terminal = await execute(preparation ? continuationPrompt : options.variant === "unicode" ? unicodePrompt : options.variant === "tool-image" ? imagePrompt : options.workload.prompt, resumeId);
+    const terminal = await execute(preparation ? continuationPrompt : options.variant === "unicode" ? unicodePrompt : options.variant === "tool-image" ? imagePrompt : options.variant === "tool-failure" ? failurePrompt : options.workload.prompt, resumeId);
     const historyWitnessSha256 = options.variant === "large-history"
       ? createHash("sha256").update(`${largeHistoryWitness(options.workload)}\n`).digest("hex") : undefined;
     return { ...terminal, variant: options.variant, toolItems, ...(preparation ? { preparation } : {}), ...(archive ? { archive } : {}),
-      ...(historyWitnessSha256 ? { historyWitnessSha256 } : {}), ...(attachedImageSha256 ? { attachedImageSha256 } : {}) };
+      ...(historyWitnessSha256 ? { historyWitnessSha256 } : {}), ...(attachedImageSha256 ? { attachedImageSha256 } : {}),
+      ...(options.variant === "tool-failure" ? { failureWitness: { count: recoverableFailureCount, expectedExitCode: 17 } } : {}) };
   }
   let app!: GoldenAppServer;
   let observedReconnect = false;

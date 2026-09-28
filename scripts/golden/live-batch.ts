@@ -24,7 +24,7 @@ import { goldenScenarioTerminations, readGoldenEvents, readGoldenAdmissionEvents
 import { goldenNativeConfig, goldenNativeEnvironment } from "./runtime-config";
 import { withGoldenRuntime } from "./runtime";
 import { assertBorrowedTunnelInactive } from "./borrowed-tunnel";
-import { createWorkload, evaluateWorkload, materializeWorkload } from "./workloads";
+import { createWorkload, evaluateWorkload, materializeWorkload, GOLDEN_RECOVERABLE_FAILURE_FILE, GOLDEN_RECOVERABLE_FAILURE_CONTENT } from "./workloads";
 import { runProjectOracle, verifyArtifactCommit } from "./oracle";
 import { ownedProcessIdentity, ownsProcess, restartGoldenLauncher, type GoldenWorkspace } from "./workspace";
 import type { Protocol, WorkloadLevel } from "./catalog";
@@ -106,6 +106,7 @@ export async function runLiveBatch(options: {
   const nativeEnv = goldenNativeEnvironment(work, home, options.executable);
   const cells = requests.map(request => {
     const task = join(work, "cells", request.id), workload = createWorkload({ level: request.workload, seed: `${request.id}:${randomUUID()}`, batch: 0, ...(["formats", "tool-image"].includes(request.variant) ? { formatCoverage: "all" as const } : {}) });
+    if (request.variant === "tool-failure") workload.files[GOLDEN_RECOVERABLE_FAILURE_FILE] = GOLDEN_RECOVERABLE_FAILURE_CONTENT;
     materializeWorkload(task, workload);
     const git = (...args: string[]) => {
       const result = spawnSync("git", ["-C", task, ...args], { env: nativeEnv, encoding: "utf8", timeout: 15000 });
@@ -234,6 +235,9 @@ export async function runLiveBatch(options: {
             item.result = { terminal, oracle, commit };
             await evidence.capture(item.traceId, "oracle", JSON.stringify(item.result));
             if (terminal.status !== "completed" || !terminal.threadId || !terminal.toolItems) throw new DiagnosticError({ code: "golden_native_evidence_missing", message: "Native workload lacks its required completed terminal, task identity or tool evidence", origin: "golden-native", stage: "native_acceptance" });
+            if (cell.request.variant === "tool-failure" && (!("failureWitness" in terminal) || terminal.failureWitness?.count !== 1)) {
+              throw new DiagnosticError({ code: "golden_recoverable_failure_missing", message: "The native task did not return exactly one attributable expected failed command before recovery", origin: "golden-native", stage: "native_acceptance" });
+            }
             if (!oracle.passed || !commit.passed) throw new DiagnosticError({ code: "golden_artifact_rejected", message: "The native task completed but its artifacts did not satisfy independent acceptance", origin: "golden-oracle", stage: "artifact_acceptance", findings: [...oracle.failures, ...oracle.pendingChecks, ...commit.failures].map(message => ({ message })) });
           } catch (error) {
             try { await captureLane.flush(); }

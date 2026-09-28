@@ -22,6 +22,7 @@ const DRAIN_POLL_INTERVAL_MS = 100;
 const TUNNEL_START_TIMEOUT_MS = 120_000;
 const TUNNEL_HEALTH_POLL_INTERVAL_MS = 1_000;
 const TUNNEL_MONITOR_INTERVAL_MS = 10_000;
+const TUNNEL_INVENTORY_DIAGNOSTIC_INTERVAL_MS = 5 * 60_000;
 const TUNNEL_MONITOR_FAILURE_THRESHOLD = 3;
 const TUNNEL_MCP_FAILURE_RECENCY_MS = 2 * 60_000;
 const BOOT_TIME_CLOCK_TOLERANCE_MS = 5_000;
@@ -357,6 +358,7 @@ class RuntimeSupervisor {
     this.tunnelMonitorFailures = 0;
     this.tunnelMonitorObservationUnavailable = false;
     this.tunnelMonitorGeneration = 0;
+    this.lastTunnelInventoryDiagnosticAt = 0;
     this.tunnelHealthBaseUrl = null;
     this.recoveryTasks = new Set();
     this.expectedExits = new WeakSet();
@@ -1045,6 +1047,7 @@ class RuntimeSupervisor {
 
   startTunnelMonitor(config) {
     this.stopTunnelMonitor();
+    this.lastTunnelInventoryDiagnosticAt = 0;
     this.tunnelMonitorFailures = 0;
     this.tunnelMonitorObservationUnavailable = false;
     const generation = this.tunnelMonitorGeneration;
@@ -1592,13 +1595,35 @@ class RuntimeSupervisor {
   }
 
   async runControlCommand(invocation, timeoutMs, label, { action, origin, runtimeDiagnostics = false }) {
-    const operation = this.diagnostics?.begin("tunnel.control", {
+    const routineInventoryProbe = action === "cleanup" && label === "Local tunnel inventory probe" && this.tunnelMonitorTimer !== null;
+    const shouldRecordSuccess = !routineInventoryProbe
+      || Date.now() - this.lastTunnelInventoryDiagnosticAt >= TUNNEL_INVENTORY_DIAGNOSTIC_INTERVAL_MS;
+    const attributes = {
       action, executable: path.basename(invocation.executable), timeoutMs,
-    });
+    };
+    let operation = shouldRecordSuccess ? this.diagnostics?.begin("tunnel.control", attributes) : undefined;
     const started = performance.now();
     const outcome = { timeoutMs, elapsedMs: 0, timedOut: false, exitObserved: false, outputDrained: false, stdoutBytes: 0, stderrBytes: 0, stdoutTruncated: false, stderrTruncated: false };
-    const observe = (name, detail = {}) => this.diagnostics?.event(name, name.replaceAll(".", " "), detail, name.startsWith("diagnostics.") ? "warning" : "info", operation?.context);
+    const pendingObservations = [];
+    const beginFailureOperation = () => {
+      if (operation || !this.diagnostics) return;
+      operation = this.diagnostics.begin("tunnel.control", attributes);
+      for (const entry of pendingObservations) {
+        this.diagnostics.event(entry.name, entry.name.replaceAll(".", " "),
+          { ...entry.detail, observedElapsedMs: entry.elapsedMs, buffered: true },
+          entry.name.startsWith("diagnostics.") ? "warning" : "info", operation.context);
+      }
+      pendingObservations.length = 0;
+    };
+    const observe = (name, detail = {}) => {
+      if (routineInventoryProbe && !operation) {
+        if (pendingObservations.length < 8) pendingObservations.push({ name, detail, elapsedMs: performance.now() - started });
+        return;
+      }
+      this.diagnostics?.event(name, name.replaceAll(".", " "), detail, name.startsWith("diagnostics.") ? "warning" : "info", operation?.context);
+    };
     const failure = (code, message, causes = []) => {
+      beginFailureOperation();
       outcome.elapsedMs = performance.now() - started;
       const error = new DiagnosticError({ code, message, origin, stage: "tunnel.control", retryable: false,
         ...(operation ? { traceId: operation.context.traceId, spanId: operation.context.spanId } : {}),
@@ -1732,10 +1757,15 @@ class RuntimeSupervisor {
     });
     try {
       const result = await (operation ? operation.run(execute) : execute());
-      if (result.code !== 0) operation?.problem(failure("tunnel_control_failed", `${label} exited unsuccessfully`));
+      if (result.code !== 0) {
+        const problem = failure("tunnel_control_failed", `${label} exited unsuccessfully`);
+        operation?.problem(problem);
+      }
+      if (result.code === 0 && routineInventoryProbe && operation) this.lastTunnelInventoryDiagnosticAt = Date.now();
       operation?.end(result.code === 0 ? "succeeded" : "failed", outcome);
       return result;
     } catch (error) {
+      beginFailureOperation();
       operation?.problem(error); operation?.end("failed", outcome); throw error;
     }
   }

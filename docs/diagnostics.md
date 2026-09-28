@@ -2,6 +2,8 @@
 
 Diagnostics connects launcher actions, setup stages, runtime requests, and browser operations through OpenTelemetry trace and span identities. It is local-first: no monitoring server, network-accessible diagnostics endpoint, or remote exporter is required. Diagnostics records provide evidence and allowlisted links to existing recovery workflows; they do not authorize setup changes or retries.
 
+The launcher continues checking its managed tunnel every ten seconds. Once monitoring is active, a successful local tunnel inventory control command retains its full process lifecycle at most once per five minutes; repeated healthy controls do not fill the diagnostic store. A failed control still records its typed cause, process and output-drain evidence, with buffered child observations labelled by their original elapsed time. Tunnel readiness transitions and monitor failures remain separate events. A sampled healthy control proves only that observed instant, not uninterrupted health between samples.
+
 ## Architecture and build
 
 The authored implementation is strict TypeScript. Shared Zod contracts in `src/diagnostics/contracts.ts` validate records, queries, capture commands, problem envelopes, and worker messages. The root compiler targets Bun; the renderer and Electron diagnostics compiler configurations are separate. `scripts/build-diagnostics.ts` emits the CommonJS host adapter and preload consumed by Electron. Generated JavaScript is not a second implementation.

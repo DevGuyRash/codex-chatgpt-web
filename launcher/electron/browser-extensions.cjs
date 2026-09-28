@@ -67,6 +67,7 @@ class BrowserExtensions {
       scripts: browserSession.getPreloadScripts().map(script => ({ id: script.id, type: script.type })),
     });
     this.loaded = new Map();
+    this.paused = new Map();
     this.installing = new Map();
     this.availableUpdates = new Map();
     this.checkingUpdates = null;
@@ -148,6 +149,7 @@ class BrowserExtensions {
   }
 
   async open(id) {
+    if (this.paused.has(id)) await this.resume(id);
     const extension = this.loaded.get(id);
     if (!CATALOG_BY_ID.has(id) || !extension) {
       throw new Error("Install this Chrome Web Store extension before opening it");
@@ -175,22 +177,23 @@ class BrowserExtensions {
       if (!window.isDestroyed()) window.destroy();
     }
     this.pages.clear();
+    this.paused.clear();
   }
 
   status() {
-    const extension = this.loaded.get(ONE_PASSWORD_EXTENSION_ID);
+    const extension = this.loaded.get(ONE_PASSWORD_EXTENSION_ID) || this.paused.get(ONE_PASSWORD_EXTENSION_ID);
     return extension
-      ? { installed: true, id: extension.id, version: extension.version }
-      : { installed: false, id: ONE_PASSWORD_EXTENSION_ID };
+      ? { installed: true, active: this.loaded.has(ONE_PASSWORD_EXTENSION_ID), id: extension.id, version: extension.version }
+      : { installed: false, active: false, id: ONE_PASSWORD_EXTENSION_ID };
   }
 
   catalogStatus() {
     return {
       providers: BROWSER_EXTENSION_CATALOG.map(provider => {
-        const extension = this.loaded.get(provider.id);
+        const extension = this.loaded.get(provider.id) || this.paused.get(provider.id);
         return {
           id: provider.id, name: provider.name, storeUrl: provider.storeUrl,
-          note: provider.note || null, installed: !!extension,
+          note: provider.note || null, installed: !!extension, active: this.loaded.has(provider.id),
           version: extension?.version || null,
           availableVersion: this.availableUpdates.get(provider.id) || null,
         };
@@ -241,6 +244,7 @@ class BrowserExtensions {
     const provider = CATALOG_BY_ID.get(id);
     if (!provider) throw new Error("Choose an extension from the official Chrome Web Store catalog");
     if (this.loaded.has(id)) return this.catalogStatus();
+    if (this.paused.has(id)) return this.resume(id);
     if (this.installing.has(id)) return this.installing.get(id);
     const operation = (async () => {
       const extensionPath = await downloadExtension(id, this.extensionsPath);
@@ -252,6 +256,46 @@ class BrowserExtensions {
       }
       this.loaded.set(id, loaded);
       this.logger.info("browser.extension_installed", { id, version: loaded.version });
+      return this.catalogStatus();
+    })();
+    this.installing.set(id, operation);
+    try { return await operation; }
+    finally { if (this.installing.get(id) === operation) this.installing.delete(id); }
+  }
+
+  pause(id) {
+    const extension = this.loaded.get(id);
+    if (!CATALOG_BY_ID.has(id) || !extension) {
+      if (this.paused.has(id)) return this.catalogStatus();
+      throw new Error("Install this Chrome Web Store extension before pausing it");
+    }
+    if (this.installing.has(id) || [...this.pages].some(window => !window.isDestroyed())) {
+      throw new Error("Close extension windows and wait for installation before pausing password managers");
+    }
+    this.browserSession.extensions.removeExtension(id);
+    this.loaded.delete(id);
+    this.paused.set(id, extension);
+    this.availableUpdates.delete(id);
+    this.logger.info("browser.extension_paused", { id, version: extension.version });
+    return this.catalogStatus();
+  }
+
+  async resume(id) {
+    if (this.loaded.has(id)) return this.catalogStatus();
+    if (this.installing.has(id)) return this.installing.get(id);
+    const provider = CATALOG_BY_ID.get(id), previous = this.paused.get(id);
+    if (!provider || !previous) throw new Error("Only a paused, installed Chrome Web Store extension can resume");
+    const operation = (async () => {
+      const manifest = assertReviewedManifest(previous.path, provider);
+      if (manifest.version !== previous.version) throw new Error("The paused extension version changed; review it before resuming");
+      const loaded = await this.browserSession.extensions.loadExtension(previous.path);
+      if (loaded.id !== id || loaded.version !== previous.version) {
+        this.browserSession.extensions.removeExtension(loaded.id);
+        throw new Error("The resumed Chrome Web Store identity or version does not match");
+      }
+      this.loaded.set(id, loaded);
+      this.paused.delete(id);
+      this.logger.info("browser.extension_resumed", { id, version: loaded.version });
       return this.catalogStatus();
     })();
     this.installing.set(id, operation);
@@ -273,7 +317,7 @@ class BrowserExtensions {
   async checkUpdates() {
     if (this.checkingUpdates) return this.checkingUpdates;
     const operation = (async () => {
-      const installed = BROWSER_EXTENSION_CATALOG.filter(provider => this.loaded.has(provider.id));
+      const installed = BROWSER_EXTENSION_CATALOG.filter(provider => this.loaded.has(provider.id) || this.paused.has(provider.id));
       if (!installed.length) {
         this.availableUpdates.clear();
         this.lastCheckedAt = new Date().toISOString();
@@ -318,7 +362,7 @@ class BrowserExtensions {
       const payload = JSON.parse(raw.slice(prefix.length));
       const updates = new Map();
       for (const app of payload?.response?.app || []) {
-        const current = this.loaded.get(app.appid);
+        const current = this.loaded.get(app.appid) || this.paused.get(app.appid);
         const version = app.updatecheck?.manifest?.version;
         if (!current || app.updatecheck?.status !== "ok"
           || typeof version !== "string" || !/^\d+(?:\.\d+){1,4}$/.test(version)) continue;

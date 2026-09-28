@@ -4,6 +4,7 @@ const { EventEmitter } = require("node:events");
 const { createRequire } = require("node:module");
 const fs = require("node:fs");
 const path = require("node:path");
+const os = require("node:os");
 const vm = require("node:vm");
 
 function extensionFixture({ failLoad = false, isDevelopment = false } = {}) {
@@ -49,7 +50,7 @@ function extensionFixture({ failLoad = false, isDevelopment = false } = {}) {
   const extensions = new module.exports.BrowserExtensions({
     browserSession, userData: "/tmp/extension-lifecycle-fixture", logger: { info() {}, warn() {} }, isDevelopment,
   });
-  return { extensions, tabs, windows };
+  return { extensions, browserSession, tabs, windows };
 }
 
 test("force-closing an extension window releases its registered tab", async () => {
@@ -76,4 +77,31 @@ test("DEV extension windows use the distinct native icon", async () => {
   await extensions.createWindow();
   assert.match(windows[0].options.icon.source, /dev-icon\.png$/);
   extensions.destroy();
+});
+
+test("pausing an installed provider unloads it for this session and resume validates its identity", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "extension-pause-fixture-"));
+  const id = "aeblfdkhhhdcdjpifhhbdiojplfjncoa";
+  const extensionPath = path.join(root, id, "8.12.37.1_0");
+  fs.mkdirSync(extensionPath, { recursive: true });
+  fs.writeFileSync(path.join(extensionPath, "manifest.json"), JSON.stringify({ manifest_version: 3, permissions: [], version: "8.12.37.1" }));
+  const { extensions, browserSession } = extensionFixture();
+  let removes = 0, loads = 0;
+  browserSession.extensions = {
+    removeExtension(value) { assert.equal(value, id); removes++; },
+    async loadExtension(value) { assert.equal(value, extensionPath); loads++; return { id, path: value, version: "8.12.37.1", manifest: { action: { default_popup: "popup.html" } } }; },
+  };
+  extensions.loaded.set(id, { id, path: extensionPath, version: "8.12.37.1", manifest: { action: { default_popup: "popup.html" } } });
+  try {
+    const paused = extensions.pause(id).providers.find(provider => provider.id === id);
+    assert.deepEqual({ installed: paused.installed, active: paused.active, version: paused.version }, { installed: true, active: false, version: "8.12.37.1" });
+    assert.equal(extensions.status().active, false);
+    assert.equal(removes, 1);
+    const resumed = (await extensions.resume(id)).providers.find(provider => provider.id === id);
+    assert.deepEqual({ installed: resumed.installed, active: resumed.active }, { installed: true, active: true });
+    assert.equal(loads, 1);
+    await extensions.createWindow({ url: "https://example.com/" });
+    assert.throws(() => extensions.pause(id), /Close extension windows/);
+    assert.equal(extensions.status().active, true);
+  } finally { extensions.destroy(); fs.rmSync(root, { recursive: true, force: true }); }
 });

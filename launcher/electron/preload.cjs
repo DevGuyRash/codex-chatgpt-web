@@ -47,6 +47,8 @@ contextBridge.exposeInMainWorld("codexWebLauncher", {
   installOnePassword: () => invoke("launcher:browser-install-onepassword"),
   installBrowserExtension: id => invoke("launcher:browser-extension-install", id),
   openBrowserExtension: id => invoke("launcher:browser-extension-open", id),
+  pauseBrowserExtension: id => invoke("launcher:browser-extension-pause", id),
+  resumeBrowserExtension: id => invoke("launcher:browser-extension-resume", id),
   checkBrowserExtensionUpdates: () => invoke("launcher:browser-extension-check-updates"),
   updateBrowserExtension: id => invoke("launcher:browser-extension-update", id),
   continuePasskeyLogin: () => invoke("launcher:browser-passkey-login-continue"),

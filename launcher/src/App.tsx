@@ -975,6 +975,16 @@ function BrowserSurface({
     } catch (cause) { setError(messageOf(cause)); }
     finally { setProviderBusy(false); }
   };
+  const resumeOnePassword = async () => {
+    if (providerBusy || operation?.status === "running" || !passkeys?.id) return;
+    setProviderBusy(true);
+    setError(null);
+    try {
+      await api!.resumeBrowserExtension(passkeys.id);
+      onPasskeysChanged();
+    } catch (cause) { setError(messageOf(cause)); }
+    finally { setProviderBusy(false); }
+  };
   const continuePasskeyLogin = async () => {
     if (!passkeyWaiting || passkeyContinuationRequested) return;
     setPasskeyContinuationRequested(true);
@@ -1082,6 +1092,10 @@ function BrowserSurface({
         {!passkeys?.installed ? (
           <button className="toolbar-text-button" disabled={providerBusy || operation?.status === "running"} onClick={() => void installOnePassword()} type="button">
             {copy.onePasswordEnable}
+          </button>
+        ) : passkeys.active === false ? (
+          <button className="toolbar-text-button" disabled={providerBusy || operation?.status === "running"} onClick={() => void resumeOnePassword()} type="button">
+            {copy.extensionResume}
           </button>
         ) : <span className="browser-provider-ready">
           {browserPartition ? createElement("browser-action-list", { partition: browserPartition, alignment: "right" }) : null}
@@ -1759,13 +1773,14 @@ function ExtensionSettings({
     <>
       <SectionHeading label={copy.extensionsTitle} spaced />
       <p className="extension-description">{copy.extensionsDescription}</p>
+      <p className="extension-description">{copy.extensionPauseHelp}</p>
       <div className="extension-list">
         {(extensions?.providers ?? []).map(provider => (
           <div className="extension-row" key={provider.id}>
             <div className="extension-details">
               <strong>{provider.name}</strong>
               <small>{provider.installed
-                ? `${copy.extensionReady} · ${provider.version}`
+                ? `${provider.active === false ? copy.extensionPaused : copy.extensionReady} · ${provider.version}`
                 : provider.note ?? copy.extensionStore}</small>
               {provider.availableVersion ? <small>{copy.extensionNewVersion} · {provider.availableVersion}</small> : null}
             </div>
@@ -1773,16 +1788,27 @@ function ExtensionSettings({
               <button disabled={!!busy} onClick={() => void api!.openExternal(provider.storeUrl).catch(cause => setError(messageOf(cause)))} type="button">
                 {copy.extensionStore}
               </button>
-              {provider.installed ? (
-                <button disabled={!!busy} onClick={() => void api!.openBrowserExtension(provider.id).catch(cause => setError(messageOf(cause)))} type="button">
-                  {copy.extensionOpen}
+              {provider.installed ? provider.active === false ? (
+                <button disabled={!!busy} onClick={() => void run(provider.id, () => api!.resumeBrowserExtension(provider.id))} type="button">
+                  {copy.extensionResume}
                 </button>
+              ) : (
+                <>
+                  <button disabled={!!busy} onClick={() => void api!.openBrowserExtension(provider.id).catch(cause => setError(messageOf(cause)))} type="button">
+                    {copy.extensionOpen}
+                  </button>
+                  <button disabled={!!busy} onClick={() => void run(provider.id, () => api!.pauseBrowserExtension(provider.id))} type="button">
+                    {copy.extensionPause}
+                  </button>
+                </>
               ) : (
                 <button disabled={!!busy} onClick={() => void run(provider.id, () => api!.installBrowserExtension(provider.id))} type="button">
                   {copy.extensionInstall}
                 </button>
               )}
-              {provider.availableVersion ? (
+              {provider.availableVersion && provider.active === false ? (
+                <small>{copy.extensionResumeToUpdate}</small>
+              ) : provider.availableVersion ? (
                 <button disabled={!!busy} onClick={() => void run(provider.id, () => api!.updateBrowserExtension(provider.id))} type="button">
                   {copy.extensionUpdate}
                 </button>

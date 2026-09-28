@@ -57,6 +57,7 @@ export interface BrowserExtensionProvider {
   storeUrl: string;
   note: string | null;
   installed: boolean;
+  active?: boolean;
   version: string | null;
   availableVersion: string | null;
 }
@@ -108,7 +109,7 @@ export interface LauncherSnapshot {
   };
   state: LauncherState;
   browser: BrowserState | null;
-  passkeys?: { installed: boolean; id: string; version?: string } | null;
+  passkeys?: { installed: boolean; active?: boolean; id: string; version?: string } | null;
   extensions?: BrowserExtensionState | null;
   browserPartition?: string;
   nativeWebAuthn?: boolean;
@@ -163,6 +164,8 @@ export interface LauncherApi {
   installOnePassword(): Promise<{ installed: boolean; id: string; version?: string }>;
   installBrowserExtension(id: string): Promise<BrowserExtensionState>;
   openBrowserExtension(id: string): Promise<boolean>;
+  pauseBrowserExtension(id: string): Promise<BrowserExtensionState>;
+  resumeBrowserExtension(id: string): Promise<BrowserExtensionState>;
   checkBrowserExtensionUpdates(): Promise<BrowserExtensionState>;
   updateBrowserExtension(id: string): Promise<BrowserExtensionState>;
   continuePasskeyLogin(): Promise<boolean>;

@@ -781,6 +781,15 @@ function registerIpc({ logger, stateStore }) {
   handle("launcher:browser-install-onepassword", () => browserExtensions.installOnePassword());
   handle("launcher:browser-extension-install", (_event, id) => browserExtensions.install(id));
   handle("launcher:browser-extension-open", (_event, id) => browserExtensions.open(id));
+  handle("launcher:browser-extension-pause", (_event, id) => {
+    if (browserHost?.activeTraceId || browserHost?.manualOperation || browserHost?.authView
+      || [...(browserHost?.turnTabs?.values?.() || [])].some(tab => tab.status === "running")
+      || webAuthnPrompts?.currentOperation()) {
+      throw new Error("Wait for the current browser turn or authentication request before pausing extensions");
+    }
+    return browserExtensions.pause(id);
+  });
+  handle("launcher:browser-extension-resume", (_event, id) => browserExtensions.resume(id));
   handle("launcher:browser-extension-check-updates", () => browserExtensions.checkUpdates());
   handle("launcher:browser-extension-update", (_event, id) => browserExtensions.update(id));
   handle("launcher:browser-logout", async () => {

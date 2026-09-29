@@ -54,3 +54,11 @@ golden-viewer-url workspace:
 # Open an owned Linux golden workspace in the default browser
 golden-viewer-open workspace:
     {{ quote(bun) }} scripts/golden/viewer.ts open {{ quote(workspace) }}
+
+# Stop only the owned Linux golden launcher and viewer; retain its profile and campaign evidence
+golden-workspace-stop workspace:
+    {{ quote(bun) }} scripts/golden/workspace.ts --stop {{ quote(workspace) }}
+
+# Resume a stopped Linux golden launcher and viewer using its retained isolated profile
+golden-workspace-resume workspace:
+    {{ quote(bun) }} scripts/golden/workspace.ts --resume {{ quote(workspace) }}

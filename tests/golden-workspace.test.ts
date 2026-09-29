@@ -1,10 +1,10 @@
 import { expect, test } from "bun:test";
 import { spawn } from "node:child_process";
 import { once } from "node:events";
-import { existsSync, mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { ownedProcessIdentity, requestIdleGoldenLauncherShutdown, startGoldenWorkspace, verifyStoppedGoldenLauncher } from "../scripts/golden/workspace";
+import { ownedProcessIdentity, requestIdleGoldenLauncherShutdown, startGoldenWorkspace, stopGoldenWorkspace, stopOwnedProcessGroup, verifyStoppedGoldenLauncher } from "../scripts/golden/workspace";
 
 test("idle launcher recovery retries only a typed no-effect busy refusal", async () => {
   let attempts = 0;
@@ -66,4 +66,30 @@ test.skipIf(process.platform !== "linux")("a surviving helper prevents recovery 
     if (group) { try { process.kill(-group, "SIGTERM"); } catch {} }
     child.kill("SIGTERM"); await closed;
   }
+});
+
+test.skipIf(process.platform !== "linux")("owned workspace shutdown stops only the recorded process group", async () => {
+  const child = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { detached: true, stdio: "ignore" });
+  const closed = once(child, "close");
+  try {
+    await once(child, "spawn");
+    const owner = ownedProcessIdentity(child.pid!)!;
+    await expect(stopOwnedProcessGroup({ ...owner, start: "stale" }, 100)).rejects.toThrow("different owner");
+    expect(ownedProcessIdentity(child.pid!)).toMatchObject(owner);
+    await stopOwnedProcessGroup(owner, 2_000);
+    await closed;
+    expect(ownedProcessIdentity(child.pid!)).toBeUndefined();
+  } finally { child.kill("SIGTERM"); await closed; }
+});
+
+test.skipIf(process.platform !== "linux")("stopped workspace shutdown preserves its profile and campaign record", async () => {
+  const root = mkdtempSync(join(tmpdir(), "codex-golden-stopped-"));
+  const owner = { pid: 8_000_000, group: 8_000_000, start: "old", executable: "/missing" };
+  const statePath = join(root, "workspace.json");
+  const state = { version: 1, root, codexHome: join(root, "codex"), runtimeHome: join(root, "runtime"), launcherData: join(root, "launcher"), descriptorPath: join(root, "runtime/runtime/launcher-browser.json"), processes: { launcher: owner, display: owner, "viewer-socket": owner, viewer: owner } };
+  try {
+    writeFileSync(statePath, JSON.stringify(state));
+    await stopGoldenWorkspace(root);
+    expect(JSON.parse(readFileSync(statePath, "utf8"))).toEqual(state);
+  } finally { rmSync(root, { recursive: true, force: true }); }
 });

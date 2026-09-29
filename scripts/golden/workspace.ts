@@ -1,6 +1,6 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
-import { closeSync, cpSync, existsSync, lstatSync, mkdirSync, openSync, readFileSync, realpathSync, rmSync, statfsSync, writeFileSync } from "node:fs";
+import { closeSync, cpSync, existsSync, lstatSync, mkdirSync, openSync, readFileSync, realpathSync, rmSync, statfsSync, statSync, writeFileSync } from "node:fs";
 import { createConnection, createServer } from "node:net";
 import { dirname, join, resolve } from "node:path";
 import { setTimeout as wait } from "node:timers/promises";
@@ -34,6 +34,43 @@ function owns(process: OwnedProcess): boolean {
   return Boolean(actual && actual.start === process.start && actual.executable === process.executable && actual.group === process.group && actual.group === actual.pid);
 }
 export { identity as ownedProcessIdentity, owns as ownsProcess };
+
+function groupAlive(group: number): boolean {
+  try { process.kill(-group, 0); return true; }
+  catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ESRCH") return false;
+    throw error;
+  }
+}
+
+/** Signal only the exact recorded leader or its still-existing process group. */
+export async function stopOwnedProcessGroup(owner: OwnedProcess, timeoutMs = 10_000, forceAfterTimeout = false): Promise<void> {
+  if (!Number.isSafeInteger(owner.pid) || owner.pid < 2 || owner.group !== owner.pid) throw new Error("Invalid owned process group");
+  const actual = identity(owner.pid);
+  if (actual && !owns(owner)) throw new Error("The recorded process group belongs to a different owner");
+  if (!groupAlive(owner.group)) return;
+  process.kill(-owner.group, "SIGTERM");
+  const deadline = Date.now() + timeoutMs;
+  while (groupAlive(owner.group)) {
+    if (Date.now() >= deadline) {
+      if (!forceAfterTimeout) throw new Error(`Owned process group ${owner.group} did not stop after SIGTERM`);
+      process.kill(-owner.group, "SIGKILL");
+      const forcedDeadline = Date.now() + 5_000;
+      while (groupAlive(owner.group)) {
+        if (Date.now() >= forcedDeadline) throw new Error(`Owned process group ${owner.group} survived SIGKILL`);
+        await wait(100);
+      }
+      return;
+    }
+    await wait(100);
+  }
+}
+
+async function cleanupStartedProcesses(processes: Record<string, OwnedProcess>): Promise<void> {
+  const settled = await Promise.allSettled(Object.values(processes).reverse().map(owner => stopOwnedProcessGroup(owner, 10_000, true)));
+  const failures = settled.flatMap(result => result.status === "rejected" ? [result.reason as Error] : []);
+  if (failures.length) throw new AggregateError(failures, "An isolated workspace process group survived startup cleanup");
+}
 
 /** Retry only a typed refusal made before shutdown effects; every other outcome stays uncertain. */
 export async function requestIdleGoldenLauncherShutdown(control: { endpoint: string; token: string }, ownerAlive: () => boolean, retryMs = 500, timeoutMs = 15_000): Promise<void> {
@@ -160,8 +197,9 @@ export async function startGoldenWorkspace(rootInput: string, toolsInput = join(
     writeFileSync(statePath, JSON.stringify(state, null, 2), { mode: 0o600 });
     return state;
   } catch (error) {
-    for (const entry of Object.values(processes).reverse()) if (owns(entry)) process.kill(-entry.pid, "SIGTERM");
-    for (const child of children) child.unref();
+    try { await cleanupStartedProcesses(processes); }
+    catch (cleanupError) { throw new AggregateError([error, cleanupError], "Isolated workspace startup failed and left an owned process running"); }
+    finally { for (const child of children) child.unref(); }
     throw error;
   }
 }
@@ -309,19 +347,49 @@ export async function resumeGoldenWorkspace(rootInput: string, selection?: { exe
     writeFileSync(statePath, JSON.stringify(state, null, 2), { mode: 0o600 });
     return state;
   } catch (error) {
-    for (const entry of Object.values(processes).reverse()) if (owns(entry)) process.kill(-entry.pid, "SIGTERM");
-    for (const child of children) child.unref();
+    try { await cleanupStartedProcesses(processes); }
+    catch (cleanupError) { throw new AggregateError([error, cleanupError], "Isolated workspace recovery failed and left an owned process running"); }
+    finally { for (const child of children) child.unref(); }
     throw error;
   }
 }
 
+/** Stop only the recorded GUI/display owners; retain the campaign, profile and queue for recovery. */
+export async function stopGoldenWorkspace(rootInput: string): Promise<void> {
+  if (process.platform !== "linux") throw new Error("Hidden workspace shutdown requires Linux");
+  const root = resolve(rootInput), statePath = join(root, "workspace.json");
+  if (realpathSync(root) !== root || statSync(statePath).uid !== process.getuid?.()) throw new Error("The golden workspace is not owned by this user");
+  const state = JSON.parse(readFileSync(statePath, "utf8")) as GoldenWorkspace;
+  if (state.version !== 1 || state.root !== root || state.codexHome !== join(root, "codex")
+    || state.runtimeHome !== join(root, "runtime") || state.launcherData !== join(root, "launcher")
+    || state.descriptorPath !== join(root, "runtime/runtime/launcher-browser.json")
+    || !state.processes?.launcher || !state.processes?.display || !state.processes?.["viewer-socket"] || !state.processes?.viewer) {
+    throw new Error("The recorded golden workspace identity is invalid");
+  }
+  const launcher = state.processes.launcher;
+  if (owns(launcher)) {
+    const descriptor = readLauncherBrowserHostDescriptor(state.descriptorPath);
+    if (descriptor.pid !== launcher.pid) throw new Error("The browser descriptor belongs to another launcher");
+    await requestIdleGoldenLauncherShutdown(descriptor.control, () => owns(launcher));
+    await until(() => !groupAlive(launcher.group));
+  } else verifyStoppedGoldenLauncher(launcher);
+  for (const name of ["viewer", "viewer-socket", "display"]) await stopOwnedProcessGroup(state.processes[name]!);
+}
+
 if (import.meta.main) {
   const resume = process.argv.includes("--resume");
-  const rootArgument = process.argv.slice(2).find(argument => argument !== "--json" && argument !== "--resume");
+  const stop = process.argv.includes("--stop");
+  if (resume && stop) throw new Error("Choose either --resume or --stop");
+  const rootArgument = process.argv.slice(2).find(argument => argument !== "--json" && argument !== "--resume" && argument !== "--stop");
   const root = rootArgument ? resolve(rootArgument) : join(repository, "context/golden/live");
-  const state = resume ? await resumeGoldenWorkspace(root, reviewedElectronBinary()) : await startGoldenWorkspace(root);
-  // Authentication UI is intentionally excluded from diagnostics and screenshots.
-  process.stdout.write(process.argv.includes("--json") ? `${JSON.stringify({ root: state.root, display: state.display, signInUrl: state.signInUrl, viewerUrl: state.viewerUrl, descriptorPath: state.descriptorPath })}\n`
-    : resume ? `Resumed the owned hidden launcher on ${state.display}. Use the golden-viewer-url command to open its private viewer.\n`
-      : signInMessage({ signInUrl: state.signInUrl!, viewerUrl: state.viewerUrl }));
+  if (stop) {
+    await stopGoldenWorkspace(root);
+    process.stdout.write("Stopped the owned hidden workspace processes. Its profile and campaign evidence are retained.\n");
+  } else {
+    const state = resume ? await resumeGoldenWorkspace(root, reviewedElectronBinary()) : await startGoldenWorkspace(root);
+    // Authentication UI is intentionally excluded from diagnostics and screenshots.
+    process.stdout.write(process.argv.includes("--json") ? `${JSON.stringify({ root: state.root, display: state.display, signInUrl: state.signInUrl, viewerUrl: state.viewerUrl, descriptorPath: state.descriptorPath })}\n`
+      : resume ? `Resumed the owned hidden launcher on ${state.display}. Use the golden-viewer-url command to open its private viewer.\n`
+        : signInMessage({ signInUrl: state.signInUrl!, viewerUrl: state.viewerUrl }));
+  }
 }

@@ -43,7 +43,7 @@ export function structuredScenarioPrompts(workload: GoldenWorkload) {
   const witness = `steering-${workload.id.slice(0, 24)}`;
   return {
     prepare: `Read the following task and identify its required outputs. Do not implement it yet; execution will follow in this same task.\n\n${workload.prompt}`,
-    continue: "Execute the task described in the preceding turn, including its required outputs, independent validation and artifact commit.",
+    continue: "Execute the task described in the preceding turn. Use the available local tools to write every required output, independently validate the artifacts, and commit them. If a tool is rejected, report the exact observed tool receipt instead of assuming a block.",
     plan: `Plan this task, including its tool and validation steps:\n\n${workload.prompt}`,
     revision: "Revise the plan to make independent validation and recovery from invalid input explicit. Preserve the task's required outputs.",
     execute: `Execute the task using the revised plan:\n\n${workload.prompt}`,

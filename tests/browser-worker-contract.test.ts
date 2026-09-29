@@ -413,13 +413,15 @@ test("compaction retry submission evidence cannot make prompt-stage settlement u
 
 test("launcher page acquisition proves a nonzero operational viewport before DOM interaction", () => {
   const workerSource = readFileSync(new URL("../src/adapters/chatgpt-web/browser-worker.ts", import.meta.url), "utf8");
-  const connect = workerSource.indexOf("const connection = await this.launcherConnections.acquire(");
-  const viewport = workerSource.indexOf("await waitForOperationalChatGptViewport(connection.page, abortSignal);", connect);
+  const connect = workerSource.indexOf("const acquire = () => this.launcherConnections.acquire(");
+  const viewport = workerSource.indexOf("const ready = () => waitForOperationalChatGptViewport(connection.page, abortSignal);", connect);
   const acquired = workerSource.indexOf('await diagnostics.capture(page, "browser-page-acquired")', viewport);
 
   expect(connect).toBeGreaterThan(-1);
   expect(viewport).toBeGreaterThan(connect);
   expect(acquired).toBeGreaterThan(viewport);
+  expect(workerSource.slice(connect, viewport)).toContain('diagnostics.run("browser.page_transport_acquire", acquire)');
+  expect(workerSource.slice(viewport, acquired)).toContain('diagnostics.run("browser.page_viewport_ready", ready)');
   expect(workerSource).toContain("innerWidth >= width && innerHeight >= height");
 });
 

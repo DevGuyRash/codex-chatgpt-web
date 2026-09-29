@@ -1321,11 +1321,12 @@ export const CHATGPT_MIN_OPERATIONAL_VIEWPORT = Object.freeze({ width: 320, heig
 
 async function waitForOperationalChatGptViewport(page: Page, signal?: AbortSignal): Promise<void> {
   try {
-    await withBrowserTurnAbort(page.waitForFunction(
+    // Playwright's in-page polling timeout can remain pending when its CDP transport stalls.
+    await withChatGptBrowserObservationTimeout(withBrowserTurnAbort(page.waitForFunction(
       ({ width, height }) => innerWidth >= width && innerHeight >= height,
       CHATGPT_MIN_OPERATIONAL_VIEWPORT,
       { polling: 50, timeout: 10_000 },
-    ), signal);
+    ), signal), 15_000);
   } catch (error) {
     if (signal?.aborted) throw new DOMException("ChatGPT browser page acquisition aborted", "AbortError");
     throw new Error(
@@ -4633,18 +4634,24 @@ export class ChatGptBrowserWorker {
           }
           return managed;
         }
-        const connection = await this.launcherConnections.acquire(
+        const diagnostics = runtimeDiagnostics();
+        const acquire = () => this.launcherConnections.acquire(
           this.config.browserHostDescriptorPath!,
           browserStageTimeouts.browserPage,
           launcherSurfaceId,
           abortSignal,
         );
+        const connection = diagnostics
+          ? await diagnostics.run("browser.page_transport_acquire", acquire)
+          : await acquire();
         if (abortSignal.aborted) {
           await this.launcherConnections.release(connection, false, this.config.browserHostDescriptorPath!).catch(() => {});
           throw new DOMException("ChatGPT browser page acquisition aborted", "AbortError");
         }
         turnConnection = connection;
-        await waitForOperationalChatGptViewport(connection.page, abortSignal);
+        const ready = () => waitForOperationalChatGptViewport(connection.page, abortSignal);
+        if (diagnostics) await diagnostics.run("browser.page_viewport_ready", ready);
+        else await ready();
         return connection.page;
       });
       if (!maintenancePage && !launcherSurfaceId) managedPage = page;

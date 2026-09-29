@@ -4,6 +4,8 @@ This guide runs the current checkout in an isolated **Codex Web GPT DEV** profil
 
 The DEV launcher's Settings has **Open hidden desktop** for an active isolated test workspace. It opens the private browser viewer after checking ownership; choose the workspace folder when prompted. From the checkout, `just golden-viewer-open /path/to/workspace` opens it directly, and `just golden-viewer-url /path/to/workspace` prints the private URL for a browser on the same machine. A hidden workspace is a separate Linux display, distinct from the normal DEV profile, and its launcher is visible inside noVNC after connecting. Do not share the private viewer URL or record authentication screens.
 
+When the hidden workspace is idle, run `just golden-workspace-stop /path/to/workspace` to release its launcher, viewer and display memory without deleting its isolated profile or campaign evidence. Use `just golden-workspace-resume /path/to/workspace` to reopen that same workspace later. The stop command refuses a busy launcher or an owner mismatch; it does not stop the ordinary DEV or production launcher. See [Golden testing](golden-testing.md) for the queue and live-admission rules.
+
 ## Build and launch
 
 Use Bun 1.4.0 and install the repository's locked dependencies:

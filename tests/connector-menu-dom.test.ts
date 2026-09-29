@@ -39,6 +39,12 @@ test.skipIf(!process.env.CHATGPT_TEST_CHROME_EXECUTABLE)("connector lookup exclu
     expect(await visibleChatGptAlertSummary(page)).toEqual({ count: 0, categories: [] });
     expect(await resolveChatGptToolConfirmation(page, "Codex Native2 DEV", true)).toBe(true);
     expect(await page.locator('body').getAttribute('data-approved')).toBe('once');
+    await page.setContent('<div role="dialog">Allow ChatGPT to use Codex Native2 DEV?<div role="alert">Review this proposed tool call</div><button onclick="document.body.dataset.approved=\'once\'">Allow once</button></div>');
+    await expect(resolveChatGptToolConfirmation(page, "Codex Native2 DEV", true)).rejects.toMatchObject({ code: "chatgpt_connector_review_required", retryable: false });
+    expect(await page.locator('body').getAttribute('data-approved')).toBeNull();
+    await page.setContent('<div role="alert">Allow ChatGPT to use Codex Native2 DEV?<p>Suspicious content: opaque outbound payload</p><button onclick="document.body.dataset.approved=\'once\'">Allow once</button></div>');
+    await expect(resolveChatGptToolConfirmation(page, "Codex Native2 DEV", true)).rejects.toMatchObject({ code: "chatgpt_connector_review_required", retryable: false });
+    expect(await page.locator('body').getAttribute('data-approved')).toBeNull();
     await page.setContent('<div role="alert">Unrelated ChatGPT notice</div>');
     expect(await resolveChatGptToolConfirmation(page, "Codex Native2 DEV", true)).toBe(false);
     await page.setContent('<div id="approval-root"><div role="alert">Allow ChatGPT to use Codex Native2 DEV?</div><div><button onclick="document.body.dataset.approved=\'once\';document.getElementById(\'approval-root\').remove();document.body.insertAdjacentHTML(\'beforeend\',\'<div data-testid=&quot;conversation-turn-assistant&quot;></div>\')">Allow once</button><button>Always allow</button></div></div>');

@@ -962,6 +962,17 @@ export async function resolveChatGptToolConfirmation(
   };
 
   if (autoApprove) {
+    const reviewWarning = dialog.locator('[role="alert"], [data-testid*="warning"], [data-testid*="safety"]')
+      .filter({ visible: true });
+    const hasStructuralWarning = await reviewWarning.count() > 0;
+    const warningText = hasStructuralWarning ? "" : await dialog.innerText().catch(() => "");
+    if (hasStructuralWarning || /\b(?:Suspicious content|blocked by OpenAI's safety checks)\b/i.test(warningText)) {
+      runtimeDiagnostics()?.event("browser.connector_review_required", "Connector approval has a visible review warning; automatic approval was withheld", { action: "withheld" }, "warning");
+      throw new ChatGptWebAdapterError(
+        "ChatGPT displayed a connector review warning; automatic approval was withheld. Inspect the exact card in the owned tab.",
+        { status: 403, errorType: "invalid_request_error", code: "chatgpt_connector_review_required", retryable: false, source: "chatgpt-ui" },
+      );
+    }
     // ChatGPT exposes either "Allow once" or the shorter "Allow" for the
     // current one-shot approval. Keep the matcher anchored so persistent
     // actions such as "Always allow" cannot match.

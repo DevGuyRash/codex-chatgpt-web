@@ -2822,6 +2822,8 @@ function toolConfirmationPage(options: {
       if (options.disappearAfterReads !== undefined && reads >= options.disappearAfterReads) visible = false;
       return visible;
     },
+    locator: () => ({ filter: () => ({ count: async () => 0 }) }),
+    innerText: async () => "",
     getByRole: (_role: string, input: { name: string | RegExp }) => button(input.name),
     waitFor: async ({ state }: { state: string }) => {
       expect(state).toBe("hidden");

@@ -19,7 +19,7 @@ const Segment = z.object({
   to: z.object({ traceId: z.string().regex(/^[a-f0-9]{32}$/), kind: z.enum(["attachment", "document"]), id: z.string().uuid(), sha256: Digest }).strict(),
 }).strict();
 const Entry = z.object({ batch: z.number().int().nonnegative(), threadId: Thread, commit: z.string().regex(/^[a-f0-9]{40}$/),
-  bundleSha256: Digest, observedMs: z.number().int().nonnegative(), segments: z.array(Segment).max(100_000),
+  bundleSha256: Digest, observedMs: z.number().finite().nonnegative(), segments: z.array(Segment).max(100_000),
   previousHash: Digest, hash: Digest }).strict();
 const Ledger = z.object({ version: z.literal(1), cellId: Digest, threadId: Thread,
   entries: z.array(Entry).max(10_000) }).strict();

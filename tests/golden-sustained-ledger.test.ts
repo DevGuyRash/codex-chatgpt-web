@@ -30,6 +30,11 @@ test("sustained credit survives restart without replaying a batch or duplicate p
     expect(restored.activeProgressMs).toBe(20_000);
     expect(restored.append({ batch: 1, threadId: thread, commit: "3".repeat(40), bundleSha256: "4".repeat(64), independentlyValid: true, progress: progress(4, 1_030_000) })).toBe(40_000);
     expect(new SustainedProgressLedger(path, cell, thread).activeProgressMs).toBe(40_000);
+    const fractionalClock = new ActiveProgress();
+    fractionalClock.observe(1_060_000.125, "tools", evidence(7));
+    fractionalClock.observe(1_061_000.5, "tools", evidence(8));
+    const fractional = fractionalClock.finishBatch(1_061_001, true);
+    expect(restored.append({ batch: 2, threadId: thread, commit: "5".repeat(40), bundleSha256: "6".repeat(64), independentlyValid: true, progress: fractional })).toBe(41_000.375);
     expect(() => new SustainedProgressLedger(path, "d".repeat(64), thread)).toThrow("owner changed");
     const changed = JSON.parse(readFileSync(path, "utf8")); changed.entries[0].observedMs += 1000;
     writeFileSync(path, JSON.stringify(changed), { mode: 0o600 });

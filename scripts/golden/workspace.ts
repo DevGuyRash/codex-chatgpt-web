@@ -43,11 +43,12 @@ function groupAlive(group: number): boolean {
   }
 }
 
-/** Signal only the exact recorded leader or its still-existing process group. */
+/** Signal a group only while its exact recorded leader still owns it. */
 export async function stopOwnedProcessGroup(owner: OwnedProcess, timeoutMs = 10_000, forceAfterTimeout = false): Promise<void> {
   if (!Number.isSafeInteger(owner.pid) || owner.pid < 2 || owner.group !== owner.pid) throw new Error("Invalid owned process group");
   const actual = identity(owner.pid);
   if (actual && !owns(owner)) throw new Error("The recorded process group belongs to a different owner");
+  if (!actual && groupAlive(owner.group)) throw new Error("The recorded process group has no verifiable leader");
   if (!groupAlive(owner.group)) return;
   process.kill(-owner.group, "SIGTERM");
   const deadline = Date.now() + timeoutMs;

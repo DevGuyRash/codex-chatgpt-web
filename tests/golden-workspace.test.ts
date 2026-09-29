@@ -93,3 +93,21 @@ test.skipIf(process.platform !== "linux")("stopped workspace shutdown preserves 
     expect(JSON.parse(readFileSync(statePath, "utf8"))).toEqual(state);
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
+
+test.skipIf(process.platform !== "linux")("orphaned group cannot be signalled after its recorded leader exits", async () => {
+  const script = `const { spawn } = await import("node:child_process"); const helper = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { stdio: "ignore" }); helper.once("spawn", () => { console.log("ready"); process.stdin.resume(); process.stdin.once("data", () => process.exit(0)); });`;
+  const child = spawn(process.execPath, ["-e", script], { detached: true, stdio: ["pipe", "pipe", "ignore"] });
+  const closed = once(child, "close");
+  let group: number | undefined;
+  try {
+    await once(child.stdout, "data");
+    const owner = ownedProcessIdentity(child.pid!)!; group = owner.group;
+    child.stdin.write("exit");
+    await closed;
+    expect(ownedProcessIdentity(owner.pid)).toBeUndefined();
+    await expect(stopOwnedProcessGroup(owner, 100)).rejects.toThrow("no verifiable leader");
+  } finally {
+    if (group) { try { process.kill(-group, "SIGTERM"); } catch {} }
+    child.kill("SIGTERM"); await closed;
+  }
+});

@@ -186,6 +186,7 @@ let prompt="";process.stdin.on("data",chunk=>prompt+=chunk);process.stdin.on("en
     expect(prompts[1]!.resumed).toBe(true);
     expect(prompts[1]!.prompt).not.toContain(largeHistoryWitness(workload));
     expect(prompts[1]!.prompt).toContain(retainedConversationRevision(workload));
+    expect(prompts[1]!.prompt).toContain("generated local fixture checks for the requested artifacts");
     await expect(runNativeScenario({ ...options, route: CHATGPT_WEB_LUNA_MODEL_ROUTES[0]! })).rejects.toThrow("Sol retained-browser path");
     await expect(runNativeScenario({ ...options, env: { EARLY_WRITE: "1" } })).rejects.toThrow("before the changed instruction");
     expect(readFileSync(log, "utf8").trim().split("\n")).toHaveLength(3);

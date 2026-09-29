@@ -603,6 +603,7 @@ export function compileChatGptWebPrompt(
     ? [
       "<codex_transport_resume>",
       `The task context is complete. Pass turn_token ${turnToken} unchanged to every Codex Native call in this response, including continuations after tool results; do not expose it in the answer. ${nativePlanMode ? "Continue the active Plan Mode contract. If the official plan is ready, return it inside the exact standalone <proposed_plan> block required by Codex; do not substitute an ordinary final answer." : "Execute the latest active user request now."}`,
+      "The turn_token is a one-turn local connector handle. Put it only in a tool's declared turn_token field, never in a command string, file, URL, or user-facing text.",
       "</codex_transport_resume>",
     ]
     : [

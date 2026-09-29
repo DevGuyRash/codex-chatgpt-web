@@ -9,6 +9,7 @@ if (!files.length) throw new Error(`No ${suite} tests found`);
 if (suite === "ui" && (!process.env.CHATGPT_TEST_CHROME_EXECUTABLE || !existsSync(process.env.CHATGPT_TEST_CHROME_EXECUTABLE))) throw new Error("UI gate incomplete: set CHATGPT_TEST_CHROME_EXECUTABLE to an installed Chromium executable");
 // Bun treats explicit file arguments as path patterns; without this guard the preserved
 // context/golden-dev checkout runs duplicate tests whose names end in the same path.
-// Keep local child-process and browser fixtures below the measured resource contention that can turn a healthy five-second tunnel probe into a false timeout.
-const child = Bun.spawn([process.execPath, "test", "--max-concurrency=8", "--path-ignore-patterns=**/context/**", ...files], { stdin: "inherit", stdout: "inherit", stderr: "inherit" });
+// Browser UI files each launch Chromium and diagnostics workers. Pace them separately from the cheaper non-UI fixtures.
+const concurrency = suite === "ui" ? 2 : 8;
+const child = Bun.spawn([process.execPath, "test", `--max-concurrency=${concurrency}`, "--path-ignore-patterns=**/context/**", ...files], { stdin: "inherit", stdout: "inherit", stderr: "inherit" });
 process.exitCode = await child.exited;

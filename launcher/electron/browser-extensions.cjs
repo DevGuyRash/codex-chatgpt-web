@@ -84,10 +84,7 @@ class BrowserExtensions {
   }
 
   sampleMemory() {
-    if (!this.loaded.size || typeof app?.getAppMetrics !== "function") {
-      this.memoryWarning = null;
-      return;
-    }
+    if ((!this.loaded.size && !this.memoryWarning) || typeof app?.getAppMetrics !== "function") return;
     let metrics;
     try { metrics = app.getAppMetrics(); }
     catch (error) {
@@ -103,7 +100,7 @@ class BrowserExtensions {
         ? current : previous, null);
     if (!largest) return;
     const workingSetKiB = largest?.memory?.workingSetSize ?? 0;
-    if (workingSetKiB >= HIGH_PROCESS_WORKING_SET_KIB) {
+    if (this.loaded.size && workingSetKiB >= HIGH_PROCESS_WORKING_SET_KIB) {
       const warning = {
         processWorkingSetMiB: Math.ceil(workingSetKiB / 1024),
         processType: typeof largest.type === "string" ? largest.type : "Unknown",
@@ -253,7 +250,7 @@ class BrowserExtensions {
       }),
       checking: !!this.checkingUpdates,
       lastCheckedAt: this.lastCheckedAt,
-      memoryWarning: this.memoryWarning,
+      memoryWarning: this.loaded.size ? this.memoryWarning : null,
     };
   }
 
@@ -329,7 +326,6 @@ class BrowserExtensions {
     this.browserSession.extensions.removeExtension(id);
     this.loaded.delete(id);
     this.paused.set(id, extension);
-    if (!this.loaded.size) this.memoryWarning = null;
     this.availableUpdates.delete(id);
     this.logger.info("browser.extension_paused", { id, version: extension.version });
     return this.catalogStatus();

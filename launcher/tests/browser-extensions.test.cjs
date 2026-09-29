@@ -74,6 +74,8 @@ test("high process working set is reported once per episode without attributing 
     metricsState.current = [{ type: "Tab", memory: { workingSetSize: 900_000 } }];
     extensions.sampleMemory();
     assert.ok(extensions.catalogStatus().memoryWarning);
+    extensions.loaded.delete(id);
+    assert.equal(extensions.catalogStatus().memoryWarning, null);
     metricsState.current = [{ type: "Tab", memory: { workingSetSize: 700_000 } }];
     extensions.sampleMemory();
     assert.equal(extensions.catalogStatus().memoryWarning, null);

@@ -22,20 +22,24 @@ test("sustained credit survives restart without replaying a batch or duplicate p
   try {
     const ledger = new SustainedProgressLedger(path, cell, thread);
     const first = progress(1, 1_000_000);
-    expect(ledger.append({ ...ledger.reserveBatch(), threadId: thread, commit: "1".repeat(40), bundleSha256: "2".repeat(64), independentlyValid: true, progress: first })).toBe(20_000);
+    expect(ledger.append({ ...ledger.reserveBatch(), threadId: thread, workloadId: "a".repeat(64), commit: "1".repeat(40), bundleSha256: "2".repeat(64), independentlyValid: true, progress: first })).toBe(20_000);
     const restored = new SustainedProgressLedger(path, cell, thread);
     expect({ next: restored.nextBatch, credited: restored.activeProgressMs, complete: restored.minimumMet }).toEqual({ next: 1, credited: 20_000, complete: false });
     const secondReservation = restored.reserveBatch();
-    expect(() => restored.append({ ...secondReservation, batch: 0, threadId: thread, commit: "3".repeat(40), bundleSha256: "4".repeat(64), independentlyValid: true, progress: progress(4, 1_030_000) })).toThrow("not the exact reserved producer");
-    expect(() => restored.append({ ...secondReservation, threadId: thread, commit: "3".repeat(40), bundleSha256: "4".repeat(64), independentlyValid: true, progress: progress(2, 1_030_000) })).toThrow("duplicated");
+    expect(() => restored.append({ ...secondReservation, batch: 0, threadId: thread, workloadId: "b".repeat(64), commit: "3".repeat(40), bundleSha256: "4".repeat(64), independentlyValid: true, progress: progress(4, 1_030_000) })).toThrow("not the exact reserved producer");
+    expect(() => restored.append({ ...secondReservation, threadId: thread, workloadId: "b".repeat(64), commit: "3".repeat(40), bundleSha256: "4".repeat(64), independentlyValid: true, progress: progress(2, 1_030_000) })).toThrow("duplicated");
+    expect(() => restored.append({ ...secondReservation, threadId: thread, workloadId: "a".repeat(64), commit: "3".repeat(40), bundleSha256: "4".repeat(64), independentlyValid: true, progress: progress(4, 1_030_000) })).toThrow("reused workload");
     expect(restored.activeProgressMs).toBe(20_000);
-    expect(restored.append({ ...secondReservation, threadId: thread, commit: "3".repeat(40), bundleSha256: "4".repeat(64), independentlyValid: true, progress: progress(4, 1_030_000) })).toBe(40_000);
+    expect(restored.append({ ...secondReservation, threadId: thread, workloadId: "b".repeat(64), commit: "3".repeat(40), bundleSha256: "4".repeat(64), independentlyValid: true, progress: progress(4, 1_030_000) })).toBe(40_000);
     expect(new SustainedProgressLedger(path, cell, thread).activeProgressMs).toBe(40_000);
     const fractionalClock = new ActiveProgress();
     fractionalClock.observe(1_060_000.125, "tools", evidence(7));
     fractionalClock.observe(1_061_000.5, "tools", evidence(8));
     const fractional = fractionalClock.finishBatch(1_061_001, true);
-    expect(restored.append({ ...restored.reserveBatch(), threadId: thread, commit: "5".repeat(40), bundleSha256: "6".repeat(64), independentlyValid: true, progress: fractional })).toBe(41_000.375);
+    const thirdReservation = restored.reserveBatch();
+    expect(() => restored.append({ ...thirdReservation, threadId: thread, workloadId: "c".repeat(64), commit: "5".repeat(40), bundleSha256: "6".repeat(64), independentlyValid: true,
+      progress: { observedMs: 0, creditedMs: 0, segments: [] } })).toThrow("positive observed segments");
+    expect(restored.append({ ...thirdReservation, threadId: thread, workloadId: "c".repeat(64), commit: "5".repeat(40), bundleSha256: "6".repeat(64), independentlyValid: true, progress: fractional })).toBe(41_000.375);
     expect(() => new SustainedProgressLedger(path, "d".repeat(64), thread)).toThrow("owner changed");
     const changed = JSON.parse(readFileSync(path, "utf8")); changed.entries[0].observedMs += 1000;
     writeFileSync(path, JSON.stringify(changed), { mode: 0o600 });
@@ -61,5 +65,18 @@ test("an uncertain sustained producer blocks restart without resubmission", asyn
       beforeBatch: async () => {}, executeBatch: async () => { submissions++; throw new Error("must not run"); }, checkpoint: async () => {},
     })).rejects.toThrow("unresolved producer");
     expect(submissions).toBe(1);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("only an empty legacy ledger can upgrade without importing unbound credit", () => {
+  const root = mkdtempSync(join(tmpdir(), "golden-sustained-legacy-")), path = join(root, "ledger.json");
+  try {
+    writeFileSync(path, JSON.stringify({ version: 1, cellId: cell, threadId: thread, entries: [] }), { mode: 0o600 });
+    expect(new SustainedProgressLedger(path, cell, thread).nextBatch).toBe(0);
+    expect(JSON.parse(readFileSync(path, "utf8")).version).toBe(2);
+    writeFileSync(path, JSON.stringify({ version: 1, cellId: cell, threadId: thread, entries: [{}] }), { mode: 0o600 });
+    expect(() => new SustainedProgressLedger(path, cell, thread)).toThrow("manual reconciliation");
+    writeFileSync(path, JSON.stringify({ version: 1, cellId: cell, threadId: thread, entries: [], pending: {} }), { mode: 0o600 });
+    expect(() => new SustainedProgressLedger(path, cell, thread)).toThrow("manual reconciliation");
   } finally { rmSync(root, { recursive: true, force: true }); }
 });

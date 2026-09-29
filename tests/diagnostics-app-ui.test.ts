@@ -9,6 +9,37 @@ import { CaptureCommandSchema, QuerySchema, QueryResultSchema } from "../src/dia
 import { diagnosticsCopy } from "../launcher/src/diagnostics/copy";
 import { ChatGptWebAdapterError } from "../src/adapters/chatgpt-web/adapter-error";
 
+test.skipIf(!process.env.CHATGPT_TEST_CHROME_EXECUTABLE)("1Password toolbar opens the separate extension owner without an in-page popup", async () => {
+  const root = mkdtempSync(join(tmpdir(), "extension-toolbar-ui-"));
+  const browser = await chromium.launch({ executablePath: process.env.CHATGPT_TEST_CHROME_EXECUTABLE, headless: true });
+  let server: ReturnType<typeof Bun.serve> | undefined;
+  try {
+    const built = Bun.spawnSync([process.execPath, "build", "tests/fixtures/diagnostics-app.tsx", "--target", "browser", "--outdir", root], { cwd: resolve("launcher") });
+    expect(built.exitCode).toBe(0);
+    server = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch(request) {
+      const pathname = new URL(request.url).pathname;
+      if (pathname === "/app.js") return new Response(readFileSync(join(root, "diagnostics-app.js")), { headers: { "content-type": "text/javascript" } });
+      if (pathname === "/app.css") return new Response(readFileSync(join(root, "diagnostics-app.css")), { headers: { "content-type": "text/css" } });
+      const fixture = JSON.stringify({ language: "en", extensionToolbar: true,
+        problem: { version: 1, code: "fixture", message: "Fixture", findings: [], causes: [], actions: ["open-diagnostics"], recovery: "not-needed" } });
+      return new Response(`<!doctype html><link rel="stylesheet" href="/app.css"><div id="root"></div><script>window.fixture=${fixture}</script><script type="module" src="/app.js"></script>`, { headers: { "content-type": "text/html" } });
+    } });
+    const page = await browser.newPage({ viewport: { width: 900, height: 700 } });
+    const errors: string[] = []; page.on("pageerror", error => errors.push(error.message));
+    await page.goto(`http://127.0.0.1:${server.port}/`);
+    const open = page.getByRole("button", { name: "Open 1Password", exact: true });
+    await open.waitFor({ timeout: 5_000 }).catch(async error => { throw new Error(`${String(error)}\nRenderer errors: ${JSON.stringify(errors)}\nVisible state: ${(await page.locator("body").innerText()).slice(0, 800)}`); });
+    expect(await page.locator("browser-action-list").count()).toBe(0);
+    await open.click();
+    expect(await page.evaluate(() => (window as unknown as { openedProviders: string[] }).openedProviders)).toEqual(["aeblfdkhhhdcdjpifhhbdiojplfjncoa"]);
+    for (const width of [900, 390]) {
+      await page.setViewportSize({ width, height: 700 });
+      expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+    }
+    expect(errors).toEqual([]);
+  } finally { await browser.close(); server?.stop(true); rmSync(root, { recursive: true, force: true }); }
+}, 30000);
+
 // Real App, emitted host, worker, SQLite and CLI. Test-only HTTP substitutes Electron IPC.
 test.skipIf(!process.env.CHATGPT_TEST_CHROME_EXECUTABLE)("whole launcher opens a persisted failure and keeps capture controls reachable on narrow layouts", async () => {
   const root = mkdtempSync(join(tmpdir(), "diagnostics-app-"));

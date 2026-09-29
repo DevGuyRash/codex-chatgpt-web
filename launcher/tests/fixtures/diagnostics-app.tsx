@@ -4,7 +4,7 @@ import type { DiagnosticsApi } from "../../../src/diagnostics/contracts";
 import "../../src/tokens.css";
 import "../../src/styles.css";
 
-const fixture = (window as unknown as { fixture: { language: Language; problem: DiagnosticProblem; upstreamReview?: { verified: boolean }; approvalReview?: boolean } }).fixture;
+const fixture = (window as unknown as { fixture: { language: Language; problem: DiagnosticProblem; upstreamReview?: { verified: boolean }; approvalReview?: boolean; extensionToolbar?: boolean } }).fixture;
 const call = async (path: string, body?: unknown, signal?: AbortSignal) => {
   const response = await fetch(`/diagnostics/${path}`, { method: body === undefined ? "GET" : "POST", body: body === undefined ? undefined : JSON.stringify(body), headers: { "content-type": "application/json" }, signal });
   if (!response.ok) throw new Error("Synthetic diagnostic bridge failed");
@@ -39,9 +39,19 @@ if (fixture.approvalReview) {
   snapshot.browser = { status: "running", message: "Approve the connector request in this ChatGPT tab", url: "https://chatgpt.com/", title: "ChatGPT", authenticated: true, visible: true, surfaceActive: true, loading: false, canGoBack: false, canGoForward: false, zoomFactor: 1, activeTabId: "approval-fixture", maxTabs: 5,
     tabs: [{ id: "approval-fixture", traceId: "fixture", title: "ChatGPT 1", status: "running", loading: false, active: true, closable: true, approvalPending: true }] };
 }
+if (fixture.extensionToolbar) {
+  snapshot.operation = null;
+  snapshot.state.browserInteractionMode = "automatic";
+  snapshot.passkeys = { installed: true, active: true, id: "aeblfdkhhhdcdjpifhhbdiojplfjncoa", version: "8.12.37.1" };
+  snapshot.browser = { status: "ready", message: "Ready", url: "https://chatgpt.com/", title: "ChatGPT", authenticated: true, visible: true, surfaceActive: true, loading: false, canGoBack: false, canGoForward: false, zoomFactor: 1, activeTabId: "home", maxTabs: 5,
+    tabs: [{ id: "home", traceId: null, title: "ChatGPT", status: "ready", loading: false, active: true, closable: false }] };
+}
 // Only presentation seams exercised here are substituted. Missing mutation APIs fail if invoked.
+const openedProviders: string[] = [];
+(window as unknown as { openedProviders: string[] }).openedProviders = openedProviders;
 window.codexWebLauncher = {
   diagnostics, snapshot: async () => snapshot, setBrowserSurfaceActive: async () => snapshot.browser, setBrowserBounds: async () => true,
+  openBrowserExtension: async id => { openedProviders.push(id); return true; },
   setSidebarState: async () => snapshot.state, windowState: async () => ({ fullScreen: false, maximized: false }),
   onStateChanged: subscribe, onBrowserState: subscribe, onConfigurationPreview: subscribe, onCodexRestartRequired: subscribe, onOperation: subscribe, onUpdateState: subscribe, onWindowStateChanged: subscribe,
 } as unknown as LauncherApi;

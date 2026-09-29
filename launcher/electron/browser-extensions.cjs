@@ -51,6 +51,8 @@ class BrowserExtensions {
     this.extensionsPath = path.join(userData, "browser-extensions");
     this.logger = logger;
     this.pages = new Set();
+    this.providerPopups = new Map();
+    this.openingPopups = new Map();
     this.api = new ElectronChromeExtensions({
       license: "GPL-3.0", session: browserSession,
       createTab: details => this.createTab(details),
@@ -206,6 +208,21 @@ class BrowserExtensions {
   }
 
   async open(id) {
+    const existing = this.providerPopups.get(id);
+    if (existing && !existing.isDestroyed()) {
+      existing.show();
+      existing.focus();
+      return true;
+    }
+    if (existing) this.providerPopups.delete(id);
+    if (this.openingPopups.has(id)) return this.openingPopups.get(id);
+    const opening = this.openProviderPopup(id);
+    this.openingPopups.set(id, opening);
+    try { return await opening; }
+    finally { if (this.openingPopups.get(id) === opening) this.openingPopups.delete(id); }
+  }
+
+  async openProviderPopup(id) {
     if (this.paused.has(id)) await this.resume(id);
     const extension = this.loaded.get(id);
     if (!CATALOG_BY_ID.has(id) || !extension) {
@@ -216,7 +233,10 @@ class BrowserExtensions {
       || popup.startsWith("/") || popup.split("/").includes("..")) {
       throw new Error("This extension has no supported popup; open it from the browser toolbar");
     }
-    await this.createWindow({ url: `chrome-extension://${id}/${popup}` });
+    const window = await this.createWindow({ url: `chrome-extension://${id}/${popup}` });
+    if (window.isDestroyed()) return true;
+    this.providerPopups.set(id, window);
+    window.once("closed", () => { if (this.providerPopups.get(id) === window) this.providerPopups.delete(id); });
     return true;
   }
 
@@ -236,6 +256,8 @@ class BrowserExtensions {
       if (!window.isDestroyed()) window.destroy();
     }
     this.pages.clear();
+    this.providerPopups.clear();
+    this.openingPopups.clear();
     this.paused.clear();
     this.memoryWarning = null;
   }

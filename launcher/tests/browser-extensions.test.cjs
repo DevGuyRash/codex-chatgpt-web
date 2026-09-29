@@ -14,6 +14,7 @@ function extensionFixture({ failLoad = false, isDevelopment = false, metricsStat
   const tabs = new Set();
   const windows = [];
   const events = [];
+  const focusCalls = [];
   class BrowserWindow extends EventEmitter {
     constructor(options) {
       super();
@@ -26,7 +27,7 @@ function extensionFixture({ failLoad = false, isDevelopment = false, metricsStat
     getBounds() { return { x: 0, y: 0, width: 920, height: 720 }; }
     setBounds() {}
     show() {}
-    focus() {}
+    focus() { focusCalls.push(this); }
     async loadURL() { if (failLoad) throw new Error("Extension document failed to load"); }
     close() { this.emit("close"); this.destroy(); }
     destroy() { if (this.destroyed) return; this.destroyed = true; this.emit("closed"); }
@@ -55,7 +56,7 @@ function extensionFixture({ failLoad = false, isDevelopment = false, metricsStat
       warn: (name, attributes) => events.push({ severity: "warn", name, attributes }),
     }, isDevelopment,
   });
-  return { extensions, browserSession, tabs, windows, events };
+  return { extensions, browserSession, tabs, windows, events, focusCalls };
 }
 
 test("high process working set is reported once per episode without attributing it to an extension", () => {
@@ -165,4 +166,26 @@ test("opening a paused provider resumes its reviewed worker before showing its p
     assert.equal(windows.length, 1);
     assert.equal(windows[0].isDestroyed(), false);
   } finally { extensions.destroy(); fs.rmSync(root, { recursive: true, force: true }); }
+});
+
+test("repeated toolbar opens focus one provider popup and release it on close", async () => {
+  const { extensions, windows, tabs, focusCalls } = extensionFixture();
+  const id = "aeblfdkhhhdcdjpifhhbdiojplfjncoa";
+  extensions.loaded.set(id, { id, version: "8.12.37.1", manifest: { action: { default_popup: "popup.html" } } });
+  try {
+    await Promise.all([extensions.open(id), extensions.open(id), extensions.open(id)]);
+    assert.equal(windows.length, 1);
+    assert.equal(tabs.size, 1);
+    await extensions.open(id);
+    assert.equal(windows.length, 1);
+    assert.ok(focusCalls.length >= 2);
+    windows[0].close();
+    assert.equal(tabs.size, 0);
+    assert.equal(extensions.providerPopups.size, 0);
+    await extensions.open(id);
+    assert.equal(windows.length, 2);
+    assert.equal(tabs.size, 1);
+  } finally { extensions.destroy(); }
+  assert.equal(tabs.size, 0);
+  assert.equal(extensions.providerPopups.size, 0);
 });

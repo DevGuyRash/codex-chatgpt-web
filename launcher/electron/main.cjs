@@ -463,6 +463,10 @@ function createWindow({ logger, stateStore, windowStatePath, startHidden }) {
     });
     return { action: "deny" };
   });
+  window.webContents.on("page-title-updated", event => {
+    event.preventDefault();
+    if (!window.isDestroyed()) window.setTitle(LAUNCHER_PROFILE.displayName);
+  });
   window.on("close", (event) => {
     if (quitting) return;
     event.preventDefault();

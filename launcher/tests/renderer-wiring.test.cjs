@@ -42,6 +42,10 @@ test("closing the launcher follows the persisted background-runtime preference",
   assert.match(appSource, /setPreference\("keepRunningOnClose", checked\)/);
 });
 
+test("renderer document titles cannot erase the distinct DEV window identity", () => {
+  assert.match(electronMain, /window\.webContents\.on\("page-title-updated", event => \{\s*event\.preventDefault\(\);\s*if \(!window\.isDestroyed\(\)\) window\.setTitle\(LAUNCHER_PROFILE\.displayName\);/);
+});
+
 test("a foreground launch request survives hidden startup until the launcher window is ready", () => {
   const showMainWindow = electronMain.slice(
     electronMain.indexOf("function showMainWindow()"),

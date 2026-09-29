@@ -4,7 +4,22 @@ import { once } from "node:events";
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { ownedProcessIdentity, requestIdleGoldenLauncherShutdown, startGoldenWorkspace, stopGoldenWorkspace, stopOwnedProcessGroup, verifyStoppedGoldenLauncher } from "../scripts/golden/workspace";
+import { setTimeout as wait } from "node:timers/promises";
+import { ownedProcessIdentity, requestIdleGoldenLauncherShutdown, startGoldenWorkspace, stopGoldenWorkspace, stopOwnedProcessGroup, verifyStoppedGoldenLauncher, type OwnedProcess } from "../scripts/golden/workspace";
+
+const orphanFixtureScript = `const { spawn } = await import("node:child_process"); const helper = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { stdio: "ignore" }); helper.once("spawn", () => { console.log(helper.pid); process.stdin.resume(); process.stdin.once("data", () => process.exit(0)); });`;
+async function stopFixtureHelper(owner?: OwnedProcess) {
+  if (!owner) return;
+  const live = ownedProcessIdentity(owner.pid);
+  if (!live) return;
+  if (live.start !== owner.start || live.executable !== owner.executable || live.group !== owner.group) throw new Error("Fixture helper identity changed before cleanup");
+  process.kill(owner.pid, "SIGTERM");
+  const deadline = Date.now() + 3_000;
+  while (ownedProcessIdentity(owner.pid)) {
+    if (Date.now() >= deadline) throw new Error("Fixture helper survived cleanup");
+    await wait(25);
+  }
+}
 
 test("idle launcher recovery retries only a typed no-effect busy refusal", async () => {
   let attempts = 0;
@@ -52,18 +67,19 @@ test.skipIf(process.platform !== "linux")("launcher recovery requires the record
 });
 
 test.skipIf(process.platform !== "linux")("a surviving helper prevents recovery even after its launcher leader exits", async () => {
-  const script = `const { spawn } = await import("node:child_process"); const helper = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { stdio: "ignore" }); helper.once("spawn", () => { console.log("ready"); process.stdin.resume(); process.stdin.once("data", () => process.exit(0)); });`;
-  const child = spawn(process.execPath, ["-e", script], { detached: true, stdio: ["pipe", "pipe", "ignore"] });
+  const child = spawn(process.execPath, ["-e", orphanFixtureScript], { detached: true, stdio: ["pipe", "pipe", "ignore"] });
   const closed = once(child, "close");
-  let group: number | undefined;
+  let helper: OwnedProcess | undefined;
   try {
-    await once(child.stdout, "data");
-    const prior = ownedProcessIdentity(child.pid!)!; group = prior.group;
+    const [data] = await once(child.stdout, "data");
+    const prior = ownedProcessIdentity(child.pid!)!;
+    helper = ownedProcessIdentity(Number(String(data).trim()));
+    expect(helper?.group).toBe(prior.group);
     child.stdin.write("exit"); await closed;
     expect(ownedProcessIdentity(prior.pid)).toBeUndefined();
     expect(() => verifyStoppedGoldenLauncher(prior)).toThrow("surviving members");
   } finally {
-    if (group) { try { process.kill(-group, "SIGTERM"); } catch {} }
+    await stopFixtureHelper(helper);
     child.kill("SIGTERM"); await closed;
   }
 });
@@ -95,19 +111,20 @@ test.skipIf(process.platform !== "linux")("stopped workspace shutdown preserves 
 });
 
 test.skipIf(process.platform !== "linux")("orphaned group cannot be signalled after its recorded leader exits", async () => {
-  const script = `const { spawn } = await import("node:child_process"); const helper = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { stdio: "ignore" }); helper.once("spawn", () => { console.log("ready"); process.stdin.resume(); process.stdin.once("data", () => process.exit(0)); });`;
-  const child = spawn(process.execPath, ["-e", script], { detached: true, stdio: ["pipe", "pipe", "ignore"] });
+  const child = spawn(process.execPath, ["-e", orphanFixtureScript], { detached: true, stdio: ["pipe", "pipe", "ignore"] });
   const closed = once(child, "close");
-  let group: number | undefined;
+  let helper: OwnedProcess | undefined;
   try {
-    await once(child.stdout, "data");
-    const owner = ownedProcessIdentity(child.pid!)!; group = owner.group;
+    const [data] = await once(child.stdout, "data");
+    const owner = ownedProcessIdentity(child.pid!)!;
+    helper = ownedProcessIdentity(Number(String(data).trim()));
+    expect(helper?.group).toBe(owner.group);
     child.stdin.write("exit");
     await closed;
     expect(ownedProcessIdentity(owner.pid)).toBeUndefined();
     await expect(stopOwnedProcessGroup(owner, 100)).rejects.toThrow("no verifiable leader");
   } finally {
-    if (group) { try { process.kill(-group, "SIGTERM"); } catch {} }
+    await stopFixtureHelper(helper);
     child.kill("SIGTERM"); await closed;
   }
 });

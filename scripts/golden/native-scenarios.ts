@@ -12,6 +12,14 @@ import { runTuiScenario } from "./tui-scenarios";
 
 type ObjectValue = Record<string, unknown>;
 const object = (value: unknown): value is ObjectValue => value !== null && typeof value === "object" && !Array.isArray(value);
+/** Codex may report a completed exec command through its chosen POSIX shell wrapper. */
+export function exactNativeCommand(value: unknown, expected: string): boolean {
+  if (typeof value !== "string") return false;
+  const command = value.trim();
+  if (command === expected) return true;
+  const wrapper = /^(?:(?:\/[A-Za-z0-9._+-]+)*\/)?(?:sh|bash|zsh)[ \t]+-(?:l)?c[ \t]+(['"])([\s\S]*)\1$/.exec(command);
+  return wrapper?.[2] === expected;
+}
 export interface NativeScenarioCheckpoint { native: OwnedProcess; threadId?: string; turnId?: string }
 export function ownedNativeActivity(frame: { direction: string; message: ObjectValue }, owner: { threadId?: string; turnId?: string }) {
   const params = object(frame.message.params) ? frame.message.params : undefined;
@@ -89,8 +97,7 @@ export async function runNativeScenario(options: {
         const tool = event.type === "item.completed" && item && ["command_execution", "file_change", "mcp_tool_call"].includes(String(item.type));
         if (tool) toolItems++;
         if (options.variant === "tool-failure" && event.type === "item.completed" && item?.type === "command_execution"
-          && item.exit_code === 17 && typeof item.command === "string"
-          && /^bash\s+input\/expected-failure\.sh$/.test(item.command.trim())
+          && item.exit_code === 17 && exactNativeCommand(item.command, `bash ${GOLDEN_RECOVERABLE_FAILURE_FILE}`)
           && typeof item.aggregated_output === "string" && item.aggregated_output.includes(GOLDEN_RECOVERABLE_FAILURE_MARKER)) {
           recoverableFailureCount++;
         }

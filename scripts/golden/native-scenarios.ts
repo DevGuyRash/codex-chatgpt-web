@@ -102,7 +102,7 @@ export async function runNativeScenario(options: {
           recoverableFailureCount++;
         }
         if (expectedLargeResult && event.type === "item.completed" && item?.type === "command_execution"
-          && typeof item.command === "string" && item.command.includes(GOLDEN_LARGE_TOOL_RESULT_FILE)) {
+          && exactNativeCommand(item.command, `bun ${GOLDEN_LARGE_TOOL_RESULT_FILE}`)) {
           largeResultInvocations++;
           if (item.exit_code === 0 && item.aggregated_output === expectedLargeResult) largeResultCount++;
         }

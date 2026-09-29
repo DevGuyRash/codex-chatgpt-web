@@ -93,11 +93,12 @@ import {spawnSync} from "node:child_process";
 import {writeFileSync} from "node:fs";
 let prompt="";process.stdin.on("data",chunk=>prompt+=chunk);process.stdin.on("end",()=>{
  writeFileSync(${JSON.stringify(promptPath)},prompt);
- const command="bun input/large-tool-result.ts";
+ const command=process.env.WRAPPED_COMMAND==="1"?"/usr/bin/zsh -c 'bun input/large-tool-result.ts'":"bun input/large-tool-result.ts";
  const run=spawnSync(process.execPath,["input/large-tool-result.ts"],{cwd:process.cwd(),encoding:"utf8",maxBuffer:1024*1024});
  const output=process.env.TRUNCATE==="1"?run.stdout.slice(0,1024):run.stdout;
  const send=value=>console.log(JSON.stringify(value));
  send({type:"thread.started",thread_id:"11111111-1111-7111-8111-111111111111"});send({type:"turn.started"});
+ if(process.env.DECOY==="1")send({type:"item.completed",item:{type:"command_execution",id:"mentioned-file",command:"cat input/large-tool-result.ts",exit_code:0,aggregated_output:"Inspected the fixture path"}});
  const item={type:"item.completed",item:{type:"command_execution",id:"large-result",command,exit_code:run.status,aggregated_output:output}};
  send(item);if(process.env.DUPLICATE==="1")send(item);
  send({type:"turn.completed"});
@@ -112,6 +113,10 @@ let prompt="";process.stdin.on("data",chunk=>prompt+=chunk);process.stdin.on("en
     expect(readFileSync(promptPath, "utf8")).toContain("max_output_tokens 20000");
     const truncated = await runNativeScenario({ ...options, env: { TRUNCATE: "1" } });
     expect("largeResultWitness" in truncated ? truncated.largeResultWitness : undefined).toMatchObject({ invocations: 1, count: 0 });
+    const decoy = await runNativeScenario({ ...options, env: { DECOY: "1" } });
+    expect("largeResultWitness" in decoy ? decoy.largeResultWitness : undefined).toMatchObject({ invocations: 1, count: 1 });
+    const wrapped = await runNativeScenario({ ...options, env: { WRAPPED_COMMAND: "1", DECOY: "1" } });
+    expect("largeResultWitness" in wrapped ? wrapped.largeResultWitness : undefined).toMatchObject({ invocations: 1, count: 1 });
     const duplicated = await runNativeScenario({ ...options, env: { DUPLICATE: "1" } });
     expect("largeResultWitness" in duplicated ? duplicated.largeResultWitness : undefined).toMatchObject({ invocations: 2, count: 2 });
     const missing = { ...workload, files: { ...workload.files, [GOLDEN_LARGE_TOOL_RESULT_FILE]: "changed" } };

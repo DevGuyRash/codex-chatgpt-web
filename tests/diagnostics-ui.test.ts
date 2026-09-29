@@ -128,7 +128,9 @@ test("foreground search reserves layout, delays cancellation, and background ref
     expect(await page.evaluate(() => {
       const state = window as unknown as { cancelSearchAppearedAt?: number; diagnosticsFixture: Control };
       return (state.cancelSearchAppearedAt ?? 0) - state.diagnosticsFixture.startedAt;
-    })).toBeGreaterThanOrEqual(300);
+    // Browser timers may fire just under the requested delay because setTimeout and
+    // performance.now use different clock precision. Preserve the user-visible delay contract.
+    })).toBeGreaterThanOrEqual(295);
     expect(await pause.boundingBox()).toEqual(before);
     await cancel.click();
     expect(await cancel.count()).toBe(0);

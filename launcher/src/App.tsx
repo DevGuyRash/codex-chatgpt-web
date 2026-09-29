@@ -1778,6 +1778,7 @@ function ExtensionSettings({
         <strong>{copy.extensionMemoryTitle}</strong>
         <p>{copy.extensionMemoryBody.replace("{amount}", String(extensions.memoryWarning.processWorkingSetMiB))}</p>
         <small><time dateTime={extensions.memoryWarning.observedAt}>{new Date(extensions.memoryWarning.observedAt).toLocaleString(language)}</time></small>
+        {extensions.memoryWarning.settledAt ? <small>{copy.extensionMemorySettled} <time dateTime={extensions.memoryWarning.settledAt}>{new Date(extensions.memoryWarning.settledAt).toLocaleString(language)}</time></small> : null}
       </div> : null}
       <div className="extension-list">
         {(extensions?.providers ?? []).map(provider => (

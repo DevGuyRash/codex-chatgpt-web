@@ -13,9 +13,10 @@ const ONE_PASSWORD_EXTENSION_ID = "aeblfdkhhhdcdjpifhhbdiojplfjncoa";
 const CATALOG_BY_ID = new Map(BROWSER_EXTENSION_CATALOG.map(provider => [provider.id, provider]));
 const UPDATE_URL = "https://update.googleapis.com/service/update2/json";
 const UPDATE_CHECK_INTERVAL_MS = 5 * 60 * 60_000;
-const MEMORY_SAMPLE_INTERVAL_MS = 30_000;
+const MEMORY_SAMPLE_INTERVAL_MS = 3_000;
 const HIGH_PROCESS_WORKING_SET_KIB = 1024 * 1024;
 const CLEARED_PROCESS_WORKING_SET_KIB = 768 * 1024;
+const RECENT_MEMORY_WARNING_MS = 10 * 60_000;
 
 function assertReviewedManifest(extensionPath, provider) {
   const manifest = JSON.parse(readFileSync(path.join(extensionPath, "manifest.json"), "utf8"));
@@ -83,7 +84,9 @@ class BrowserExtensions {
     this.memoryTimer?.unref?.();
   }
 
-  sampleMemory() {
+  sampleMemory(now = Date.now()) {
+    if (this.memoryWarning?.settledAt
+      && now - Date.parse(this.memoryWarning.settledAt) >= RECENT_MEMORY_WARNING_MS) this.memoryWarning = null;
     if ((!this.loaded.size && !this.memoryWarning) || typeof app?.getAppMetrics !== "function") return;
     let metrics;
     try { metrics = app.getAppMetrics(); }
@@ -101,24 +104,31 @@ class BrowserExtensions {
     if (!largest) return;
     const workingSetKiB = largest?.memory?.workingSetSize ?? 0;
     if (this.loaded.size && workingSetKiB >= HIGH_PROCESS_WORKING_SET_KIB) {
+      const previous = this.memoryWarning;
+      const newEpisode = !previous || !!previous.settledAt;
+      const observedMiB = Math.ceil(workingSetKiB / 1024);
+      const newPeak = newEpisode || observedMiB > previous.processWorkingSetMiB;
       const warning = {
-        processWorkingSetMiB: Math.ceil(workingSetKiB / 1024),
-        processType: typeof largest.type === "string" ? largest.type : "Unknown",
-        observedAt: new Date().toISOString(),
+        processWorkingSetMiB: newPeak ? observedMiB : previous.processWorkingSetMiB,
+        processType: newPeak ? typeof largest.type === "string" ? largest.type : "Unknown" : previous.processType,
+        observedAt: newPeak ? new Date(now).toISOString() : previous.observedAt,
+        settledAt: null,
       };
-      if (!this.memoryWarning) this.logger.warn("browser.high_process_memory", {
-        processWorkingSetMiB: warning.processWorkingSetMiB,
+      if (newEpisode) this.logger.warn("browser.high_process_memory", {
+        processWorkingSetMiB: observedMiB,
         processType: warning.processType,
         activeExtensionCount: this.loaded.size,
         attribution: "unproven",
       });
       this.memoryWarning = warning;
-    } else if (this.memoryWarning && workingSetKiB < CLEARED_PROCESS_WORKING_SET_KIB) {
+    } else if (this.memoryWarning && !this.memoryWarning.settledAt
+      && workingSetKiB < CLEARED_PROCESS_WORKING_SET_KIB) {
       this.logger.info("browser.high_process_memory_cleared", {
         processWorkingSetMiB: Math.ceil(workingSetKiB / 1024),
+        peakWorkingSetMiB: this.memoryWarning.processWorkingSetMiB,
         activeExtensionCount: this.loaded.size,
       });
-      this.memoryWarning = null;
+      this.memoryWarning = { ...this.memoryWarning, settledAt: new Date(now).toISOString() };
     }
   }
 

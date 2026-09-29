@@ -62,24 +62,32 @@ test("high process working set is reported once per episode without attributing 
   const metricsState = { current: [{ type: "Tab", memory: { workingSetSize: 1_150_000 } }] };
   const { extensions, events } = extensionFixture({ metricsState });
   const id = "aeblfdkhhhdcdjpifhhbdiojplfjncoa";
+  const started = Date.now();
   try {
-    extensions.sampleMemory();
+    extensions.sampleMemory(started);
     assert.equal(extensions.catalogStatus().memoryWarning, null);
     extensions.loaded.set(id, { id, version: "8.12.37.1" });
-    extensions.sampleMemory();
-    extensions.sampleMemory();
+    extensions.sampleMemory(started);
+    extensions.sampleMemory(started + 3_000);
     assert.ok(extensions.catalogStatus().memoryWarning.processWorkingSetMiB >= 1024);
     assert.equal(events.filter(event => event.name === "browser.high_process_memory").length, 1);
     assert.equal(events.find(event => event.name === "browser.high_process_memory").attributes.attribution, "unproven");
     metricsState.current = [{ type: "Tab", memory: { workingSetSize: 900_000 } }];
-    extensions.sampleMemory();
+    extensions.sampleMemory(started + 6_000);
     assert.ok(extensions.catalogStatus().memoryWarning);
     extensions.loaded.delete(id);
     assert.equal(extensions.catalogStatus().memoryWarning, null);
     metricsState.current = [{ type: "Tab", memory: { workingSetSize: 700_000 } }];
-    extensions.sampleMemory();
-    assert.equal(extensions.catalogStatus().memoryWarning, null);
+    extensions.sampleMemory(started + 9_000);
     assert.equal(events.filter(event => event.name === "browser.high_process_memory_cleared").length, 1);
+    assert.ok(extensions.memoryWarning.settledAt);
+    extensions.loaded.set(id, { id, version: "8.12.37.1" });
+    assert.ok(extensions.catalogStatus().memoryWarning.settledAt);
+    extensions.sampleMemory(started + 10 * 60_000 + 10_000);
+    assert.equal(extensions.catalogStatus().memoryWarning, null);
+    metricsState.current = [{ type: "Tab", memory: { workingSetSize: 1_350_000 } }];
+    extensions.sampleMemory(started + 10 * 60_000 + 13_000);
+    assert.equal(events.filter(event => event.name === "browser.high_process_memory").length, 2);
   } finally { extensions.destroy(); }
 });
 

@@ -105,6 +105,26 @@ test("document reservations are bounded and explicit abort releases their memory
   } finally { store.close(); rmSync(root, { recursive: true, force: true }); }
 });
 
+test("idle diagnostics maintenance releases abandoned document fragments without another capture request", () => {
+  const root = mkdtempSync(join(tmpdir(), "diagnostic-document-idle-expiry-"));
+  let now = Date.now();
+  const store = new DiagnosticStore(root, { now: () => now });
+  const campaignId = randomUUID(), traceId = "1".repeat(32), documentId = randomUUID();
+  try {
+    store.contentCapture({ action: "start", campaignId, acknowledged: true, until: now + 120000 });
+    store.contentCapture({ action: "bind", campaignId, traceId });
+    store.contentCapture({ action: "document-start", campaignId, traceId, documentId, category: "output", bytes: 1024 * 1024 });
+    store.contentCapture({ action: "document-part", campaignId, traceId, documentId, index: 0, text: "x".repeat(200000) });
+    now += 59000;
+    store.prune();
+    expect((store as any).contentUploads.size).toBe(1);
+    now += 2000;
+    store.prune();
+    expect((store as any).contentUploads.size).toBe(0);
+    expect(store.contentManifest(campaignId)).toMatchObject({ omitted: 1, attachments: [], documents: [{ id: documentId, status: "omitted" }] });
+  } finally { store.close(); rmSync(root, { recursive: true, force: true }); }
+});
+
 test("schema-three capture evidence survives the document migration", () => {
   const root = mkdtempSync(join(tmpdir(), "diagnostic-document-migration-"));
   let store = new DiagnosticStore(root);

@@ -7,6 +7,20 @@ export interface ContentUpload {
   campaignId: string; traceId: string; category: Exclude<ContentCategory, "screenshot">;
   expectedBytes: number; bytes: number; parts: string[]; expires: number;
 }
+
+/** Release abandoned in-memory fragments even when no further capture command arrives. */
+export function expireContentUploads(db: Database, uploads: Map<string, ContentUpload>, now: number): number {
+  const expired = [...uploads].filter(([, upload]) => upload.expires <= now);
+  if (!expired.length) return 0;
+  db.transaction(() => {
+    for (const [id, upload] of expired) {
+      const changed = db.query("UPDATE capture_documents SET status='omitted' WHERE id=? AND status='receiving'").run(id);
+      if (changed.changes) db.query("UPDATE capture_campaigns SET omitted=omitted+1 WHERE id=?").run(upload.campaignId);
+    }
+  }).immediate();
+  for (const [id] of expired) uploads.delete(id);
+  return expired.length;
+}
 export function* contentParts(text: string): Generator<string> {
   if (!text.length) { yield ""; return; }
   for (let start = 0; start < text.length;) {
@@ -134,12 +148,8 @@ function insertText(db: Database, campaignId: string, traceId: string, category:
 export function captureContent(db: Database, input: ContentCaptureCommand, now: number, uploads: Map<string, ContentUpload>, progress?: (phase: DiagnosticWritePhase) => void): unknown {
   progress?.("validation");
   const command = ContentCaptureCommandSchema.parse(input);
+  expireContentUploads(db, uploads, now);
   const applyCommand = () => {
-    for (const [id, upload] of uploads) if (upload.expires <= now) {
-      uploads.delete(id);
-      const changed = db.query("UPDATE capture_documents SET status='omitted' WHERE id=? AND status='receiving'").run(id);
-      if (changed.changes) db.query("UPDATE capture_campaigns SET omitted=omitted+1 WHERE id=?").run(upload.campaignId);
-    }
     if (command.action === "start") {
       if (command.until <= now || command.until > now + 7 * 86_400_000) throw new Error("Choose a capture horizon within seven days");
       db.query("INSERT INTO capture_campaigns(id,deadline,max_bytes) VALUES(?,?,?)").run(command.campaignId, command.until, command.maxBytes);

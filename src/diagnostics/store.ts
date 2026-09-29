@@ -5,7 +5,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { CaptureCommandSchema, CaptureStateSchema, DEFAULT_RETENTION, QuerySchema, TraceIdSchema, type CaptureWriteResult, type CaptureCommand, type CaptureState, type DiagnosticEvent, type DiagnosticQuery, type DiagnosticStatus, type QueryResult } from "./contracts";
 import { safeAttributes, safeLegacyAttributes, safeText, sanitizeEvent } from "./privacy";
 import { addEvidenceProjections, SCHEMA_VERSION } from "./schema";
-import { captureContent, contentManifest, contentReportScope, contentAttachments, contentAttachment, type ContentUpload } from "./content";
+import { captureContent, contentManifest, contentReportScope, contentAttachments, contentAttachment, expireContentUploads, type ContentUpload } from "./content";
 import type { ContentCaptureCommand, DiagnosticWritePhase } from "./contracts";
 
 export const STORE_FILENAME = "diagnostics.sqlite";
@@ -343,6 +343,7 @@ export class DiagnosticStore {
   }
   prune(): void {
     const db = this.writable();
+    if (this.contentUploads.size) expireContentUploads(db, this.contentUploads, this.now());
     db.query("DELETE FROM capture_campaigns WHERE deadline<=?").run(this.now() - this.retention.days * 86_400_000);
     const unpinned = "NOT EXISTS (SELECT 1 FROM capture_traces t JOIN capture_campaigns c ON c.id=t.campaign_id WHERE t.trace_id=events.trace_id AND c.finished=0 AND c.deadline>?)";
     this.removeRetained(`DELETE FROM events WHERE time<? AND ${unpinned}`, this.now() - this.retention.days * 86_400_000, this.now());

@@ -110,14 +110,25 @@ test("foreground search reserves layout, delays cancellation, and background ref
     await page.getByRole("listitem").first().waitFor();
     type Control = { hold: boolean; started: number; startedAt: number; cancelled: number; release(): void; activity(): void };
     const started = await page.evaluate(() => { const c = (window as unknown as { diagnosticsFixture: Control }).diagnosticsFixture; c.hold = true; return c.started; });
+    await page.evaluate(() => {
+      const state = window as unknown as { cancelSearchAppearedAt?: number };
+      const observer = new MutationObserver(() => {
+        if (!Array.from(document.querySelectorAll("button")).some(button => button.textContent?.trim() === "Cancel search")) return;
+        state.cancelSearchAppearedAt = performance.now();
+        observer.disconnect();
+      });
+      observer.observe(document.body, { childList: true, subtree: true });
+    });
     const pause = page.getByRole("button", { name: "Pause updates", exact: true });
     const before = await pause.boundingBox();
     await page.getByRole("searchbox", { name: "Search events" }).fill("stage");
     await page.waitForFunction(previous => (window as unknown as { diagnosticsFixture: Control }).diagnosticsFixture.started > previous, started);
     const cancel = page.getByRole("button", { name: "Cancel search", exact: true });
-    expect(await cancel.count()).toBe(0);
     await cancel.waitFor();
-    expect(await page.evaluate(() => performance.now() - (window as unknown as { diagnosticsFixture: Control }).diagnosticsFixture.startedAt)).toBeGreaterThanOrEqual(300);
+    expect(await page.evaluate(() => {
+      const state = window as unknown as { cancelSearchAppearedAt?: number; diagnosticsFixture: Control };
+      return (state.cancelSearchAppearedAt ?? 0) - state.diagnosticsFixture.startedAt;
+    })).toBeGreaterThanOrEqual(300);
     expect(await pause.boundingBox()).toEqual(before);
     await cancel.click();
     expect(await cancel.count()).toBe(0);

@@ -3,7 +3,7 @@ import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "nod
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { ActiveProgress } from "../scripts/golden/progress";
-import { SustainedProgressLedger } from "../scripts/golden/sustained-ledger";
+import { runSustainedBatchSequence, SustainedProgressLedger } from "../scripts/golden/sustained-ledger";
 
 const thread = "11111111-1111-7111-8111-111111111111";
 const cell = "a".repeat(64);
@@ -22,24 +22,44 @@ test("sustained credit survives restart without replaying a batch or duplicate p
   try {
     const ledger = new SustainedProgressLedger(path, cell, thread);
     const first = progress(1, 1_000_000);
-    expect(ledger.append({ batch: 0, threadId: thread, commit: "1".repeat(40), bundleSha256: "2".repeat(64), independentlyValid: true, progress: first })).toBe(20_000);
+    expect(ledger.append({ ...ledger.reserveBatch(), threadId: thread, commit: "1".repeat(40), bundleSha256: "2".repeat(64), independentlyValid: true, progress: first })).toBe(20_000);
     const restored = new SustainedProgressLedger(path, cell, thread);
     expect({ next: restored.nextBatch, credited: restored.activeProgressMs, complete: restored.minimumMet }).toEqual({ next: 1, credited: 20_000, complete: false });
-    expect(() => restored.append({ batch: 0, threadId: thread, commit: "3".repeat(40), bundleSha256: "4".repeat(64), independentlyValid: true, progress: progress(4, 1_030_000) })).toThrow("sequence changed");
-    expect(() => restored.append({ batch: 1, threadId: thread, commit: "3".repeat(40), bundleSha256: "4".repeat(64), independentlyValid: true, progress: progress(2, 1_030_000) })).toThrow("duplicated");
+    const secondReservation = restored.reserveBatch();
+    expect(() => restored.append({ ...secondReservation, batch: 0, threadId: thread, commit: "3".repeat(40), bundleSha256: "4".repeat(64), independentlyValid: true, progress: progress(4, 1_030_000) })).toThrow("not the exact reserved producer");
+    expect(() => restored.append({ ...secondReservation, threadId: thread, commit: "3".repeat(40), bundleSha256: "4".repeat(64), independentlyValid: true, progress: progress(2, 1_030_000) })).toThrow("duplicated");
     expect(restored.activeProgressMs).toBe(20_000);
-    expect(restored.append({ batch: 1, threadId: thread, commit: "3".repeat(40), bundleSha256: "4".repeat(64), independentlyValid: true, progress: progress(4, 1_030_000) })).toBe(40_000);
+    expect(restored.append({ ...secondReservation, threadId: thread, commit: "3".repeat(40), bundleSha256: "4".repeat(64), independentlyValid: true, progress: progress(4, 1_030_000) })).toBe(40_000);
     expect(new SustainedProgressLedger(path, cell, thread).activeProgressMs).toBe(40_000);
     const fractionalClock = new ActiveProgress();
     fractionalClock.observe(1_060_000.125, "tools", evidence(7));
     fractionalClock.observe(1_061_000.5, "tools", evidence(8));
     const fractional = fractionalClock.finishBatch(1_061_001, true);
-    expect(restored.append({ batch: 2, threadId: thread, commit: "5".repeat(40), bundleSha256: "6".repeat(64), independentlyValid: true, progress: fractional })).toBe(41_000.375);
+    expect(restored.append({ ...restored.reserveBatch(), threadId: thread, commit: "5".repeat(40), bundleSha256: "6".repeat(64), independentlyValid: true, progress: fractional })).toBe(41_000.375);
     expect(() => new SustainedProgressLedger(path, "d".repeat(64), thread)).toThrow("owner changed");
     const changed = JSON.parse(readFileSync(path, "utf8")); changed.entries[0].observedMs += 1000;
     writeFileSync(path, JSON.stringify(changed), { mode: 0o600 });
     expect(() => new SustainedProgressLedger(path, cell, thread)).toThrow("hash changed");
     chmodSync(path, 0o644);
     expect(() => new SustainedProgressLedger(path, cell, thread)).toThrow("not private and owned");
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("an uncertain sustained producer blocks restart without resubmission", async () => {
+  const root = mkdtempSync(join(tmpdir(), "golden-sustained-uncertain-")), path = join(root, "ledger.json");
+  try {
+    const ledger = new SustainedProgressLedger(path, cell, thread);
+    let submissions = 0;
+    await expect(runSustainedBatchSequence({ ledger, signal: new AbortController().signal, maxBatches: 2,
+      beforeBatch: async () => {},
+      executeBatch: async () => { submissions++; throw new Error("Native outcome unknown after Send"); },
+      checkpoint: async () => {},
+    })).rejects.toThrow("Native outcome unknown");
+    const restarted = new SustainedProgressLedger(path, cell, thread);
+    expect(restarted.pendingBatch).toBe(0);
+    await expect(runSustainedBatchSequence({ ledger: restarted, signal: new AbortController().signal, maxBatches: 2,
+      beforeBatch: async () => {}, executeBatch: async () => { submissions++; throw new Error("must not run"); }, checkpoint: async () => {},
+    })).rejects.toThrow("unresolved producer");
+    expect(submissions).toBe(1);
   } finally { rmSync(root, { recursive: true, force: true }); }
 });

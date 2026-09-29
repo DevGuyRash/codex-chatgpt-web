@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { createRequire } from "node:module";
 import { existsSync, lstatSync, readFileSync, realpathSync } from "node:fs";
 import { dirname, resolve } from "node:path";
@@ -22,7 +22,9 @@ const Entry = z.object({ batch: z.number().int().nonnegative(), threadId: Thread
   bundleSha256: Digest, observedMs: z.number().finite().nonnegative(), segments: z.array(Segment).max(100_000),
   previousHash: Digest, hash: Digest }).strict();
 const Ledger = z.object({ version: z.literal(1), cellId: Digest, threadId: Thread,
-  entries: z.array(Entry).max(10_000) }).strict();
+  entries: z.array(Entry).max(10_000),
+  pending: z.object({ batch: z.number().int().nonnegative(), reservationId: z.string().uuid(), previousHash: Digest }).strict().optional(),
+}).strict();
 const GENESIS = "0".repeat(64);
 const digest = (value: unknown) => createHash("sha256").update(JSON.stringify(value)).digest("hex");
 const key = (evidence: ProgressSegment["from"]) => `${evidence.traceId}:${evidence.kind}:${evidence.id}`;
@@ -70,17 +72,27 @@ export class SustainedProgressLedger {
       if (measured !== entry.observedMs) throw new Error("Sustained progress credit differs from its observed segments");
       prior = hash;
     }
+    if (this.state.pending && (this.state.pending.batch !== this.state.entries.length || this.state.pending.previousHash !== prior)) throw new Error("Sustained pending batch identity changed");
   }
 
-  append(input: { batch: number; threadId: string; commit: string; bundleSha256: string; independentlyValid: true;
+  reserveBatch(): { batch: number; reservationId: string } {
+    if (this.state.pending) throw new Error("Sustained batch has an unresolved producer; reconcile its effects before continuing");
+    const pending = { batch: this.nextBatch, reservationId: randomUUID(), previousHash: this.state.entries.at(-1)?.hash ?? GENESIS };
+    this.state = Ledger.parse({ ...this.state, pending });
+    writePrivateFileAtomic(this.path, `${JSON.stringify(this.state, null, 2)}\n`);
+    return { batch: pending.batch, reservationId: pending.reservationId };
+  }
+
+  append(input: { batch: number; reservationId: string; threadId: string; commit: string; bundleSha256: string; independentlyValid: true;
     progress: { observedMs: number; creditedMs: number; segments: ProgressSegment[] } }): number {
     if (input.independentlyValid !== true || input.progress.observedMs !== input.progress.creditedMs) throw new Error("Sustained batch has no independent credit");
+    if (!this.state.pending || this.state.pending.batch !== input.batch || this.state.pending.reservationId !== input.reservationId) throw new Error("Sustained batch is not the exact reserved producer");
     const previousHash = this.state.entries.at(-1)?.hash ?? GENESIS;
     const content = { batch: input.batch, threadId: input.threadId, commit: input.commit,
       bundleSha256: input.bundleSha256, observedMs: input.progress.observedMs,
       segments: input.progress.segments, previousHash };
     const entry = Entry.parse({ ...content, hash: digest(content) });
-    const next = Ledger.parse({ ...this.state, entries: [...this.state.entries, entry] });
+    const next = Ledger.parse({ ...this.state, entries: [...this.state.entries, entry], pending: undefined });
     const before = this.state;
     this.state = next;
     try {
@@ -91,6 +103,44 @@ export class SustainedProgressLedger {
   }
 
   get nextBatch(): number { return this.state.entries.length; }
+  get pendingBatch(): number | undefined { return this.state.pending?.batch; }
+  get threadId(): string { return this.state.threadId; }
   get activeProgressMs(): number { return this.state.entries.reduce((sum, entry) => sum + entry.observedMs, 0); }
   get minimumMet(): boolean { return this.activeProgressMs >= 2 * 60 * 60 * 1000; }
+}
+
+export interface ValidatedSustainedBatch {
+  threadId: string;
+  commit: string;
+  bundleSha256: string;
+  independentlyValid: true;
+  progress: { observedMs: number; creditedMs: number; segments: ProgressSegment[] };
+}
+
+/** The next batch is never retried by this owner after an uncertain producer result. */
+export async function runSustainedBatchSequence(input: {
+  ledger: SustainedProgressLedger;
+  signal: AbortSignal;
+  maxBatches: number;
+  beforeBatch(batch: number, signal: AbortSignal): Promise<void>;
+  executeBatch(batch: number, threadId: string, signal: AbortSignal): Promise<ValidatedSustainedBatch>;
+  checkpoint(batch: number, activeProgressMs: number): Promise<void>;
+}): Promise<{ status: "complete" | "batch-budget"; nextBatch: number; activeProgressMs: number }> {
+  if (!Number.isSafeInteger(input.maxBatches) || input.maxBatches < 1 || input.maxBatches > 256) throw new Error("Sustained sequence requires a bounded batch budget");
+  let completed = 0;
+  while (!input.ledger.minimumMet && completed < input.maxBatches) {
+    input.signal.throwIfAborted();
+    if (input.ledger.pendingBatch !== undefined) throw new Error("Sustained batch has an unresolved producer; no automatic replay is permitted");
+    const batch = input.ledger.nextBatch;
+    await input.beforeBatch(batch, input.signal);
+    input.signal.throwIfAborted();
+    const reservation = input.ledger.reserveBatch();
+    const result = await input.executeBatch(batch, input.ledger.threadId, input.signal);
+    input.signal.throwIfAborted();
+    const activeProgressMs = input.ledger.append({ batch, reservationId: reservation.reservationId, ...result });
+    await input.checkpoint(batch, activeProgressMs);
+    completed++;
+  }
+  return { status: input.ledger.minimumMet ? "complete" : "batch-budget",
+    nextBatch: input.ledger.nextBatch, activeProgressMs: input.ledger.activeProgressMs };
 }

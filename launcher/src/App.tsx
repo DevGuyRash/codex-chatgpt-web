@@ -60,6 +60,7 @@ export function App() {
   const [recoveryBusy, setRecoveryBusy] = useState(false);
   const [restartRequested, setRestartRequested] = useState(false);
   const [diagnosticsRequest, setDiagnosticsRequest] = useState<{ traceId?: string; request: number }>();
+  const [activeSurface, setActiveSurface] = useState<Surface>("browser");
   const openDiagnostics = (traceId?: string) => { setRecovery(null); setError(null); setDiagnosticsRequest({ traceId, request: Date.now() }); };
   const recover = (action: RecoveryAction, context?: { traceId?: string }) => {
     const traceId = context?.traceId ?? operation?.problem?.traceId;
@@ -183,6 +184,7 @@ export function App() {
             refreshSnapshot={() => { void api!.snapshot().then(setSnapshot).catch(cause => setError(messageOf(cause))); }}
             setError={setError}
             snapshot={snapshot}
+            onSurfaceChange={setActiveSurface}
             updateState={updateState}
           />
         )}
@@ -193,7 +195,7 @@ export function App() {
       <AnimatePresence>
         {error ? <ErrorToast copy={copy} language={language} message={error} problem={operation?.status === "failed" && (error === operation.message || error.endsWith(`: ${operation.message}`)) ? operation.problem : undefined} disabled={recoveryBusy || operation?.status === "running" || configurationPreview !== null} onDismiss={() => setError(null)} /> : null}
       </AnimatePresence>
-      <ActionFeedback language={language} />
+      <ActionFeedback language={language} suppressOverlay={snapshot.state.onboardingComplete && activeSurface === "activity"} />
     </div></RecoveryBusyContext.Provider></RecoveryContext.Provider></CodexRestartContext.Provider></DiagnosticsNavigationContext.Provider>
   );
 }
@@ -389,6 +391,7 @@ function LauncherShell({
   refreshSnapshot,
   setError,
   snapshot,
+  onSurfaceChange,
   updateState,
 }: {
   diagnosticsRequest?: { traceId?: string; request: number };
@@ -400,6 +403,7 @@ function LauncherShell({
   refreshSnapshot: () => void;
   setError: (error: string | null) => void;
   snapshot: LauncherSnapshot;
+  onSurfaceChange: (surface: Surface) => void;
   updateState: (state: LauncherState) => void;
 }) {
   const interactionSetupComplete = snapshot.state.coreSetupComplete === true
@@ -410,6 +414,7 @@ function LauncherShell({
   const [surface, setSurface] = useState<Surface>(
     firstRunZeroRiskSetup ? "mcp" : interactionSetupComplete ? "browser" : "setup",
   );
+  useEffect(() => onSurfaceChange(surface), [surface, onSurfaceChange]);
   const devProfile = snapshot.profile === "development";
   const [captureRequest, setCaptureRequest] = useState(0);
   useEffect(() => { if (diagnosticsRequest) setSurface("activity"); }, [diagnosticsRequest]);

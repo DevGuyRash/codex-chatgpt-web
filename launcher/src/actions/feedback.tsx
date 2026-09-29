@@ -44,7 +44,7 @@ const evidenceCopy = {
   ja: { browser: "ブラウザーテストに成功しました", checks: "診断チェックが完了しました", response: (count: number) => `${count} 文字の応答を受信しました。応答内容は診断に含まれません。`, counts: (total: number, issues: number) => `${total} 件のチェックが完了し、${issues} 件に対応が必要です。` },
 };
 
-export function ActionFeedback({ language, actionKeys, since = 0 }: { language: Language; actionKeys?: readonly string[]; since?: number }) {
+export function ActionFeedback({ language, actionKeys, since = 0, suppressOverlay = false }: { language: Language; actionKeys?: readonly string[]; since?: number; suppressOverlay?: boolean }) {
   const allNotices = useSyncExternalStore(launcherActions.subscribe, launcherActions.getSnapshot);
   const notices = actionKeys ? allNotices.filter(notice => actionKeys.includes(notice.key) && (notice.startedAt ?? notice.updatedAt ?? 0) >= since) : allNotices;
   const inline = Boolean(actionKeys);
@@ -52,6 +52,7 @@ export function ActionFeedback({ language, actionKeys, since = 0 }: { language: 
   const detailsId = inline ? `action-details-${id}` : "action-notice-details";
   const [selectedId, setSelectedId] = useState<string>();
   const [historyOpen, setHistoryOpen] = useState(false);
+  useEffect(() => { if (suppressOverlay) { setSelectedId(undefined); setHistoryOpen(false); } }, [suppressOverlay]);
   const [search, setSearch] = useState("");
   const [categories, setCategories] = useState<string[]>([]);
   const [outcomes, setOutcomes] = useState<string[]>([]);
@@ -94,7 +95,7 @@ export function ActionFeedback({ language, actionKeys, since = 0 }: { language: 
       && (!severities.length || severities.includes(policy.severity)) && (!components.length || components.includes(policy.component))
       && `${label(group.notice.key)} ${summary(group.notice)} ${group.notice.problem?.code ?? ""} ${group.notice.traceId ?? ""}`.toLocaleLowerCase().includes(search.toLocaleLowerCase());
   });
-  return <section ref={panelRef} className={`launcher-action-feedback${inline ? " is-inline" : ""}`} aria-label={extra.feedback}>
+  return <section ref={panelRef} className={`launcher-action-feedback${inline ? " is-inline" : ""}${suppressOverlay ? " is-suppressed" : ""}`} aria-label={extra.feedback} aria-hidden={suppressOverlay}>
     <div className="launcher-action-stack">{visible.map(group => <TimedNotice key={group.notice.id} group={group} dismiss={() => dismiss(group.notice)}>
       <div className="launcher-action-summary" role={group.notice.status === "failed" ? "alert" : "status"}>
         <strong><span className="notification-status-icon" aria-hidden="true">{group.notice.status === "failed" ? "!" : group.notice.status === "succeeded" ? "✓" : group.notice.status === "cancelled" ? "−" : "…"}</span>{label(group.notice.key)}{group.count > 1 ? ` × ${group.count}` : ""}</strong><p>{summary(group.notice)}</p>

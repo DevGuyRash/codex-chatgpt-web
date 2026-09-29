@@ -49,6 +49,7 @@ test.skipIf(!process.env.CHATGPT_TEST_CHROME_EXECUTABLE)("whole launcher opens a
       try { await page.getByRole("button", { name: openLabel, exact: true }).click(); }
       catch (error) { throw new Error(`${String(error)}\nRenderer errors: ${JSON.stringify(errors)}\nSynthetic visible state: ${(await page.locator("body").innerText()).slice(0, 4000)}`); }
       await page.getByRole("heading", { name: copy.timeline, exact: true }).waitFor();
+      expect(await page.locator(".launcher-action-feedback").evaluate(element => getComputedStyle(element).visibility)).toBe("hidden");
       try {
         const inspector = page.getByRole("complementary", { name: copy.detail });
         await inspector.getByText(problem.message, { exact: true }).first().waitFor();

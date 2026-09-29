@@ -7,7 +7,7 @@ const path = require("node:path");
 const os = require("node:os");
 const vm = require("node:vm");
 
-function extensionFixture({ failLoad = false, isDevelopment = false, metricsState = null } = {}) {
+function extensionFixture({ failLoad = false, isDevelopment = false, metricsState = null, navigationGate = null } = {}) {
   const filename = path.resolve(__dirname, "../electron/browser-extensions.cjs");
   const nativeRequire = createRequire(filename);
   const module = { exports: {} };
@@ -28,7 +28,7 @@ function extensionFixture({ failLoad = false, isDevelopment = false, metricsStat
     setBounds() {}
     show() {}
     focus() { focusCalls.push(this); }
-    async loadURL() { if (failLoad) throw new Error("Extension document failed to load"); }
+    async loadURL() { if (failLoad) throw new Error("Extension document failed to load"); await navigationGate?.(); }
     close() { this.emit("close"); this.destroy(); }
     destroy() { if (this.destroyed) return; this.destroyed = true; this.emit("closed"); }
   }
@@ -111,6 +111,18 @@ test("failed extension navigation cannot retain a window or tab", async () => {
   extensions.destroy();
 });
 
+test("shutdown during extension navigation releases its window and tab", async () => {
+  let finishNavigation;
+  const { extensions, tabs, windows } = extensionFixture({ navigationGate: () => new Promise(resolve => { finishNavigation = resolve; }) });
+  const opening = extensions.createWindow({ url: "https://example.com/" });
+  assert.equal(tabs.size, 1);
+  extensions.destroy();
+  finishNavigation();
+  await assert.rejects(opening, /closed during navigation/);
+  assert.equal(windows[0].isDestroyed(), true);
+  assert.equal(tabs.size, 0);
+});
+
 test("DEV extension windows use the distinct native icon", async () => {
   const { extensions, windows } = extensionFixture({ isDevelopment: true });
   await extensions.createWindow();
@@ -188,4 +200,32 @@ test("repeated toolbar opens focus one provider popup and release it on close", 
   } finally { extensions.destroy(); }
   assert.equal(tabs.size, 0);
   assert.equal(extensions.providerPopups.size, 0);
+});
+
+test("shutdown during a paused-provider resume cannot reopen its worker or popup", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "extension-shutdown-resume-"));
+  const id = "aeblfdkhhhdcdjpifhhbdiojplfjncoa";
+  const extensionPath = path.join(root, id, "8.12.37.1_0");
+  fs.mkdirSync(extensionPath, { recursive: true });
+  fs.writeFileSync(path.join(extensionPath, "manifest.json"), JSON.stringify({ manifest_version: 3, permissions: [], version: "8.12.37.1" }));
+  const { extensions, browserSession, windows, tabs } = extensionFixture();
+  let finishLoad;
+  const removed = [];
+  browserSession.extensions = {
+    removeExtension(value) { removed.push(value); },
+    loadExtension() { return new Promise(resolve => { finishLoad = resolve; }); },
+  };
+  const packageRecord = { id, path: extensionPath, version: "8.12.37.1", manifest: { action: { default_popup: "popup.html" } } };
+  extensions.loaded.set(id, packageRecord);
+  try {
+    extensions.pause(id);
+    const opening = extensions.open(id);
+    extensions.destroy();
+    finishLoad(packageRecord);
+    await assert.rejects(opening, /shutting down/);
+    assert.deepEqual(removed, [id, id]);
+    assert.equal(windows.length, 0);
+    assert.equal(tabs.size, 0);
+    await assert.rejects(extensions.createWindow(), /shutting down/);
+  } finally { extensions.destroy(); fs.rmSync(root, { recursive: true, force: true }); }
 });

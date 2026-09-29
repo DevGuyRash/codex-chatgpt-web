@@ -50,6 +50,7 @@ class BrowserExtensions {
     this.isDevelopment = isDevelopment;
     this.extensionsPath = path.join(userData, "browser-extensions");
     this.logger = logger;
+    this.destroyed = false;
     this.pages = new Set();
     this.providerPopups = new Map();
     this.openingPopups = new Map();
@@ -161,6 +162,7 @@ class BrowserExtensions {
   }
 
   async createWindow(details = {}) {
+    if (this.destroyed) throw new Error("Browser extensions are shutting down");
     const url = Array.isArray(details.url) ? details.url[0] : details.url;
     const destination = url ? this.extensionPageUrl(url) : null;
     const window = new BrowserWindow({
@@ -194,6 +196,7 @@ class BrowserExtensions {
     try {
       this.register(contents, window);
       if (destination) await window.loadURL(destination);
+      if (this.destroyed || window.isDestroyed()) throw new Error("Browser extension window closed during navigation");
     } catch (error) {
       if (!window.isDestroyed()) window.destroy();
       throw error;
@@ -208,6 +211,7 @@ class BrowserExtensions {
   }
 
   async open(id) {
+    if (this.destroyed) throw new Error("Browser extensions are shutting down");
     const existing = this.providerPopups.get(id);
     if (existing && !existing.isDestroyed()) {
       existing.show();
@@ -224,6 +228,7 @@ class BrowserExtensions {
 
   async openProviderPopup(id) {
     if (this.paused.has(id)) await this.resume(id);
+    if (this.destroyed) throw new Error("Browser extensions are shutting down");
     const extension = this.loaded.get(id);
     if (!CATALOG_BY_ID.has(id) || !extension) {
       throw new Error("Install this Chrome Web Store extension before opening it");
@@ -241,6 +246,8 @@ class BrowserExtensions {
   }
 
   destroy() {
+    if (this.destroyed) return;
+    this.destroyed = true;
     this.api.off("native-messaging-lifecycle", this.nativeHostLifecycle.observe);
     this.nativeHostLifecycle.destroy();
     if (this.autoCheckTimer) clearInterval(this.autoCheckTimer);
@@ -288,6 +295,7 @@ class BrowserExtensions {
 
   async restore() {
     for (const provider of BROWSER_EXTENSION_CATALOG) {
+      if (this.destroyed) break;
       try {
         let loaded = this.browserSession.extensions.getExtension(provider.id);
         if (!loaded) {
@@ -301,7 +309,12 @@ class BrowserExtensions {
             return { extensionPath, manifest: assertReviewedManifest(extensionPath, provider) };
           }).sort((left, right) => compareVersions(right.manifest.version, left.manifest.version));
           loaded = await this.browserSession.extensions.loadExtension(reviewed[0].extensionPath);
+          if (this.destroyed) {
+            this.browserSession.extensions.removeExtension(loaded.id);
+            break;
+          }
         }
+        if (this.destroyed) break;
         if (loaded.id !== provider.id) {
           this.browserSession.extensions.removeExtension(loaded.id);
           throw new Error("The installed Chrome Web Store identity does not match");
@@ -309,12 +322,12 @@ class BrowserExtensions {
         this.loaded.set(provider.id, loaded);
         this.logger.info("browser.extension_restored", { id: loaded.id, version: loaded.version });
       } catch (error) {
-        this.logger.warn("browser.extension_restore_failed", {
+        if (!this.destroyed) this.logger.warn("browser.extension_restore_failed", {
           id: provider.id, errorType: error?.name || "Error",
         });
       }
     }
-    this.startAutoUpdateChecks();
+    if (!this.destroyed) this.startAutoUpdateChecks();
     return this.status();
   }
 
@@ -324,6 +337,7 @@ class BrowserExtensions {
   }
 
   async install(id) {
+    if (this.destroyed) throw new Error("Browser extensions are shutting down");
     const provider = CATALOG_BY_ID.get(id);
     if (!provider) throw new Error("Choose an extension from the official Chrome Web Store catalog");
     if (this.loaded.has(id)) return this.catalogStatus();
@@ -331,8 +345,13 @@ class BrowserExtensions {
     if (this.installing.has(id)) return this.installing.get(id);
     const operation = (async () => {
       const extensionPath = await downloadExtension(id, this.extensionsPath);
+      if (this.destroyed) throw new Error("Browser extensions are shutting down");
       assertReviewedManifest(extensionPath, provider);
       const loaded = await this.browserSession.extensions.loadExtension(extensionPath);
+      if (this.destroyed) {
+        this.browserSession.extensions.removeExtension(loaded.id);
+        throw new Error("Browser extensions are shutting down");
+      }
       if (loaded.id !== id) {
         this.browserSession.extensions.removeExtension(loaded.id);
         throw new Error("The downloaded Chrome Web Store identity does not match");
@@ -364,6 +383,7 @@ class BrowserExtensions {
   }
 
   async resume(id) {
+    if (this.destroyed) throw new Error("Browser extensions are shutting down");
     if (this.loaded.has(id)) return this.catalogStatus();
     if (this.installing.has(id)) return this.installing.get(id);
     const provider = CATALOG_BY_ID.get(id), previous = this.paused.get(id);
@@ -372,6 +392,10 @@ class BrowserExtensions {
       const manifest = assertReviewedManifest(previous.path, provider);
       if (manifest.version !== previous.version) throw new Error("The paused extension version changed; review it before resuming");
       const loaded = await this.browserSession.extensions.loadExtension(previous.path);
+      if (this.destroyed) {
+        this.browserSession.extensions.removeExtension(loaded.id);
+        throw new Error("Browser extensions are shutting down");
+      }
       if (loaded.id !== id || loaded.version !== previous.version) {
         this.browserSession.extensions.removeExtension(loaded.id);
         throw new Error("The resumed Chrome Web Store identity or version does not match");
@@ -387,10 +411,11 @@ class BrowserExtensions {
   }
 
   startAutoUpdateChecks() {
+    if (this.destroyed) return;
     if (this.autoCheckTimer) return;
-    const check = () => { void this.checkUpdates().catch(error => this.logger.warn(
-      "browser.extension_update_check_failed", { errorType: error?.name || "Error" },
-    )); };
+    const check = () => { void this.checkUpdates().catch(error => {
+      if (!this.destroyed) this.logger.warn("browser.extension_update_check_failed", { errorType: error?.name || "Error" });
+    }); };
     this.initialCheckTimer = setTimeout(check, 60_000);
     this.initialCheckTimer.unref?.();
     this.autoCheckTimer = setInterval(check, UPDATE_CHECK_INTERVAL_MS);
@@ -398,6 +423,7 @@ class BrowserExtensions {
   }
 
   async checkUpdates() {
+    if (this.destroyed) throw new Error("Browser extensions are shutting down");
     if (this.checkingUpdates) return this.checkingUpdates;
     const operation = (async () => {
       const installed = BROWSER_EXTENSION_CATALOG.filter(provider => this.loaded.has(provider.id) || this.paused.has(provider.id));
@@ -438,6 +464,7 @@ class BrowserExtensions {
         chunks.push(Buffer.from(part.value));
       }
       const raw = Buffer.concat(chunks, bytes).toString("utf8");
+      if (this.destroyed) throw new Error("Browser extensions are shutting down");
       const prefix = ")]}'\n";
       if (!raw.startsWith(prefix)) {
         throw new Error("The Chrome Web Store returned an unsupported update response");
@@ -463,11 +490,13 @@ class BrowserExtensions {
   }
 
   async update(id) {
+    if (this.destroyed) throw new Error("Browser extensions are shutting down");
     const provider = CATALOG_BY_ID.get(id);
     const old = this.loaded.get(id);
     if (!provider || !old) throw new Error("Install this Chrome Web Store extension before updating it");
     if (!this.availableUpdates.has(id)) return this.catalogStatus();
     const extensionPath = await downloadExtension(id, this.extensionsPath);
+    if (this.destroyed) throw new Error("Browser extensions are shutting down");
     const manifest = assertReviewedManifest(extensionPath, provider);
     if (compareVersions(old.version, manifest.version) >= 0) {
       this.availableUpdates.delete(id);
@@ -476,6 +505,10 @@ class BrowserExtensions {
     this.browserSession.extensions.removeExtension(id);
     try {
       const loaded = await this.browserSession.extensions.loadExtension(extensionPath);
+      if (this.destroyed) {
+        this.browserSession.extensions.removeExtension(loaded.id);
+        throw new Error("Browser extensions are shutting down");
+      }
       if (loaded.id !== id) {
         this.browserSession.extensions.removeExtension(loaded.id);
         throw new Error("The updated Chrome Web Store identity does not match");
@@ -485,9 +518,11 @@ class BrowserExtensions {
       this.logger.info("browser.extension_updated", { id, previousVersion: old.version, version: loaded.version });
       return this.catalogStatus();
     } catch (error) {
+      if (this.destroyed) throw error;
       try {
         const restored = await this.browserSession.extensions.loadExtension(old.path);
-        if (restored.id === id) this.loaded.set(id, restored);
+        if (this.destroyed) this.browserSession.extensions.removeExtension(restored.id);
+        else if (restored.id === id) this.loaded.set(id, restored);
       } catch (rollbackError) {
         this.loaded.delete(id);
         this.logger.warn("browser.extension_update_rollback_failed", {

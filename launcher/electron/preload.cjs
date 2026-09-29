@@ -2,9 +2,6 @@ const { contextBridge, ipcRenderer } = require("electron");
 const { unwrapDiagnosticResult } = require("../../src/diagnostics/request-error.ts");
 const invoke = (...args) => ipcRenderer.invoke(...args).then(unwrapDiagnosticResult);
 const { createDiagnosticsBridge } = require("../diagnostics/preload.ts");
-const { injectBrowserAction } = require("electron-chrome-extensions/browser-action");
-
-injectBrowserAction();
 
 function subscription(channel, listener) {
   const wrapped = (_event, value) => listener(value);

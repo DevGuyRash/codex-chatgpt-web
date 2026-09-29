@@ -750,11 +750,18 @@ code {
   background: rgb(39 147 95 / 12%);
   color: #81ccad;
   font-size: var(--text-xs);
+  border: 0;
+  cursor: pointer;
+  white-space: nowrap;
 }
 
-.browser-provider-ready browser-action-list {
-  min-width: 28px;
-  min-height: 28px;
+.browser-provider-ready:hover:not(:disabled) {
+  background: rgb(39 147 95 / 20%);
+}
+
+.browser-provider-ready:disabled {
+  cursor: default;
+  opacity: 0.7;
 }
 
 .browser-loading-line {

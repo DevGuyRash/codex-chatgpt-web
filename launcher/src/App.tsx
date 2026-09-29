@@ -1,6 +1,5 @@
 import { AnimatePresence, motion } from "motion/react";
 import {
-  createElement,
   useCallback,
   useEffect,
   useLayoutEffect,
@@ -736,7 +735,6 @@ function LauncherShell({
                 interactionMode={snapshot.state.browserInteractionMode}
                 operation={operation}
                 passkeys={snapshot.passkeys}
-                browserPartition={snapshot.browserPartition}
                 platform={snapshot.platform}
                 setError={setError}
                 onPasskeysChanged={refreshSnapshot}
@@ -896,7 +894,6 @@ function BrowserSurface({
   interactionMode,
   operation,
   passkeys,
-  browserPartition,
   platform,
   setError,
   onPasskeysChanged,
@@ -907,7 +904,6 @@ function BrowserSurface({
   interactionMode: BrowserInteractionMode;
   operation: OperationState | null;
   passkeys?: LauncherSnapshot["passkeys"];
-  browserPartition?: string;
   platform: string;
   setError: (error: string | null) => void;
   onPasskeysChanged: () => void;
@@ -988,6 +984,14 @@ function BrowserSurface({
       await api!.resumeBrowserExtension(passkeys.id);
       onPasskeysChanged();
     } catch (cause) { setError(messageOf(cause)); }
+    finally { setProviderBusy(false); }
+  };
+  const openOnePassword = async () => {
+    if (providerBusy || !passkeys?.id) return;
+    setProviderBusy(true);
+    setError(null);
+    try { await api!.openBrowserExtension(passkeys.id); }
+    catch (cause) { setError(messageOf(cause)); }
     finally { setProviderBusy(false); }
   };
   const continuePasskeyLogin = async () => {
@@ -1102,10 +1106,9 @@ function BrowserSurface({
           <button className="toolbar-text-button" disabled={providerBusy || operation?.status === "running"} onClick={() => void resumeOnePassword()} type="button">
             {copy.extensionResume}
           </button>
-        ) : <span className="browser-provider-ready">
-          {browserPartition ? createElement("browser-action-list", { partition: browserPartition, alignment: "right" }) : null}
-          <span>{copy.onePasswordReady}</span>
-        </span>}
+        ) : <button className="browser-provider-ready" disabled={providerBusy} onClick={() => void openOnePassword()} title={copy.onePasswordReady} type="button">
+          {copy.onePasswordOpen}
+        </button>}
         <button className="toolbar-text-button" onClick={() => void toggle()} type="button">
           {visible ? copy.hideBrowser : copy.openChatgpt}
         </button>

@@ -20,6 +20,7 @@ const {
 } = require("electron");
 const { BrowserHost, navigationErrorForLog } = require("./browser-host.cjs");
 const { BrowserExtensions } = require("./browser-extensions.cjs");
+const { correlateFailedOperation } = require("./operation-problem.cjs");
 const { BROWSER_EXTENSION_CATALOG } = require("./browser-extension-catalog.cjs");
 const { ElectronChromeExtensions } = require("electron-chrome-extensions");
 const { WebAuthnPrompts } = require("./webauthn-prompts.cjs");
@@ -187,7 +188,7 @@ function send(channel, value) {
 }
 
 function publishOperation(operation) {
-  if (operation.status === "failed" && !operation.problem) operation = { ...operation, problem: require("./problems.cjs").problemFor(operation) };
+  operation = correlateFailedOperation(operation, diagnosticsLogger?.currentContext?.());
   lastOperation = operation;
   send("launcher:operation", operation);
 }

@@ -245,7 +245,7 @@ export async function selectLauncherPage(
       throw new DOMException("Launcher browser connection aborted", "AbortError");
     }
     const candidates = browser.contexts().flatMap(context => context.pages().map(page => ({ context, page })));
-    const inspected = await Promise.all(candidates.map(async candidate => {
+    const inspection = Promise.all(candidates.map(async candidate => {
       const session = await candidate.context.newCDPSession(candidate.page).catch(() => undefined);
       if (!session) return { ...candidate, targetId: undefined };
       try {
@@ -257,6 +257,24 @@ export async function selectLauncherPage(
         await session.detach().catch(() => {});
       }
     }));
+    let probeTimer: ReturnType<typeof setTimeout> | undefined;
+    let abortProbe: (() => void) | undefined;
+    const probeDeadline = Math.min(5_000, Math.max(1, deadline - Date.now()));
+    const stopped = new Promise<never>((_resolve, reject) => {
+      probeTimer = setTimeout(() => reject(new DiagnosticError({
+        code: "launcher_target_inspection_timeout",
+        message: "The launcher CDP target inspection did not settle within its bounded probe",
+        origin: "launcher", stage: "browser_page", retryable: true,
+      })), probeDeadline);
+      abortProbe = () => reject(new DOMException("Launcher browser connection aborted", "AbortError"));
+      abortSignal?.addEventListener("abort", abortProbe, { once: true });
+    });
+    let inspected: Awaited<typeof inspection>;
+    try { inspected = await Promise.race([inspection, stopped]); }
+    finally {
+      if (probeTimer) clearTimeout(probeTimer);
+      if (abortProbe) abortSignal?.removeEventListener("abort", abortProbe);
+    }
     const owned = inspected.filter(candidate => candidate.targetId === targetId);
     if (owned.length === 1) {
       return { context: owned[0].context, page: owned[0].page };
@@ -336,10 +354,12 @@ export class LauncherBrowserConnectionPool {
 
   private async disconnect(browser: Browser): Promise<void> {
     if (browser.isConnected()) await browser.close();
+    if (browser.isConnected()) throw new Error("The stale launcher CDP transport did not confirm disconnection");
   }
 
   async acquire(descriptorPath: string, timeoutMs: number, surfaceId: string, signal?: AbortSignal): Promise<LauncherBrowserConnection> {
     signal?.throwIfAborted();
+    const startedAt = Date.now();
     const descriptor = this.operations.read(descriptorPath);
     while (this.idle.length) {
       const previous = this.idle.pop()!;
@@ -355,6 +375,14 @@ export class LauncherBrowserConnectionPool {
         // A selected page may have closed while it was idle. Do not place a possibly stale
         // transport back in the pool or create a competing connection before it is released.
         await this.disconnect(previous.browser);
+        if (error instanceof DiagnosticError && error.code === "launcher_target_inspection_timeout") {
+          signal?.throwIfAborted();
+          const current = this.operations.read(descriptorPath);
+          if (this.sameLauncher(descriptor, current)
+            && current.surfaceTargets[surfaceId] === descriptor.surfaceTargets[surfaceId]) {
+            return this.operations.connect(descriptorPath, Math.max(1, timeoutMs - (Date.now() - startedAt)), surfaceId, signal);
+          }
+        }
         throw error;
       }
     }

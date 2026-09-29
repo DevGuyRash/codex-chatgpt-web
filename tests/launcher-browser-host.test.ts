@@ -25,6 +25,7 @@ import {
 } from "../src/launcher-browser-host";
 import type { Browser, BrowserContext, Page } from "playwright-core";
 import { Diagnostics } from "../src/diagnostics/instrumentation";
+import { DiagnosticError } from "../src/diagnostics/problems";
 import { runtimeDiagnostics, setRuntimeDiagnostics } from "../src/diagnostics/runtime";
 
 const roots: string[] = [];
@@ -453,6 +454,66 @@ test("launcher page selection stops immediately when acquisition is aborted", as
     descriptor.surfaceId,
     controller.signal,
   )).rejects.toMatchObject({ name: "AbortError" });
+});
+
+test("a stalled CDP target probe has a typed inner deadline", async () => {
+  const descriptor = readLauncherBrowserHostDescriptor(descriptorFile());
+  const page = {} as Page;
+  const context = { pages: () => [page], newCDPSession: () => new Promise(() => {}) } as unknown as BrowserContext;
+  const browser = { contexts: () => [context] } as unknown as Browser;
+  await expect(selectLauncherPage(browser, descriptor, 50, descriptor.surfaceId)).rejects.toMatchObject({
+    code: "launcher_target_inspection_timeout", problem: { stage: "browser_page", retryable: true },
+  });
+});
+
+test("a stale idle CDP probe reconnects only after confirmed close and unchanged target ownership", async () => {
+  const original = readLauncherBrowserHostDescriptor(descriptorFile());
+  let current = original, connects = 0, closes = 0, selects = 0, connected = true;
+  const browser = { isConnected: () => connected, close: async () => { connected = false; closes++; } } as unknown as Browser;
+  const pool = new LauncherBrowserConnectionPool(2, {
+    read: () => current,
+    connect: async () => {
+      connects++;
+      return { descriptor: current, browser: connects === 1 ? browser : { isConnected: () => true, close: async () => {} } as unknown as Browser,
+        context: {} as BrowserContext, page: {} as Page };
+    },
+    select: async () => { selects++; throw new DiagnosticError({ code: "launcher_target_inspection_timeout", message: "stale probe", origin: "launcher", stage: "browser_page", retryable: true }); },
+  });
+  const first = await pool.acquire("owned", 1000, original.surfaceId);
+  await pool.release(first, true, "owned");
+  const rebound = await pool.acquire("owned", 1000, original.surfaceId);
+  expect({ connects, closes, selects }).toEqual({ connects: 2, closes: 1, selects: 1 });
+  expect(rebound.browser).not.toBe(first.browser);
+  await pool.close();
+
+  connected = true; connects = 0; closes = 0; selects = 0;
+  const changed = new LauncherBrowserConnectionPool(2, {
+    read: () => current,
+    connect: async () => { connects++; return { descriptor: current, browser, context: {} as BrowserContext, page: {} as Page }; },
+    select: async () => {
+      selects++;
+      current = { ...original, surfaceTargets: { ...original.surfaceTargets, [original.surfaceId]: "replacement-target" } };
+      throw new DiagnosticError({ code: "launcher_target_inspection_timeout", message: "stale probe", origin: "launcher", stage: "browser_page", retryable: true });
+    },
+  });
+  const owned = await changed.acquire("owned", 1000, original.surfaceId);
+  await changed.release(owned, true, "owned");
+  await expect(changed.acquire("owned", 1000, original.surfaceId)).rejects.toMatchObject({ code: "launcher_target_inspection_timeout" });
+  expect({ connects, closes, selects }).toEqual({ connects: 1, closes: 1, selects: 1 });
+
+  connected = true; connects = 0; closes = 0; selects = 0; current = original;
+  const unclosed = new LauncherBrowserConnectionPool(2, {
+    read: () => current,
+    connect: async () => { connects++; return { descriptor: current, browser: {
+      isConnected: () => connected,
+      close: async () => { closes++; },
+    } as unknown as Browser, context: {} as BrowserContext, page: {} as Page }; },
+    select: async () => { selects++; throw new DiagnosticError({ code: "launcher_target_inspection_timeout", message: "stale probe", origin: "launcher", stage: "browser_page", retryable: true }); },
+  });
+  const stale = await unclosed.acquire("owned", 1000, original.surfaceId);
+  await unclosed.release(stale, true, "owned");
+  await expect(unclosed.acquire("owned", 1000, original.surfaceId)).rejects.toThrow("did not confirm disconnection");
+  expect({ connects, closes, selects }).toEqual({ connects: 1, closes: 1, selects: 1 });
 });
 
 test("idle launcher CDP leases are reused exclusively and stale owners are disconnected", async () => {

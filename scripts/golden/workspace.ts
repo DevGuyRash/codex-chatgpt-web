@@ -15,6 +15,11 @@ const repository = resolve(import.meta.dir, "../..");
 const { reviewedElectronBinary } = require(resolve(repository, "launcher/scripts/native-electron.cjs")) as {
   reviewedElectronBinary(selection?: { executable?: string; recordPath?: string }): { executable: string; recordPath: string };
 };
+const { writeWindowState } = require(resolve(repository, "launcher/electron/window-state.cjs")) as {
+  writeWindowState(path: string, state: { bounds: { x: number; y: number; width: number; height: number }; maximized: boolean; fullscreen: boolean }): void;
+};
+const GOLDEN_DISPLAY = { width: 1440, height: 960 } as const;
+const GOLDEN_WINDOW_MARGIN = 20;
 export interface OwnedProcess { pid: number; start: string; group: number; executable: string }
 export interface GoldenWorkspace {
   version: 1; root: string; campaignId: string; display: string; viewerUrl: string;
@@ -149,6 +154,13 @@ export async function startGoldenWorkspace(rootInput: string, toolsInput = join(
   const children: ChildProcess[] = [];
   const codexHome = join(root, "codex"), runtimeHome = join(root, "runtime"), launcherData = join(root, "launcher");
   for (const path of [codexHome, runtimeHome, launcherData, join(root, "logs")]) mkdirSync(path, { recursive: true, mode: 0o700 });
+  const windowStatePath = join(launcherData, "window-state.json");
+  if (!existsSync(windowStatePath)) writeWindowState(windowStatePath, {
+    bounds: { x: GOLDEN_WINDOW_MARGIN, y: GOLDEN_WINDOW_MARGIN,
+      width: GOLDEN_DISPLAY.width - 2 * GOLDEN_WINDOW_MARGIN,
+      height: GOLDEN_DISPLAY.height - 2 * GOLDEN_WINDOW_MARGIN },
+    maximized: false, fullscreen: false,
+  });
   const campaignId = randomUUID(), xauthority = join(root, "xauthority"), socket = join(root, "viewer.sock");
   if (Buffer.byteLength(socket) >= 104) throw new Error("Choose a shorter workspace path for the private viewer socket");
   const displayNumber = Array.from({ length: 1000 }, (_, index) => 1900 + index).find(index => !existsSync(`/tmp/.X11-unix/X${index}`) && !existsSync(`/tmp/.X${index}-lock`));
@@ -172,7 +184,7 @@ export async function startGoldenWorkspace(rootInput: string, toolsInput = join(
     return child;
   };
   try {
-    const desktop = await start("display", xvfb, [display, "-screen", "0", "1440x960x24", "-nolisten", "tcp", "-auth", xauthority]);
+    const desktop = await start("display", xvfb, [display, "-screen", "0", `${GOLDEN_DISPLAY.width}x${GOLDEN_DISPLAY.height}x24`, "-nolisten", "tcp", "-auth", xauthority]);
     await until(() => Bun.spawnSync([xdpyinfo, "-display", display], { env, stdout: "ignore", stderr: "ignore" }).exitCode === 0, desktop);
     const exporter = await start("viewer-socket", vnc, ["-norc", "-display", display, "-auth", xauthority, "-unixsock", socket, "-rfbport", "0", "-no6", "-forever", "-shared", "-nopw", "-noxdamage", "-nosel", "-quiet"], env, true);
     await until(() => existsSync(socket), exporter);
@@ -318,7 +330,7 @@ export async function resumeGoldenWorkspace(rootInput: string, selection?: { exe
     return child;
   };
   try {
-    const desktop = await start("display", xvfb, [state.display, "-screen", "0", "1440x960x24", "-nolisten", "tcp", "-auth", xauthority]);
+    const desktop = await start("display", xvfb, [state.display, "-screen", "0", `${GOLDEN_DISPLAY.width}x${GOLDEN_DISPLAY.height}x24`, "-nolisten", "tcp", "-auth", xauthority]);
     await until(() => Bun.spawnSync([xdpyinfo, "-display", state.display], { env, stdout: "ignore", stderr: "ignore" }).exitCode === 0, desktop);
     const exporter = await start("viewer-socket", vnc, ["-norc", "-display", state.display, "-auth", xauthority, "-unixsock", socket, "-rfbport", "0", "-no6", "-forever", "-shared", "-nopw", "-noxdamage", "-nosel", "-quiet"], env, true);
     await until(() => existsSync(socket), exporter);

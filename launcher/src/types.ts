@@ -66,6 +66,7 @@ export interface BrowserExtensionState {
   providers: BrowserExtensionProvider[];
   checking: boolean;
   lastCheckedAt: string | null;
+  memoryWarning?: { processWorkingSetMiB: number; processType: string; observedAt: string } | null;
 }
 
 export interface BrowserTabState {

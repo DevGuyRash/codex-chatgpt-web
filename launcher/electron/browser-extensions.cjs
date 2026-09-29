@@ -13,6 +13,9 @@ const ONE_PASSWORD_EXTENSION_ID = "aeblfdkhhhdcdjpifhhbdiojplfjncoa";
 const CATALOG_BY_ID = new Map(BROWSER_EXTENSION_CATALOG.map(provider => [provider.id, provider]));
 const UPDATE_URL = "https://update.googleapis.com/service/update2/json";
 const UPDATE_CHECK_INTERVAL_MS = 5 * 60 * 60_000;
+const MEMORY_SAMPLE_INTERVAL_MS = 30_000;
+const HIGH_PROCESS_WORKING_SET_KIB = 1024 * 1024;
+const CLEARED_PROCESS_WORKING_SET_KIB = 768 * 1024;
 
 function assertReviewedManifest(extensionPath, provider) {
   const manifest = JSON.parse(readFileSync(path.join(extensionPath, "manifest.json"), "utf8"));
@@ -73,6 +76,53 @@ class BrowserExtensions {
     this.checkingUpdates = null;
     this.lastCheckedAt = null;
     this.autoCheckTimer = null;
+    this.memoryWarning = null;
+    this.memorySampleFailureReported = false;
+    this.memoryTimer = typeof app?.getAppMetrics === "function"
+      ? setInterval(() => this.sampleMemory(), MEMORY_SAMPLE_INTERVAL_MS) : null;
+    this.memoryTimer?.unref?.();
+  }
+
+  sampleMemory() {
+    if (!this.loaded.size || typeof app?.getAppMetrics !== "function") {
+      this.memoryWarning = null;
+      return;
+    }
+    let metrics;
+    try { metrics = app.getAppMetrics(); }
+    catch (error) {
+      if (!this.memorySampleFailureReported) this.logger.warn("browser.extension_memory_sample_failed", { errorType: error?.name || "Error" });
+      this.memorySampleFailureReported = true;
+      return;
+    }
+    this.memorySampleFailureReported = false;
+    if (!Array.isArray(metrics)) return;
+    const largest = metrics.filter(metric => Number.isFinite(metric?.memory?.workingSetSize)
+      && metric.memory.workingSetSize >= 0)
+      .reduce((previous, current) => !previous || current.memory.workingSetSize > previous.memory.workingSetSize
+        ? current : previous, null);
+    if (!largest) return;
+    const workingSetKiB = largest?.memory?.workingSetSize ?? 0;
+    if (workingSetKiB >= HIGH_PROCESS_WORKING_SET_KIB) {
+      const warning = {
+        processWorkingSetMiB: Math.ceil(workingSetKiB / 1024),
+        processType: typeof largest.type === "string" ? largest.type : "Unknown",
+        observedAt: new Date().toISOString(),
+      };
+      if (!this.memoryWarning) this.logger.warn("browser.high_process_memory", {
+        processWorkingSetMiB: warning.processWorkingSetMiB,
+        processType: warning.processType,
+        activeExtensionCount: this.loaded.size,
+        attribution: "unproven",
+      });
+      this.memoryWarning = warning;
+    } else if (this.memoryWarning && workingSetKiB < CLEARED_PROCESS_WORKING_SET_KIB) {
+      this.logger.info("browser.high_process_memory_cleared", {
+        processWorkingSetMiB: Math.ceil(workingSetKiB / 1024),
+        activeExtensionCount: this.loaded.size,
+      });
+      this.memoryWarning = null;
+    }
   }
 
   register(contents, window) {
@@ -168,6 +218,8 @@ class BrowserExtensions {
     this.nativeHostLifecycle.destroy();
     if (this.autoCheckTimer) clearInterval(this.autoCheckTimer);
     this.autoCheckTimer = null;
+    if (this.memoryTimer) clearInterval(this.memoryTimer);
+    this.memoryTimer = null;
     if (this.initialCheckTimer) clearTimeout(this.initialCheckTimer);
     this.initialCheckTimer = null;
     for (const window of [...this.pages]) {
@@ -178,6 +230,7 @@ class BrowserExtensions {
     }
     this.pages.clear();
     this.paused.clear();
+    this.memoryWarning = null;
   }
 
   status() {
@@ -200,6 +253,7 @@ class BrowserExtensions {
       }),
       checking: !!this.checkingUpdates,
       lastCheckedAt: this.lastCheckedAt,
+      memoryWarning: this.memoryWarning,
     };
   }
 
@@ -275,6 +329,7 @@ class BrowserExtensions {
     this.browserSession.extensions.removeExtension(id);
     this.loaded.delete(id);
     this.paused.set(id, extension);
+    if (!this.loaded.size) this.memoryWarning = null;
     this.availableUpdates.delete(id);
     this.logger.info("browser.extension_paused", { id, version: extension.version });
     return this.catalogStatus();

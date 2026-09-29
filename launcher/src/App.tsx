@@ -1774,6 +1774,11 @@ function ExtensionSettings({
       <SectionHeading label={copy.extensionsTitle} spaced />
       <p className="extension-description">{copy.extensionsDescription}</p>
       <p className="extension-description">{copy.extensionPauseHelp}</p>
+      {extensions?.memoryWarning ? <div className="extension-memory-warning" role="status">
+        <strong>{copy.extensionMemoryTitle}</strong>
+        <p>{copy.extensionMemoryBody.replace("{amount}", String(extensions.memoryWarning.processWorkingSetMiB))}</p>
+        <small><time dateTime={extensions.memoryWarning.observedAt}>{new Date(extensions.memoryWarning.observedAt).toLocaleString(language)}</time></small>
+      </div> : null}
       <div className="extension-list">
         {(extensions?.providers ?? []).map(provider => (
           <div className="extension-row" key={provider.id}>

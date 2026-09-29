@@ -2242,6 +2242,20 @@ code {
   line-height: 1.5;
 }
 
+.extension-memory-warning {
+  margin: 4px 0 16px;
+  padding: 12px 14px;
+  border: 1px solid var(--color-border);
+  border-left: 3px solid var(--color-warning, #bc8032);
+  border-radius: var(--radius-sm);
+  background: var(--color-background-control);
+  font-size: var(--text-sm);
+  line-height: 1.5;
+}
+
+.extension-memory-warning p { margin: 5px 0; }
+.extension-memory-warning small { color: var(--color-text-secondary); }
+
 .extension-list {
   border-top: 1px solid var(--color-border-light);
 }

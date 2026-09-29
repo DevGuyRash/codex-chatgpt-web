@@ -7,12 +7,13 @@ const path = require("node:path");
 const os = require("node:os");
 const vm = require("node:vm");
 
-function extensionFixture({ failLoad = false, isDevelopment = false } = {}) {
+function extensionFixture({ failLoad = false, isDevelopment = false, metricsState = null } = {}) {
   const filename = path.resolve(__dirname, "../electron/browser-extensions.cjs");
   const nativeRequire = createRequire(filename);
   const module = { exports: {} };
   const tabs = new Set();
   const windows = [];
+  const events = [];
   class BrowserWindow extends EventEmitter {
     constructor(options) {
       super();
@@ -36,7 +37,8 @@ function extensionFixture({ failLoad = false, isDevelopment = false } = {}) {
   }
   const browserSession = { getPreloadScripts: () => [], registerPreloadScript() {} };
   const fixtureRequire = name => {
-      if (name === "electron") return { BrowserWindow, nativeImage: { createFromPath: source => ({ isEmpty: () => false, resize: () => ({ isEmpty: () => false, source }) }) } };
+      if (name === "electron") return { app: metricsState ? { getAppMetrics: () => metricsState.current } : undefined,
+        BrowserWindow, nativeImage: { createFromPath: source => ({ isEmpty: () => false, resize: () => ({ isEmpty: () => false, source }) }) } };
       if (name === "electron-chrome-extensions") return { ElectronChromeExtensions: Adapter };
       if (name === "electron-chrome-web-store") return { downloadExtension() {} };
       if (name === "./window-placement.cjs") return { placeWindowNearLauncher() {} };
@@ -48,10 +50,36 @@ function extensionFixture({ failLoad = false, isDevelopment = false } = {}) {
     module, URL, setInterval, clearInterval, setTimeout, clearTimeout,
   }, { filename });
   const extensions = new module.exports.BrowserExtensions({
-    browserSession, userData: "/tmp/extension-lifecycle-fixture", logger: { info() {}, warn() {} }, isDevelopment,
+    browserSession, userData: "/tmp/extension-lifecycle-fixture", logger: {
+      info: (name, attributes) => events.push({ severity: "info", name, attributes }),
+      warn: (name, attributes) => events.push({ severity: "warn", name, attributes }),
+    }, isDevelopment,
   });
-  return { extensions, browserSession, tabs, windows };
+  return { extensions, browserSession, tabs, windows, events };
 }
+
+test("high process working set is reported once per episode without attributing it to an extension", () => {
+  const metricsState = { current: [{ type: "Tab", memory: { workingSetSize: 1_150_000 } }] };
+  const { extensions, events } = extensionFixture({ metricsState });
+  const id = "aeblfdkhhhdcdjpifhhbdiojplfjncoa";
+  try {
+    extensions.sampleMemory();
+    assert.equal(extensions.catalogStatus().memoryWarning, null);
+    extensions.loaded.set(id, { id, version: "8.12.37.1" });
+    extensions.sampleMemory();
+    extensions.sampleMemory();
+    assert.ok(extensions.catalogStatus().memoryWarning.processWorkingSetMiB >= 1024);
+    assert.equal(events.filter(event => event.name === "browser.high_process_memory").length, 1);
+    assert.equal(events.find(event => event.name === "browser.high_process_memory").attributes.attribution, "unproven");
+    metricsState.current = [{ type: "Tab", memory: { workingSetSize: 900_000 } }];
+    extensions.sampleMemory();
+    assert.ok(extensions.catalogStatus().memoryWarning);
+    metricsState.current = [{ type: "Tab", memory: { workingSetSize: 700_000 } }];
+    extensions.sampleMemory();
+    assert.equal(extensions.catalogStatus().memoryWarning, null);
+    assert.equal(events.filter(event => event.name === "browser.high_process_memory_cleared").length, 1);
+  } finally { extensions.destroy(); }
+});
 
 test("force-closing an extension window releases its registered tab", async () => {
   const { extensions, tabs, windows } = extensionFixture();

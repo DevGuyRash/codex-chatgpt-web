@@ -19,12 +19,13 @@ test("native admission recognizes the observed exhausted HTTP 429 variant withou
 test("batch admission rejects prohibited or unsupported work before inspecting any live workspace", async () => {
   const cell: LiveBatchCell = { id: "a".repeat(64), routeSlug: "chatgpt-web/light", workload: 1, variant: "fresh" };
   const input = { root: "/nonexistent-golden-workspace", sourceHome: "/nonexistent-source", executable: "/nonexistent-native", signal: new AbortController().signal, turnTimeoutMs: 1000 };
-  await expect(runLiveBatch({ ...input, cells: [cell, { ...cell, id: "b".repeat(64) }, { ...cell, id: "c".repeat(64) }] })).rejects.toThrow("one or two");
-  await expect(runLiveBatch({ ...input, cells: [cell, cell] })).rejects.toThrow("distinct");
+  await expect(runLiveBatch({ ...input, cells: [cell, { ...cell, id: "b".repeat(64) }] })).rejects.toThrow("one serial owned cell");
+  await expect(runLiveBatch({ ...input, cells: [cell, cell] })).rejects.toThrow("one serial owned cell");
   const pro = CHATGPT_WEB_MODEL_ROUTES.find(isProGeneration)!;
   await expect(runLiveBatch({ ...input, cells: [{ ...cell, routeSlug: pro.slug }] })).rejects.toThrow("non-Pro");
   await expect(runLiveBatch({ ...input, cells: [{ ...cell, routeSlug: CHATGPT_WEB_LUNA_MODEL_ROUTES[0]!.slug, variant: "retained-conversation-change" }] })).rejects.toThrow("Sol retained-browser path");
   await expect(runLiveBatch({ ...input, cells: [{ ...cell, workload: 5 }] })).rejects.toThrow("sustained");
+  await expect(runLiveBatch({ ...input, cells: [{ ...cell, variant: "plan-tui-execute" }] })).rejects.toThrow("child-generation budget");
   const cancelled = new AbortController(); cancelled.abort(new Error("Cancelled before admission"));
   await expect(runLiveBatch({ ...input, signal: cancelled.signal, cells: [cell] })).rejects.toThrow("Cancelled before admission");
 });

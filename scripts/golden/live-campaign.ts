@@ -26,6 +26,11 @@ export function canExecuteLiveCell(cell: GoldenCell): boolean {
     && cell.workload < 5 && Object.hasOwn(finiteNativeScenarios, cell.variant.id);
 }
 
+/** Pending matrix cells may be settled from retained evidence, but only serial work is admitted until implicit child generations can be counted. */
+export function canAdmitLiveCell(cell: GoldenCell): boolean {
+  return canExecuteLiveCell(cell) && cell.lane === "serial" && cell.variant.id !== "plan-tui-execute";
+}
+
 function finiteCellOutcome(cell: GoldenCell, result: LiveCellResult, batch: LiveBatchSettlement): GoldenOutcome {
   if (!canExecuteLiveCell(cell) || result.id !== cell.id || result.routeSlug !== cell.route.slug || result.workload !== cell.workload || result.variant !== cell.variant.id || batch.protocol !== cell.protocol) throw new Error("Live evidence does not match the exact claimed campaign cell");
   const proof = result.result;
@@ -186,9 +191,9 @@ export function liveBatchOutcomes(cells: readonly GoldenCell[], result: LiveBatc
 /** Adapter between queue ownership and the live owner; neither layer may infer the other's settlement. */
 export function liveCampaignExecutor(options: Pick<Parameters<typeof runLiveBatch>[0], "root" | "sourceHome" | "executable" | "turnTimeoutMs">) {
   return {
-    canExecute: canExecuteLiveCell,
+    canExecute: canAdmitLiveCell,
     async executeBatch(attempts: readonly GoldenAttempt[], signal: AbortSignal): Promise<ReadonlyMap<string, GoldenOutcome>> {
-      if (!attempts.length || attempts.length > 2 || attempts.some(attempt => !canExecuteLiveCell(attempt.cell))) throw new Error("No live executor is available for this campaign batch");
+      if (attempts.length !== 1 || attempts.some(attempt => !canAdmitLiveCell(attempt.cell))) throw new Error("No serial live executor is available for this campaign batch");
       const first = attempts[0]!.cell;
       if (attempts.some(attempt => attempt.cell.protocol !== first.protocol || attempt.cell.lane !== first.lane) || (first.lane === "serial" && attempts.length !== 1)) throw new Error("A live batch cannot mix campaign lanes or protocols");
       const result = await runLiveBatch({ ...options, signal, protocol: first.protocol,

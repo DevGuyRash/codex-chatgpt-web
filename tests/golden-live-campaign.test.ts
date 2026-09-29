@@ -3,7 +3,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { GOLDEN_UNICODE_WITNESS, GOLDEN_RECOVERABLE_FAILURE_FILE, GOLDEN_LARGE_TOOL_RESULT_FILE } from "../scripts/golden/workloads";
 import { CHATGPT_WEB_LUNA_MODEL_ROUTES } from "../src/chatgpt-web-models";
 import { buildGoldenMatrix } from "../scripts/golden/catalog";
-import { canExecuteLiveCell, liveBatchOutcomes, liveCampaignExecutor } from "../scripts/golden/live-campaign";
+import { canAdmitLiveCell, canExecuteLiveCell, liveBatchOutcomes, liveCampaignExecutor } from "../scripts/golden/live-campaign";
 import { nativePlanHashes } from "../scripts/golden/app-server";
 import { DiagnosticError, problemFor } from "../src/diagnostics/problems";
 
@@ -73,10 +73,16 @@ test("live campaign admission refuses Pro, sustained and unimplemented scenarios
   const executor = liveCampaignExecutor({ root: "/nonexistent", sourceHome: "/nonexistent", executable: "/nonexistent", turnTimeoutMs: 1000 });
   for (const cell of [matrix.find(cell => cell.exclusion?.includes("Pro generation"))!, matrix.find(cell => cell.workload === 5)!, matrix.find(cell => cell.variant.id === "nested-delegation")!]) {
     expect(canExecuteLiveCell(cell)).toBe(false);
-    await expect(executor.executeBatch([{ cell, token: "fixture", checkpoint() {} }], new AbortController().signal)).rejects.toThrow("No live executor");
+    await expect(executor.executeBatch([{ cell, token: "fixture", checkpoint() {} }], new AbortController().signal)).rejects.toThrow("No serial live executor");
   }
   const serial = matrix.find(cell => canExecuteLiveCell(cell) && cell.lane === "serial")!;
-  await expect(executor.executeBatch([serial, serial].map(cell => ({ cell, token: "fixture", checkpoint() {} })), new AbortController().signal)).rejects.toThrow("lanes or protocols");
+  expect(canAdmitLiveCell(serial)).toBeTrue();
+  expect(canAdmitLiveCell(cells[0]!)).toBeFalse();
+  const tui = { ...serial, variant: { id: "plan-tui-execute", driver: "tui" as const } };
+  expect(canExecuteLiveCell(tui)).toBeTrue();
+  expect(canAdmitLiveCell(tui)).toBeFalse();
+  await expect(executor.executeBatch([serial, serial].map(cell => ({ cell, token: "fixture", checkpoint() {} })), new AbortController().signal)).rejects.toThrow("No serial live executor");
+  await expect(executor.executeBatch([{ cell: tui, token: "fixture", checkpoint() {} }], new AbortController().signal)).rejects.toThrow("No serial live executor");
 });
 
 test("a pre-native batch failure preserves its typed cause instead of reporting missing cell identities", () => {

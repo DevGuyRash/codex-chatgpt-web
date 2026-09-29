@@ -75,11 +75,12 @@ export async function runLiveBatch(options: {
   onPrepared?(identity: { work: string; campaignId: string; traceId: string }): void | Promise<void>;
 }) {
   options.signal.throwIfAborted();
-  if (!options.cells.length || options.cells.length > 2 || new Set(options.cells.map(cell => cell.id)).size !== options.cells.length) throw new Error("A live batch requires one or two distinct owned cells");
+  if (options.cells.length !== 1) throw new Error("A live batch requires one serial owned cell while child-generation accounting is incomplete");
   if (!Number.isSafeInteger(options.turnTimeoutMs) || options.turnTimeoutMs < 1) throw new Error("A live batch requires a finite turn observation deadline");
   const requests = options.cells.map(cell => {
     const route = [...CHATGPT_WEB_MODEL_ROUTES, ...CHATGPT_WEB_LUNA_MODEL_ROUTES].find(route => route.slug === cell.routeSlug);
     if (!/^[a-f\d]{64}$/.test(cell.id) || ![1, 2, 3, 4].includes(cell.workload) || !Object.hasOwn(finiteNativeScenarios, cell.variant)) throw new Error("The live batch requires implemented finite workload cells; sustained and other scenario coordinators remain separate");
+    if (cell.variant === "plan-tui-execute") throw new Error("TUI title generations require a verified child-generation budget before live admission");
     if (!route || isProGeneration(route) || route.interactionMode !== "automatic") throw new Error("The live batch requires permitted automatic non-Pro routes");
     if (cell.variant === "retained-conversation-change" && route.backendModel === CHATGPT_WEB_LUNA_BACKEND_MODEL) throw new Error("Retained conversation change requires the Sol retained-browser path; Luna uses rolling checkpoints");
     return { ...cell, route };

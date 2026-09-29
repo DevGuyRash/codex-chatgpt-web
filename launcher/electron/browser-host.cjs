@@ -1655,7 +1655,11 @@ class BrowserHost {
       }
       tab.view.setBounds(bounds);
     }
-    tab.view.setVisible(visible || tab.status === "running");
+    // A retained automatic conversation still owns its renderer until its bounded lease ends.
+    // Hiding the View stops compositor presentation while ChatGPT can continue queuing swap
+    // callbacks; Chromium's 60-callback buffer then DCHECKs and the advertised CDP target dies.
+    // Keep the View drawable outside the launcher, as for a running hidden turn.
+    tab.view.setVisible(visible || tab.status === "running" || tab.status === "ready");
   }
 
   presentPrimaryView(visible) {

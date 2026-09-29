@@ -731,6 +731,30 @@ test("turn tabs use the hidden viewport when the launcher window is hidden", () 
   assert.deepEqual(tab.deviceEmulationViewport, { width: 1120, height: 720 });
 });
 
+test("retained automatic tabs stay drawable offscreen until their lease ends", () => {
+  const events = [];
+  const tab = {
+    id: "retained-tab", status: "ready", interactionMode: "automatic", rendererReady: true,
+    deviceEmulationViewport: null, deviceEmulationDirty: true,
+    view: {
+      setBounds: bounds => events.push(["bounds", bounds]),
+      setVisible: visible => events.push(["visible", visible]),
+      webContents: {
+        enableDeviceEmulation: options => events.push(["emulate", options]),
+        disableDeviceEmulation: () => events.push(["disable"]),
+      },
+    },
+  };
+  const fixture = Object.assign(Object.create(BrowserHost.prototype), {
+    window: { getContentSize: () => [1120, 720] },
+  });
+  fixture.presentTurnView(tab, false);
+  assert.deepEqual(events.map(([kind]) => kind), ["emulate", "bounds", "visible"]);
+  assert.deepEqual(events.find(([kind]) => kind === "bounds")[1], { x: 1121, y: 721, width: 1120, height: 720 });
+  assert.deepEqual(events.find(([kind]) => kind === "visible")[1], true);
+  assert.deepEqual(tab.deviceEmulationViewport, { width: 1120, height: 720 });
+});
+
 test("new turn tabs defer device emulation until their renderer finishes loading", () => {
   const events = [];
   const tab = {

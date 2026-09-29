@@ -8,6 +8,7 @@ import { VERSION } from "../../version";
 import type { ChatGptTurnToolContext } from "./environment";
 import { CODEX_COMPACTION_CONTROL_WIRE_NAME } from "./native-compaction-control";
 import { callTurnBroker, TurnBrokerTimeoutError, type BrokerToolResult } from "./turn-broker";
+import { DiagnosticError } from "../../diagnostics/problems";
 
 interface ClaimedTurn {
   bindingId: string;
@@ -54,10 +55,28 @@ function turnReferenceInput(contract: ChatGptMcpContract): Record<string, z.ZodS
     : { turn_token: turnTokenSchema };
 }
 
+/** A model-supplied connector handle must never become shell, file, URL or answer payload. */
+export function assertTurnReferenceScoped(input: object, key: "turn_token" | "request_id", token: string): void {
+  const stack = Object.entries(input).filter(([name]) => name !== key).map(([, value]) => value);
+  const seen = new WeakSet<object>();
+  let inspected = 0;
+  while (stack.length) {
+    if (++inspected > 100_000) throw new DiagnosticError({ code: "connector_token_scope_unverifiable", message: "The connector payload is too complex to verify its one-turn handle scope", origin: "mcp", stage: "tool_claim", retryable: false });
+    const value = stack.pop();
+    if (typeof value === "string") {
+      if (value.includes(token)) throw new DiagnosticError({ code: "connector_token_outside_field", message: "The one-turn connector handle appeared outside its declared field", origin: "mcp", stage: "tool_claim", retryable: false });
+    } else if (value && typeof value === "object" && !seen.has(value)) {
+      seen.add(value);
+      for (const child of Array.isArray(value) ? value : Object.values(value)) stack.push(child);
+    }
+  }
+}
+
 function turnReference(contract: ChatGptMcpContract, input: object): string {
   const key = contract === "safe" ? "request_id" : "turn_token";
   const value = (input as Record<string, unknown>)[key];
   if (typeof value !== "string") throw new Error(`${key} is required`);
+  assertTurnReferenceScoped(input, key, value);
   return value;
 }
 

@@ -60,6 +60,7 @@ export function DiagnosticsWorkspace({ api, language, initialTrace, captureReque
     selectedRecords.current = new Map([...selectedRecords.current.values(), ...allRows].filter(event => ids.has(event.id)).map(event => [event.id, event]));
     setSelectedRows(ids);
   };
+  const clearSelection = () => { selectedRecords.current.clear(); anchor.current = undefined; setSelectedRows(new Set()); };
   const reportSelection = { eventIds: selectedEvents.filter(event => !event.traceId || tab === "advanced").map(event => event.id), traceIds: [...new Set(selectedEvents.filter(event => event.traceId && tab !== "advanced").map(event => event.traceId!))] };
   const clearDialog = useRef<HTMLDialogElement>(null), inspector = useRef<HTMLElement>(null), lastRecord = useRef<HTMLButtonElement | null>(null);
   useEffect(() => { controller.activate(true); return () => controller.activate(false); }, [controller]);
@@ -105,7 +106,7 @@ export function DiagnosticsWorkspace({ api, language, initialTrace, captureReque
     </form> : null}
     {tab !== "capture" ? <div className="diagnostic-new-activity">{state.newActivity ? <button type="button" onClick={refresh}>{labels.newActivity}</button> : null}</div> : null}
     {tab !== "capture" ? <div ref={split} className={`diagnostic-split ${selection ? "has-detail" : ""}`}><section className="diagnostic-results" aria-label={tab === "overview" ? copy.recentProblems : copy.events} aria-busy={state.loading}>
-      <div className="diagnostic-results-toolbar"><button type="button" onClick={refresh}>{copy.refresh}</button><span>{selectedRows.size} {copy.selected}</span><ReportMenus api={api} language={language} query={{ ...query, snapshotSequence: result.snapshotSequence }} selected={reportSelection} invalid={state.filterError} />{selectedRows.size ? <button type="button" onClick={() => setSelectedRows(new Set())}>{copy.clearSelection}</button> : null}</div>
+      <div className="diagnostic-results-toolbar"><button type="button" onClick={refresh}>{copy.refresh}</button><span>{selectedRows.size} {copy.selected}</span><ReportMenus api={api} language={language} query={{ ...query, snapshotSequence: result.snapshotSequence }} selected={reportSelection} invalid={state.filterError} />{selectedRows.size ? <button type="button" onClick={clearSelection}>{copy.clearSelection}</button> : null}</div>
       {state.loading && !result.events.length ? <p role="status">{copy.pending}</p> : null}{!state.loading && !result.events.length ? <p className="diagnostic-empty">{copy.empty}</p> : null}
       {tab === "advanced" ? <VirtualEvents label={copy.events} events={result.events} render={record} /> : tab === "overview" && result.groups ? result.groups.map(group => {
         const representative = result.events.find(event => event.id === group.eventId), occurrences = state.groups[group.key];

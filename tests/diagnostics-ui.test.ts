@@ -92,6 +92,31 @@ test.skipIf(!process.env.CHATGPT_TEST_CHROME_EXECUTABLE)("large diagnostic lists
   } finally { await browser.close(); rmSync(root, { recursive: true, force: true }); }
 }, 30000);
 
+test.skipIf(!process.env.CHATGPT_TEST_CHROME_EXECUTABLE)("clearing diagnostic selection releases its range anchor", async () => {
+  const root = mkdtempSync(join(tmpdir(), "diagnostics-selection-clear-"));
+  const browser = await chromium.launch({ executablePath: process.env.CHATGPT_TEST_CHROME_EXECUTABLE, headless: true });
+  try {
+    const bundle = Bun.spawnSync([process.execPath, "build", "tests/fixtures/diagnostics.tsx", "--target", "browser", "--outdir", root], { cwd: resolve("launcher") });
+    expect(bundle.exitCode).toBe(0);
+    const page = await browser.newPage({ viewport: { width: 1280, height: 900 }, reducedMotion: "reduce" });
+    await page.route("http://localhost/**", route => route.fulfill({ contentType: "text/html", body: '<div id="root"></div>' }));
+    await page.goto("http://localhost/diagnostics-fixture");
+    await page.evaluate(() => { (window as unknown as { fixture: unknown }).fixture = { language: "en", eventCount: 110 }; });
+    await page.addStyleTag({ content: readFileSync(join(root, "diagnostics.css"), "utf8") });
+    await page.addScriptTag({ content: readFileSync(join(root, "diagnostics.js"), "utf8") });
+    await page.getByRole("button", { name: diagnosticsCopy.en.advanced, exact: true }).click();
+    const rows = page.getByRole("listitem");
+    await rows.first().waitFor();
+    await rows.nth(0).locator('input[type="checkbox"]').click();
+    await rows.nth(1).locator('input[type="checkbox"]').click();
+    expect(await page.locator(".diagnostic-selectable-row input:checked").count()).toBe(2);
+    await page.getByRole("button", { name: diagnosticsCopy.en.clearSelection }).click();
+    expect(await page.locator(".diagnostic-selectable-row input:checked").count()).toBe(0);
+    await rows.nth(3).getByRole("button").click({ modifiers: ["Shift"] });
+    expect(await page.locator(".diagnostic-selectable-row input:checked").count()).toBe(1);
+  } finally { await browser.close(); rmSync(root, { recursive: true, force: true }); }
+}, 30000);
+
 test("foreground search reserves layout, delays cancellation, and background refresh stays quiet", async () => {
   const root = mkdtempSync(join(tmpdir(), "diagnostics-ui-timing-"));
   const browser = await chromium.launch({ executablePath: process.env.CHATGPT_TEST_CHROME_EXECUTABLE, headless: true });

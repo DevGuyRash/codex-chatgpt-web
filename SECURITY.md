@@ -15,6 +15,17 @@ this project uses only its stdio transport. The lockfile explicitly resolves tha
 adapter to patched 2.0.12. `bun audit`, the MCP protocol test, and the compiled-binary smoke test are
 release gates; remove the override when the stable SDK itself moves to the patched major.
 
+The launcher lockfile resolves `http-cache-semantics` to upstream 4.3.0, which fixes
+[Vary wildcard/header matching](https://github.com/kornelski/http-cache-semantics/commit/9fb520be70eff3ff502fe965d9c3265ca2c64e26).
+As of 2026-10-04, normal dependency audits pass because
+[GHSA-ch52-4w7c-c8xp](https://github.com/advisories/GHSA-ch52-4w7c-c8xp) lists only versions through
+4.2.0. Its disputed `max-stale` semantics are unchanged in 4.3.0; this update does not claim to fix
+that advisory. [Upstream's dispute is still under advisory review](https://github.com/github/advisory-database/issues/10139).
+The dependency is limited to launcher build tooling, whose current downloader leaves Got HTTP
+caching disabled. Focused tests check that boundary and retain its proxy, timeout and retry
+contracts; no HTTP-cache exposure is demonstrated in this application path. Reassess if that path
+or the advisory changes. No audit exclusions or security waivers are applied.
+
 Once the GitHub repository is public, use its private Security Advisory reporting flow. Until that
 is enabled, do not publish a proof of concept that exposes credentials or arbitrary local tool
 execution; contact the maintainer privately through the GitHub account listed by the repository.

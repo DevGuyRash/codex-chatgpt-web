@@ -189,7 +189,10 @@ export async function runNativeScenario(options: {
   app = new GoldenAppServer({ ...options, artifactRepository: options.cwd, onFrame: async frame => {
     const { tool, phase } = ownedNativeActivity(frame, app?.state() ?? {});
     if (tool) toolItems++;
-    await options.onRecord("transport", JSON.stringify(frame), phase, frame.receivedAtMs);
+    // NativeRpc awaits this callback before sending. Generation-bearing inputs must use
+    // the durable prompt fence, while received frames may keep draining through capture.
+    const input = frame.direction === "sent" && ["turn/start", "turn/steer", "thread/compact/start"].includes(String(frame.message.method));
+    await options.onRecord(input ? "prompt" : "transport", JSON.stringify(frame), phase, frame.receivedAtMs);
     const params = object(frame.message.params) ? frame.message.params : undefined;
     const error = params && object(params.error) ? params.error : undefined;
     if (!observedReconnect && frame.direction === "received" && frame.message.method === "error"

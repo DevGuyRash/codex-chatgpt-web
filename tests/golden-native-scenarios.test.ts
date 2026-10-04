@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { createHash, randomUUID } from "node:crypto";
@@ -17,6 +17,75 @@ import { retainLiveProviderAdmission } from "../scripts/golden/live-batch";
 import { ownsProcess, type OwnedProcess } from "../scripts/golden/workspace";
 import { goldenNativeEnvironment } from "../scripts/golden/runtime-config";
 import { bridgeToResponsesSSE } from "../src/bridge";
+import { GoldenCaptureLane } from "../scripts/golden/capture-lane";
+
+for (const method of ["turn/start", "turn/steer", "thread/compact/start"] as const) {
+  for (const captureFails of [false, true]) test(`app-server ${method} waits for durable input capture (failure=${captureFails})`, async () => {
+    const root = mkdtempSync(join(tmpdir(), "golden-native-input-fence-")), peer = join(root, "peer"), sent = join(root, "sent");
+    mkdirSync(join(root, ".git"));
+    writeFileSync(peer, `#!${process.execPath}
+import {appendFileSync} from "node:fs";
+const send=m=>process.stdout.write(JSON.stringify(m)+"\\n");
+const turn=(id,status,items=[])=>({id,status,items});
+let buffer="",n=0;
+process.stdin.on("data",chunk=>{buffer+=chunk;for(;;){const i=buffer.indexOf("\\n");if(i<0)break;const m=JSON.parse(buffer.slice(0,i));buffer=buffer.slice(i+1);
+ if(m.method===${JSON.stringify(method)})appendFileSync(${JSON.stringify(sent)},m.method+"\\n");
+ if(m.method==="initialize")send({id:m.id,result:{userAgent:"fixture"}});
+ if(m.method==="thread/start")send({id:m.id,result:{thread:{id:"thread-one"},model:m.params.model,modelProvider:"openai",reasoningEffort:"low",cwd:m.params.cwd}});
+ if(m.method==="turn/start"){
+  const id="turn-"+(++n);send({method:"turn/started",params:{threadId:"thread-one",turn:turn(id,"inProgress")}});
+  send({id:m.id,result:{turn:turn(id,"inProgress")}});
+  if(${JSON.stringify(method)}==="turn/steer")send({method:"item/agentMessage/delta",params:{threadId:"thread-one",turnId:id,delta:"Working"}});
+  else send({method:"turn/completed",params:{threadId:"thread-one",turn:turn(id,"completed")}});
+ }
+ if(m.method==="turn/steer"){
+  send({id:m.id,result:{turnId:"turn-1"}});
+  send({method:"turn/completed",params:{threadId:"thread-one",turn:turn("turn-1","completed")}});
+ }
+ if(m.method==="thread/compact/start"){
+  const id="compact-one",item={id:"compact-item",type:"contextCompaction"};
+  send({method:"turn/started",params:{threadId:"thread-one",turn:turn(id,"inProgress")}});
+  send({method:"item/completed",params:{threadId:"thread-one",turnId:id,item}});
+  send({method:"turn/completed",params:{threadId:"thread-one",turn:turn(id,"completed",[item])}});
+  send({id:m.id,result:{}});
+ }
+}});process.stdin.on("end",()=>process.exit(0));
+`, { mode: 0o700 });
+    let release!: () => void, entered!: () => void, count = 0;
+    const held = new Promise<void>(resolve => { release = resolve; });
+    const capturing = new Promise<void>(resolve => { entered = resolve; });
+    const categories: string[] = [];
+    const lane = new GoldenCaptureLane(async (category, text) => {
+      const frame = JSON.parse(text);
+      if (frame.direction === "sent" && frame.message.method === method) {
+        categories.push(category); entered(); await held;
+        if (captureFails) throw new Error("Input capture failed");
+      }
+      return { traceId: "a".repeat(32), kind: "attachment", id: `00000000-0000-4000-8000-${String(++count).padStart(12, "0")}`, sha256: "b".repeat(64) };
+    });
+    const result = runNativeScenario({ executable: peer, cwd: root, env: {}, route: CHATGPT_WEB_MODEL_ROUTES[0]!,
+      workload: createWorkload({ level: 1, seed: "durable-native-input", batch: 0 }),
+      variant: method === "turn/steer" ? "steer-generation" : method === "thread/compact/start" ? "compaction" : "continued",
+      signal: new AbortController().signal, timeoutMs: 2000, onRecord: (...args) => lane.record(...args), checkpoint: () => {} });
+    void result.catch(() => {});
+    try {
+      await Promise.race([capturing, result.then(() => { throw new Error("Native scenario completed before the selected input capture"); })]);
+      await Bun.sleep(20);
+      expect(existsSync(sent)).toBe(false);
+      expect(categories).toEqual(["prompt"]);
+      release();
+      if (captureFails) {
+        await expect(result).rejects.toThrow("Input capture failed");
+        await expect(lane.flush()).rejects.toThrow("Input capture failed");
+        expect(existsSync(sent)).toBe(false);
+      } else {
+        expect(await result).toMatchObject({ status: "completed", threadId: "thread-one" });
+        await lane.flush();
+        expect(readFileSync(sent, "utf8").trim().split("\n")).toHaveLength(method === "turn/start" ? 2 : 1);
+      }
+    } finally { release(); await result.catch(() => {}); rmSync(root, { recursive: true, force: true }); }
+  }, 5000);
+}
 
 test("Unicode scenario submits an exact witness requirement in one owned native turn", async () => {
   const root = mkdtempSync(join(tmpdir(), "golden-unicode-scenario-")), peer = join(root, "peer"), promptPath = join(root, "prompt.txt");

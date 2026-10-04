@@ -43,6 +43,7 @@ export class GoldenCaptureLane {
   private failure?: Error;
   private readonly progress = new ActiveProgress();
   private readonly seenPayloads = new Set<string>();
+  private progressNotBeforeMs = -Infinity;
 
   constructor(private readonly capture: (category: "prompt" | "transport", text: string) => Promise<ProgressEvidence>) {}
 
@@ -62,7 +63,10 @@ export class GoldenCaptureLane {
     const work = this.tail.then(async () => {
       if (this.failure) return;
       const receipt = await this.capture(category, text);
-      if (promptAtMs !== undefined) this.progress.pause(promptAtMs);
+      if (promptAtMs !== undefined) {
+        this.progress.pause(promptAtMs);
+        this.progressNotBeforeMs = promptAtMs;
+      }
       if (phase && receivedAtMs !== undefined) {
         const payload = createHash("sha256").update(progressPayload(text)).digest("hex");
         if (!this.seenPayloads.has(payload)) {
@@ -70,8 +74,11 @@ export class GoldenCaptureLane {
             throw new Error("Golden progress deduplication capacity was reached; rotate the validated batch before crediting more work");
           }
           this.seenPayloads.add(payload);
-          this.progress.observe(receivedAtMs, phase, receipt);
-        } else {
+          // A prompt can be queued between frames drained from an earlier stdout chunk.
+          // Retain and deduplicate those frames, but never advance them across the input
+          // boundary or let their old receipt time move the progress clock backwards.
+          if (receivedAtMs > this.progressNotBeforeMs) this.progress.observe(receivedAtMs, phase, receipt);
+        } else if (receivedAtMs > this.progressNotBeforeMs) {
           // A duplicate is not productive activity and cannot bridge a later gap.
           this.progress.pause(receivedAtMs);
         }

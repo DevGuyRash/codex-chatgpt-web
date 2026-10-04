@@ -1,4 +1,5 @@
-import { expect, test } from "bun:test";
+import { expect, spyOn, test } from "bun:test";
+import { performance } from "node:perf_hooks";
 import { GoldenCaptureLane } from "../scripts/golden/capture-lane";
 
 const receipt = (index: number) => ({ traceId: "a".repeat(32), kind: "attachment" as const,
@@ -60,4 +61,25 @@ test("prompt capture fences submission and a saturated native backlog fails clos
   await expect(prompt).rejects.toThrow("backlog exceeded");
   await expect(lane.flush()).rejects.toThrow("backlog exceeded");
   expect(submitted).toBe(false);
+});
+
+test("delayed frames retain their original receipts without bridging a durable input boundary", async () => {
+  const now = spyOn(performance, "now").mockReturnValue(3000 - performance.timeOrigin);
+  const retained: string[] = [];
+  const lane = new GoldenCaptureLane(async (_category, text) => { retained.push(text); return receipt(retained.length); });
+  try {
+    await lane.record("transport", "before one", "generation", 1000);
+    await lane.record("transport", "before two", "generation", 2000);
+    await lane.record("prompt", "new input");
+    await lane.record("transport", "delayed old frame", "generation", 2500);
+    await lane.record("transport", "same boundary frame", "generation", 3000);
+    await lane.record("transport", "delayed old frame", "generation", 4000);
+    await lane.record("transport", "fresh one", "generation", 5000);
+    await lane.record("transport", "fresh two", "generation", 6000);
+    now.mockReturnValue(7000 - performance.timeOrigin);
+    const progress = await lane.finishBatch(true);
+    expect(retained).toEqual(["before one", "before two", "new input", "delayed old frame", "same boundary frame", "delayed old frame", "fresh one", "fresh two"]);
+    expect(progress.creditedMs).toBe(2000);
+    expect(progress.segments.map(segment => [segment.startMs, segment.endMs])).toEqual([[1000, 2000], [5000, 6000]]);
+  } finally { now.mockRestore(); }
 });

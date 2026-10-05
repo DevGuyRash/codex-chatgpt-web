@@ -1,6 +1,5 @@
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
-import { loadConfig } from "../../src/config";
 import { inspectLauncherBrowserHost, readLauncherBrowserHostDescriptor } from "../../src/launcher-browser-host";
 import { buildGoldenMatrix } from "./catalog";
 import { assertBorrowedTunnelInactive } from "./borrowed-tunnel";
@@ -9,12 +8,14 @@ import { GoldenAdmissionSuspended } from "./admission";
 import { canExecuteLiveCell, liveCampaignExecutor } from "./live-campaign";
 import { GoldenQueue } from "./queue";
 import { ownsProcess, type GoldenWorkspace } from "./workspace";
+import { readGoldenSourceRuntime } from "./source-runtime";
 
 /** One exact serial cell; a failed producer keeps its durable claim for evidence review. */
-export async function runSelectedGoldenCell(options: { root: string; executable: string; sourceHome: string; cellId: string; turnTimeoutMs: number; signal: AbortSignal }) {
-  const root = resolve(options.root), executable = resolve(options.executable), sourceHome = resolve(options.sourceHome);
+export async function runSelectedGoldenCell(options: { root: string; executable: string; sourceHome?: string; cellId: string; turnTimeoutMs: number; signal: AbortSignal; hardDeadlineAt?: number }) {
+  const root = resolve(options.root), executable = resolve(options.executable);
   if (!/^[a-f\d]{64}$/.test(options.cellId) || !Number.isSafeInteger(options.turnTimeoutMs) || options.turnTimeoutMs < 1) throw new Error("Select one exact golden cell and a finite turn deadline");
   options.signal.throwIfAborted();
+  if (options.hardDeadlineAt !== undefined && (!Number.isFinite(options.hardDeadlineAt) || options.hardDeadlineAt <= Date.now())) throw new Error("The selected golden hard deadline is invalid or exhausted");
   const workspace = JSON.parse(readFileSync(`${root}/workspace.json`, "utf8")) as GoldenWorkspace;
   if (workspace.root !== root || !workspace.processes.launcher || !ownsProcess(workspace.processes.launcher)) throw new Error("The selected golden workspace has no owned live launcher");
   const descriptor = readLauncherBrowserHostDescriptor(workspace.descriptorPath);
@@ -26,7 +27,8 @@ export async function runSelectedGoldenCell(options: { root: string; executable:
     const identity = goldenImplementationIdentity(resolve(import.meta.dir, "../.."), [executable, process.execPath, descriptor.helper.script]);
     if (identity.sha256 !== queue.implementationSha256) throw new Error("The selected golden implementation requires reviewed reconciliation");
     verifyGoldenBrowserHelper(resolve(import.meta.dir, "../.."), descriptor.helper.script);
-    await assertBorrowedTunnelInactive(sourceHome, root, loadConfig(sourceHome));
+    const { home: sourceHome, config: source } = readGoldenSourceRuntime(options.sourceHome);
+    await assertBorrowedTunnelInactive(sourceHome, root, source);
     // Avoid consuming a durable cell claim for an already signed-out launcher. The
     // batch still performs a fresh inspection after its owned restart.
     await inspectLauncherBrowserHost(workspace.descriptorPath);
@@ -35,7 +37,7 @@ export async function runSelectedGoldenCell(options: { root: string; executable:
       const claim = queue.claim({ lane: cell.lane, protocol: cell.protocol, runnerToken: runner, eligible: candidate => candidate.id === cell.id });
       if (!claim || claim.cell.id !== cell.id) throw new Error("The selected golden cell was not uniquely admitted");
       const attempt = { ...claim, checkpoint: (input: Parameters<typeof queue.checkpoint>[2]) => queue.checkpoint(cell.id, claim.token, input) };
-      const executor = liveCampaignExecutor({ root, sourceHome, executable, turnTimeoutMs: options.turnTimeoutMs });
+      const executor = liveCampaignExecutor({ root, sourceHome, executable, turnTimeoutMs: options.turnTimeoutMs, hardDeadlineAt: options.hardDeadlineAt });
       try {
         const outcomes = await executor.executeBatch([attempt], options.signal);
         const outcome = outcomes.get(cell.id);
@@ -51,10 +53,11 @@ export async function runSelectedGoldenCell(options: { root: string; executable:
 }
 
 if (import.meta.main) {
-  if (process.argv.length !== 6) throw new Error("Usage: bun scripts/golden/one-cell.ts CAMPAIGN_ROOT NATIVE_EXECUTABLE SOURCE_HOME CELL_ID");
+  const args = process.argv.slice(2);
+  if (args.length !== 3 && args.length !== 4) throw new Error("Usage: bun scripts/golden/one-cell.ts CAMPAIGN_ROOT NATIVE_EXECUTABLE [SOURCE_HOME] CELL_ID");
   const controller = new AbortController(), stop = () => controller.abort(new Error("Golden single-cell observation cancelled"));
   process.on("SIGINT", stop); process.on("SIGTERM", stop);
   try {
-    console.log(JSON.stringify(await runSelectedGoldenCell({ root: process.argv[2]!, executable: process.argv[3]!, sourceHome: process.argv[4]!, cellId: process.argv[5]!, turnTimeoutMs: 30 * 60_000, signal: controller.signal })));
+    console.log(JSON.stringify(await runSelectedGoldenCell({ root: args[0]!, executable: args[1]!, sourceHome: args.length === 4 ? args[2] : undefined, cellId: args.at(-1)!, turnTimeoutMs: 30 * 60_000, signal: controller.signal })));
   } finally { process.off("SIGINT", stop); process.off("SIGTERM", stop); }
 }

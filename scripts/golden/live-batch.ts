@@ -2,9 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
-import { homedir } from "node:os";
 import { z } from "zod";
-import { loadConfig } from "../../src/config";
 import { availableChatGptWebModelRoutes, CHATGPT_WEB_MODEL_ROUTES, CHATGPT_WEB_LUNA_MODEL_ROUTES, CHATGPT_WEB_LUNA_BACKEND_MODEL } from "../../src/chatgpt-web-models";
 import { isProGeneration } from "../../src/campaign-policy";
 import { augmentNativeModelCatalog } from "../../src/model-catalog";
@@ -22,7 +20,7 @@ import { findNativeExecFailure, type NativeExecFailure } from "./exec";
 import { initializeGoldenNativeHome } from "./app-server";
 import { goldenScenarioTerminations, readGoldenEvents, readGoldenAdmissionEvents, selectGoldenNativeThreadEvents, verifyGoldenModelSelections, verifyGoldenModelSequence, verifyGoldenToolReceipts, verifyGoldenRetainedTabReuse, verifyGoldenTuiTitles } from "./observations";
 import { goldenNativeConfig, goldenNativeEnvironment } from "./runtime-config";
-import { withGoldenRuntime } from "./runtime";
+import { GoldenRuntimeUnsettledError, withGoldenRuntime } from "./runtime";
 import { assertBorrowedTunnelInactive } from "./borrowed-tunnel";
 import { createWorkload, evaluateWorkload, materializeWorkload, GOLDEN_RECOVERABLE_FAILURE_FILE, GOLDEN_RECOVERABLE_FAILURE_CONTENT, GOLDEN_LARGE_TOOL_RESULT_FILE, largeToolResultContent, largeToolResultOutput, largeToolResultSha256 } from "./workloads";
 import { runProjectOracle, verifyArtifactCommit } from "./oracle";
@@ -32,6 +30,14 @@ import { verifyGoldenBrowserHelper } from "./implementation";
 import { GoldenQueue } from "./queue";
 import { paceGoldenGeneration } from "./pacing";
 import { GoldenAdmissionSuspended, nativeAdmissionObservation, diagnosticAdmissionObservation, type AdmissionObservation } from "./admission";
+import { readGoldenSourceRuntime } from "./source-runtime";
+
+/** Release failed-owner transports without fabricating terminals for unresolved producers. */
+export async function closeUnsettledGoldenDiagnostics(client: Pick<DiagnosticsClient, "close">): Promise<void> {
+  const closed = await Promise.allSettled([closeRuntimeDiagnostics({ interruptActive: false }), client.close()]);
+  const rejected = closed.filter((result): result is PromiseRejectedResult => result.status === "rejected");
+  if (rejected.length) throw new AggregateError(rejected.map(result => result.reason), "Unsettled golden diagnostics transports did not close");
+}
 
 /** Checkpoint admission before optional capture/export can fail; this does not settle the producer. */
 export function retainLiveAdmissionFailure(root: string, evidencePath: string, failure: NativeScenarioFailure["nativeFailure"]) {
@@ -69,12 +75,15 @@ export interface LiveBatchCell {
 
 /** One owned runtime and native home for a serial cell or a concurrent pair. No queue status is inferred here. */
 export async function runLiveBatch(options: {
-  root: string; sourceHome: string; executable: string; cells: readonly LiveBatchCell[]; signal: AbortSignal;
+  root: string; sourceHome?: string; executable: string; cells: readonly LiveBatchCell[]; signal: AbortSignal;
   protocol?: Protocol; turnTimeoutMs: number; boundary?: "ordinary-native-tools" | "campaign-batch";
   experimentalBiggerContext?: boolean;
+  /** Absolute cell/overall stopping boundary, distinct from an operator cancellation. */
+  hardDeadlineAt?: number;
   onPrepared?(identity: { work: string; campaignId: string; traceId: string }): void | Promise<void>;
 }) {
   options.signal.throwIfAborted();
+  if (options.hardDeadlineAt !== undefined && (!Number.isFinite(options.hardDeadlineAt) || options.hardDeadlineAt <= Date.now())) throw new Error("The golden hard deadline is invalid or exhausted");
   if (options.cells.length !== 1) throw new Error("A live batch requires one serial owned cell while child-generation accounting is incomplete");
   if (!Number.isSafeInteger(options.turnTimeoutMs) || options.turnTimeoutMs < 1) throw new Error("A live batch requires a finite turn observation deadline");
   const requests = options.cells.map(cell => {
@@ -86,7 +95,7 @@ export async function runLiveBatch(options: {
     return { ...cell, route };
   });
   if (options.experimentalBiggerContext && requests.some(cell => cell.variant !== "compaction" || cell.route.backendModel === "gpt-5.6-luna")) throw new Error("Golden Bigger Context opt-in requires only non-Luna compaction cells");
-  const root = resolve(options.root), sourceHome = resolve(options.sourceHome), boundary = options.boundary ?? "campaign-batch";
+  const root = resolve(options.root), boundary = options.boundary ?? "campaign-batch";
   {
     const queue = new GoldenQueue(join(root, "campaign.sqlite"));
     try {
@@ -100,7 +109,8 @@ export async function runLiveBatch(options: {
   let workspace = JSON.parse(readFileSync(join(root, "workspace.json"), "utf8")) as GoldenWorkspace;
   if (workspace.root !== root || !workspace.processes.launcher || !ownsProcess(workspace.processes.launcher)) throw new Error("A live batch requires the owned isolated launcher");
   const helperBuild = verifyGoldenBrowserHelper(resolve(import.meta.dir, "../.."), readLauncherBrowserHostDescriptor(workspace.descriptorPath).helper.script);
-  const source = loadConfig(sourceHome), protocol = options.protocol ?? source.subagentProtocol;
+  const { home: sourceHome, config: source } = readGoldenSourceRuntime(options.sourceHome);
+  const protocol = options.protocol ?? source.subagentProtocol;
   if (source.mode !== "full" || !source.tunnel) throw new Error("The selected existing runtime has no full-mode tunnel configuration");
   await assertBorrowedTunnelInactive(sourceHome, root, source);
   const work = mkdtempSync(join(root, "batch-")), home = join(work, "native-home");
@@ -128,6 +138,8 @@ export async function runLiveBatch(options: {
   const invocation = { executable: process.execPath, args: [resolve(import.meta.dir, "../../src/diagnostics/worker-main.ts"), "--home", workspace.runtimeHome] };
   process.env.CODEX_CHATGPT_WEB_DIAGNOSTICS_WORKER = JSON.stringify(invocation);
   const client = new DiagnosticsClient(invocation);
+  let runtimeUnsettled = false;
+  let unresolvedFailure: unknown;
   try {
     const prior = ContentManifestSchema.parse(await client.contentCapture({ action: "manifest", campaignId: workspace.campaignId }));
     if (!prior.finished) throw new Error("The previous campaign scope requires settlement before another live batch");
@@ -179,7 +191,7 @@ export async function runLiveBatch(options: {
         return [cell.request.id, { from, to: cell.request.route }];
       }));
       writeFileSync(join(root, "session-inspection.json"), JSON.stringify({ inspectedAt: new Date().toISOString(), ...inspection }, null, 2), { mode: 0o600 });
-      results = await operation.run(() => withGoldenRuntime({ workspace, nativeHome: home, protocol, connectorName: source.appName, tunnelId: source.tunnel!.tunnelId, tunnelBinary: source.tunnel!.binaryPath, runtimeKeyFile: source.tunnel!.runtimeKeyFile, capabilities: { solAvailable: inspection.solAvailable!, proAvailable: inspection.proAvailable! }, experimentalBiggerContext: options.experimentalBiggerContext === true, borrowFromRuntimeHome: sourceHome }, options.signal, async config => {
+      results = await operation.run(() => withGoldenRuntime({ workspace, nativeHome: home, protocol, connectorName: source.appName, tunnelId: source.tunnel!.tunnelId, tunnelBinary: source.tunnel!.binaryPath, runtimeKeyFile: source.tunnel!.runtimeKeyFile, capabilities: { solAvailable: inspection.solAvailable!, proAvailable: inspection.proAvailable! }, experimentalBiggerContext: options.experimentalBiggerContext === true, borrowFromRuntimeHome: sourceHome, hardDeadlineAt: options.hardDeadlineAt }, options.signal, async config => {
         const catalogPath = join(work, "web-models.json");
         writeFileSync(catalogPath, JSON.stringify(augmentNativeModelCatalog(JSON.parse(bundled.stdout), config)), { mode: 0o600 });
         writeFileSync(join(home, "config.toml"), goldenNativeConfig({ catalogPath, port: config.port, integration: { nativeConfigPath: join(home, "config.toml"), runtimeHome: workspace.runtimeHome, protocol } }), { mode: 0o600 });
@@ -300,10 +312,23 @@ export async function runLiveBatch(options: {
       }
     } catch (error) {
       failed = true; failure = error; operation.problem(error);
-      try { await evidence.capture(operation.context.traceId, "oracle", JSON.stringify({ batchFailure: error instanceof Error ? { name: error.name, message: error.message, stack: error.stack } : { name: "UnknownFailure" } })); }
+      runtimeUnsettled = error instanceof GoldenRuntimeUnsettledError;
+      if (runtimeUnsettled) unresolvedFailure = error;
+      try { if (!runtimeUnsettled) await evidence.capture(operation.context.traceId, "oracle", JSON.stringify({ batchFailure: error instanceof Error ? { name: error.name, message: error.message, stack: error.stack } : { name: "UnknownFailure" } })); }
       catch (captureError) { operation.problem(captureError, "The batch failure detail could not be captured"); }
     }
     finally {
+      if (runtimeUnsettled) {
+        // Do not query/export a new snapshot or synthesize adapter terminals. Transport
+        // cleanup below remains bounded; the durable claim and incomplete spans remain.
+        try {
+          writeFileSync(join(work, "result.json"), JSON.stringify({ boundary, protocol, work, campaignId, nativeHome: home, nativeCatalogSha256, cells: results, generationAdmitted, passed: false, incomplete: true, evidenceExport: "pending", responseProducers: "unsettled", problem: problemFor(failure) }, null, 2), { mode: 0o600 });
+        } catch (error) {
+          unresolvedFailure = new GoldenRuntimeUnsettledError([failure, error], "Unsettled golden result could not be retained", { cause: failure });
+          throw unresolvedFailure;
+        } finally { operation.end("failed"); }
+        throw failure;
+      }
       // Capture, oracle and cleanup failures must not bypass an observed account constraint.
       try {
         admission = await retainLiveProviderAdmission(client, { root, campaignId, observerTraceId: operation.context.traceId, ownedThreadIds: [...nativeThreads], evidencePath: join(work, "provider-admission.json") });
@@ -323,18 +348,25 @@ export async function runLiveBatch(options: {
     const summary = { ...pending, cells: results.map(item => ({ ...item, passed: item.passed && !failed && !exported.incomplete })), evidenceExport: "complete", evidence: exported.destination, bundleSha256: exported.bundleSha256, incomplete: exported.incomplete, passed: !failed && !exported.incomplete && results.length === cells.length && results.every(item => item.passed) };
     writeFileSync(join(work, "result.json"), JSON.stringify(summary, null, 2), { mode: 0o600 });
     return summary;
-  } finally { await client.close(); }
+  } finally {
+    if (runtimeUnsettled) {
+      try { await closeUnsettledGoldenDiagnostics(client); }
+      catch (error) { throw new GoldenRuntimeUnsettledError([unresolvedFailure, error], "Golden runtime and diagnostic cleanup remain unresolved", { cause: unresolvedFailure }); }
+    } else await client.close();
+  }
 }
 
 if (import.meta.main) {
+  const args = process.argv.slice(2);
+  if (args.length !== 3 && args.length !== 4) throw new Error("Usage: bun scripts/golden/live-batch.ts CAMPAIGN_ROOT NATIVE_EXECUTABLE [SOURCE_HOME] SPEC_JSON");
   const spec = z.object({
     protocol: z.enum(["native", "compatibility-v1"]).optional(), turnTimeoutMs: z.number().int().positive().max(86400000),
     cells: z.array(z.object({ id: z.string().regex(/^[a-f\d]{64}$/), routeSlug: z.string().min(1).max(128), workload: z.union([z.literal(1), z.literal(2), z.literal(3), z.literal(4), z.literal(5)]), variant: z.enum(Object.keys(finiteNativeScenarios) as [FiniteNativeScenario, ...FiniteNativeScenario[]]) }).strict()).min(1).max(2),
-  }).strict().parse(JSON.parse(readFileSync(process.argv[5] ?? "", "utf8")));
+  }).strict().parse(JSON.parse(readFileSync(args.at(-1)!, "utf8")));
   const controller = new AbortController(), stop = () => controller.abort(new Error("Live batch observation cancelled"));
   process.on("SIGINT", stop); process.on("SIGTERM", stop);
   try {
-    const result = await runLiveBatch({ ...spec, root: process.argv[2] ?? "context/golden/live", executable: process.argv[3] ?? "/usr/lib/chatgpt/resources/codex", sourceHome: process.argv[4] ?? join(homedir(), ".codex-chatgpt-web"), signal: controller.signal });
+    const result = await runLiveBatch({ ...spec, root: args[0]!, executable: args[1]!, sourceHome: args.length === 4 ? args[2] : undefined, signal: controller.signal });
     console.log(JSON.stringify({ work: result.work, campaignId: result.campaignId, passed: result.passed, incomplete: result.incomplete, evidence: result.evidence, bundleSha256: result.bundleSha256, problem: result.problem, cells: result.cells.map(cell => ({ id: cell.id, route: cell.routeSlug, passed: cell.passed, error: cell.error, threadId: cell.result?.terminal.threadId, selections: cell.selections })) }));
   } finally { process.off("SIGINT", stop); process.off("SIGTERM", stop); }
 }

@@ -71,7 +71,12 @@ export function initializeRuntimeDiagnostics(options: { component: string; targe
   return diagnostics;
 }
 export function runtimeParent(): DiagnosticContext | undefined { return parseTraceparent(process.env.CODEX_CHATGPT_WEB_TRACEPARENT); }
-export async function closeRuntimeDiagnostics(): Promise<void> {
+export async function closeRuntimeDiagnostics(options: { interruptActive?: boolean } = {}): Promise<void> {
   const current = diagnostics; diagnostics = undefined;
-  await current?.close(); await closeSink?.(); await client?.close(); client = undefined; closeSink = undefined; controlInvocation = undefined;
+  if (options.interruptActive === false) {
+    // Unproved producer settlement is a failure, not a synthetic terminal. Retire the
+    // capture transport with its existing close deadline while leaving stored spans open.
+    await client?.close();
+  }
+  await current?.close(options); await closeSink?.(); await client?.close(); client = undefined; closeSink = undefined; controlInvocation = undefined;
 }

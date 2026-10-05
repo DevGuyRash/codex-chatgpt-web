@@ -5,7 +5,7 @@ import { join, resolve } from "node:path";
 import { defaultConfig } from "../src/config";
 import { assertBorrowedTunnelInactive, readBorrowedTunnel } from "../scripts/golden/borrowed-tunnel";
 
-test("borrowing the configured tunnel requires inactive production and rejects other active aliases without mutation", async () => {
+test("borrowing the configured tunnel requires an inactive source and rejects other active aliases without mutation", async () => {
   const context = resolve(import.meta.dir, "../context"); mkdirSync(context, { recursive: true });
   const root = mkdtempSync(join(context, "gbt-")), isolated = join(root, "isolated"), sourceHome = join(root, "source");
   for (const path of [isolated, sourceHome]) mkdirSync(path);

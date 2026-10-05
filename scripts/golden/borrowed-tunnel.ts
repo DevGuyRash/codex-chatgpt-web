@@ -12,7 +12,7 @@ export function readBorrowedTunnel(home: string, isolatedRoot: string, selected:
   if (realpathSync(home) !== home || containsPath(isolatedRoot, home)) throw new Error("The borrowed tunnel source must remain outside the isolated workspace");
   const source = loadConfig(home), original = source.tunnel, chosen = selected.tunnel;
   if (source.mode !== "full" || source.browserInteractionMode !== "automatic" || !original || !chosen || source.appName !== selected.appName
-    || original.tunnelId !== chosen.tunnelId || original.binaryPath !== chosen.binaryPath || original.runtimeKeyFile !== chosen.runtimeKeyFile) throw new Error("The borrowed tunnel selection differs from its current production configuration");
+    || original.tunnelId !== chosen.tunnelId || original.binaryPath !== chosen.binaryPath || original.runtimeKeyFile !== chosen.runtimeKeyFile) throw new Error("The borrowed tunnel selection differs from its current source configuration");
   return source;
 }
 
@@ -20,16 +20,16 @@ function requireClosedPort(port: number): Promise<void> {
   return new Promise((resolve, reject) => {
     const socket = createConnection({ host: "127.0.0.1", port });
     const done = (error?: Error) => { socket.destroy(); error ? reject(error) : resolve(); };
-    socket.setTimeout(2000, () => done(new Error("Production Responses port could not be observed inactive")));
-    socket.once("connect", () => done(new Error("The production Responses server is active")));
-    socket.once("error", error => done((error as NodeJS.ErrnoException).code === "ECONNREFUSED" ? undefined : new Error("Production Responses port state is unknown", { cause: error })));
+    socket.setTimeout(2000, () => done(new Error("Source Responses port could not be observed inactive")));
+    socket.once("connect", () => done(new Error("The source Responses server is active")));
+    socket.once("error", error => done((error as NodeJS.ErrnoException).code === "ECONNREFUSED" ? undefined : new Error("Source Responses port state is unknown", { cause: error })));
   });
 }
 
 /** Read-only admission for the user's choice to borrow the existing remote tunnel. */
 export async function assertBorrowedTunnelInactive(home: string, isolatedRoot: string, selected: AppConfig): Promise<void> {
   const source = readBorrowedTunnel(home, isolatedRoot, selected);
-  if (existsSync(source.brokerSocketPath)) throw new Error("The production broker still exists; its ownership requires reconciliation");
+  if (existsSync(source.brokerSocketPath)) throw new Error("The source broker still exists; its ownership requires reconciliation");
   await requireClosedPort(source.port);
   const original = source.tunnel!;
   const result = runCommand(original.binaryPath, ["runtimes", "list", "--json"], { timeout: 15000, maxBuffer: 1024 * 1024 });

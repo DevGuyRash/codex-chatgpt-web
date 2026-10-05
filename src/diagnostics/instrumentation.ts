@@ -135,8 +135,8 @@ export class Diagnostics {
       }
     });
   }
-  async close(): Promise<void> {
-    for (const operation of this.active) operation.end("interrupted");
+  async close(options: { interruptActive?: boolean } = {}): Promise<void> {
+    if (options.interruptActive !== false) for (const operation of this.active) operation.end("interrupted");
     await this.tracerProvider.shutdown(); await this.logProvider.shutdown(); await this.sink.flush?.();
   }
 }

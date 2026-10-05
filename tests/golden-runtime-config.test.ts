@@ -1,4 +1,4 @@
-import { expect, test } from "bun:test";
+import { expect, spyOn, test } from "bun:test";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { spawn } from "node:child_process";
 import { join, resolve } from "node:path";
@@ -9,6 +9,11 @@ import { goldenNativeConfig, prepareGoldenRuntimeConfig } from "../scripts/golde
 import { withGoldenRuntime } from "../scripts/golden/runtime";
 import { ownedProcessIdentity } from "../scripts/golden/workspace";
 import type { GoldenWorkspace } from "../scripts/golden/workspace";
+import * as serverModule from "../src/server";
+import { readGoldenEvents } from "../scripts/golden/observations";
+import { responseCaptureFixture } from "./response-capture-fixture";
+import { ChatGptWebAdapterError } from "../src/adapters/chatgpt-web/adapter-error";
+import { GoldenRuntimeUnsettledError } from "../scripts/golden/runtime";
 
 test("full golden configuration and lifecycle retain isolated MCP authority and settle failures", async () => {
   // A nested checkout must not consume the socket budget; installed commands reject OS temp paths.
@@ -67,6 +72,45 @@ test("full golden configuration and lifecycle retain isolated MCP authority and 
     expect(process.env.CODEX_SQLITE_HOME).toBe(originalSqliteHome);
     expect(existsSync(state)).toBe(false);
     expect(existsSync(loaded.brokerSocketPath)).toBe(false);
+    const startServer = serverModule.startServer;
+    const syntheticAdapter = () => ({ name: "synthetic-connector-failure", async runTurn() {
+      throw new ChatGptWebAdapterError("Synthetic connector unavailable", { status: 502, errorType: "server_error", code: "connector_not_found", retryable: false });
+    } });
+    const postFailure = async (port: number) => {
+      const response = await fetch(`http://127.0.0.1:${port}/v1/responses`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ model: "chatgpt-web/light", stream: true, input: "Synthetic owner settlement" }) });
+      const text = await response.text();
+      expect(text).toContain("connector_not_found");
+      expect(text.match(/event: response.failed\n/g)).toHaveLength(1);
+    };
+    for (const protocol of ["native", "compatibility-v1"] as const) {
+      const fixture = responseCaptureFixture(), originalCampaignId = workspace.campaignId;
+      workspace.campaignId = fixture.campaignId;
+      const server = spyOn(serverModule, "startServer").mockImplementation((config, dependencies) => startServer(config, { ...dependencies, adapterFactory: syntheticAdapter }));
+      const cancelled = new AbortController();
+      let acceptanceStarted = false, boundPort = 0;
+      const running = withGoldenRuntime({ ...input, protocol }, cancelled.signal, async runtime => {
+        boundPort = runtime.port; await postFailure(runtime.port);
+        if (protocol === "compatibility-v1") cancelled.abort(new Error("Normal operator cancellation after terminal"));
+      });
+      const accepted = running.then(async () => { acceptanceStarted = true; return readGoldenEvents(fixture.client, fixture.campaignId); });
+      try {
+        await fixture.waiting.promise; await fixture.joining.promise;
+        expect(acceptanceStarted).toBe(false);
+        expect(process.env.CODEX_HOME).toBe(workspace.codexHome);
+        expect(loadConfig(runtimeHome).port).toBe(boundPort);
+        expect(fixture.events.filter(event => event.name === "adapter.turn" && event.span?.endTime)).toHaveLength(0);
+        fixture.release.resolve(); await accepted;
+        expect(acceptanceStarted).toBe(true);
+        expect(loadConfig(runtimeHome).port).toBe(18765);
+        expect(process.env.CODEX_HOME).toBe(originalCodexHome);
+        expect(fixture.acknowledgements()).toBe(1);
+        const terminal = fixture.events.filter(event => event.name === "adapter.turn" && event.span?.endTime);
+        expect(terminal).toHaveLength(1); expect(terminal[0]!.span!.outcome).toBe("failed");
+      } finally {
+        fixture.release.resolve(); await accepted.catch(() => {}); server.mockRestore();
+        await fixture.close(); workspace.campaignId = originalCampaignId;
+      }
+    }
     const primary = new Error("synthetic scenario failure");
     await expect(withGoldenRuntime(input, signal, async () => { throw primary; })).rejects.toBe(primary);
     expect(existsSync(state)).toBe(false);
@@ -75,7 +119,7 @@ test("full golden configuration and lifecycle retain isolated MCP authority and 
     await expect(withGoldenRuntime(input, signal, async () => {})).rejects.toThrow("reconciliation");
     expect(readFileSync(calls, "utf8").slice(before.length).trim()).toBe('{"action":"status"}');
     rmSync(state);
-    expect(readFileSync(calls, "utf8").split("\n").filter(line => line === '{"action":"stop"}')).toHaveLength(2);
+    expect(readFileSync(calls, "utf8").split("\n").filter(line => line === '{"action":"stop"}')).toHaveLength(4);
     mcpFailure = true;
     let executed = false;
     await expect(withGoldenRuntime(input, signal, async () => { executed = true; })).rejects.toThrow("MCP transport is unhealthy");
@@ -83,13 +127,42 @@ test("full golden configuration and lifecycle retain isolated MCP authority and 
     expect(existsSync(state)).toBe(false);
     mcpFailure = false;
     writeFileSync(state + ".fail-stop", "fixture");
-    const cleanupFailure = await withGoldenRuntime(input, signal, async () => { throw primary; }).catch(error => error);
-    expect(cleanupFailure).toBeInstanceOf(AggregateError);
-    expect(cleanupFailure.cause).toBe(primary);
-    expect(cleanupFailure.errors[0]).toBe(primary);
-    expect(cleanupFailure.errors[1].message).toContain("synthetic stop failure");
-    expect(process.env.CODEX_HOME).toBe(originalCodexHome);
-    expect(process.env.CODEX_SQLITE_HOME).toBe(originalSqliteHome);
+    const unresolved = responseCaptureFixture(), budget = new AbortController(), originalCampaignId = workspace.campaignId;
+    workspace.campaignId = unresolved.campaignId;
+    const ownedServer = spyOn(serverModule, "startServer").mockImplementation((config, dependencies) => startServer(config, { ...dependencies, adapterFactory: syntheticAdapter }));
+    const boundedInput = { ...input, hardDeadlineAt: Date.now() + 60_000 };
+    try {
+      const cleanupFailure = await withGoldenRuntime(boundedInput, budget.signal, async runtime => {
+        await postFailure(runtime.port); await unresolved.waiting.promise;
+        boundedInput.hardDeadlineAt = Date.now();
+        budget.abort(new Error("Synthetic caller deadline")); throw primary;
+      }).catch(error => error);
+      expect(cleanupFailure).toBeInstanceOf(AggregateError);
+      expect(cleanupFailure).toBeInstanceOf(GoldenRuntimeUnsettledError);
+      expect(cleanupFailure.cause).toBe(primary);
+      expect(cleanupFailure.errors[0]).toBe(primary);
+      expect(cleanupFailure.errors[1].message).toContain("synthetic stop failure");
+      expect(process.env.CODEX_HOME).toBe(workspace.codexHome);
+      expect(process.env.CODEX_SQLITE_HOME).toBeUndefined();
+      expect(loadConfig(runtimeHome).port).not.toBe(18765);
+      expect(unresolved.events.filter(event => event.name === "adapter.turn" && event.span?.endTime)).toHaveLength(0);
+    } finally {
+      unresolved.release.resolve();
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      try {
+        // Drain the real fixture producer even on an assertion failure, without retrying
+        // acceptance or unpoisoning the runtime. Cleanup itself remains bounded.
+        const owner = ownedServer.mock.calls[0]?.[1]?.responseProducers;
+        if (owner && !owner.settled) await Promise.race([unresolved.terminal.promise,
+          new Promise<never>((_resolve, reject) => { timer = setTimeout(() => reject(new Error("Fixture producer did not release")), 1000); }),
+        ]);
+        await new Promise<void>(resolve => setImmediate(resolve));
+        if (owner) expect(owner.settled).toBe(true);
+      } finally {
+        clearTimeout(timer); ownedServer.mockRestore();
+        try { await unresolved.close(); } finally { workspace.campaignId = originalCampaignId; }
+      }
+    }
     expect(existsSync(loaded.brokerSocketPath)).toBe(false);
     rmSync(state); rmSync(state + ".fail-stop");
     await expect(withGoldenRuntime(input, signal, async () => {})).rejects.toThrow("already owns");
@@ -108,6 +181,8 @@ test("full golden configuration and lifecycle retain isolated MCP authority and 
     }
     if (originalHome === undefined) delete process.env.CODEX_CHATGPT_WEB_HOME; else process.env.CODEX_CHATGPT_WEB_HOME = originalHome;
     if (originalCampaign === undefined) delete process.env.CODEX_WEB_GPT_CAPTURE_CAMPAIGN_ID; else process.env.CODEX_WEB_GPT_CAPTURE_CAMPAIGN_ID = originalCampaign;
+    if (originalCodexHome === undefined) delete process.env.CODEX_HOME; else process.env.CODEX_HOME = originalCodexHome;
+    if (originalSqliteHome === undefined) delete process.env.CODEX_SQLITE_HOME; else process.env.CODEX_SQLITE_HOME = originalSqliteHome;
     rmSync(root, { recursive: true, force: true });
   }
 }, 20_000);

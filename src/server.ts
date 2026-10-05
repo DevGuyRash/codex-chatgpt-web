@@ -58,6 +58,7 @@ import { namespacedToolName, type AdapterEvent, type CodexParsedRequest } from "
 import type { CodexProviderConfig } from "./types";
 import type { ProviderAdapter } from "./adapters/base";
 import { VERSION } from "./version";
+import type { ResponseProducers } from "./response-producers";
 
 type HttpTrackedEndpoint = "models" | "responses" | "compact" | "search" | "unspecified" | NativeImageEndpoint;
 
@@ -398,6 +399,8 @@ export class HttpTurnCounter {
 type ChatGptWebAdapterFactory = (provider: CodexProviderConfig) => ProviderAdapter;
 
 export interface ResponseRequestOptions {
+  /** Harness-owned handlers and detached capture producers must settle before owner teardown. */
+  producers?: ResponseProducers;
   /** DEV and other in-process harnesses can keep continuation state in their own canonical store. */
   rememberState?: boolean;
   /** Observe the exact production adapter stream when invoking the handler in-process. */
@@ -514,6 +517,16 @@ export async function responseRequest(
   adapterFactory: ChatGptWebAdapterFactory = createChatGptWebAdapter,
   options: ResponseRequestOptions = {},
 ): Promise<Response> {
+  const work = () => responseRequestImpl(req, config, adapterFactory, options);
+  return options.producers ? options.producers.run(work) : work();
+}
+
+async function responseRequestImpl(
+  req: Request,
+  config: AppConfig,
+  adapterFactory: ChatGptWebAdapterFactory,
+  options: ResponseRequestOptions,
+): Promise<Response> {
   const nativeRequest = req.clone();
   let raw: unknown;
   try {
@@ -528,6 +541,7 @@ export async function responseRequest(
   const requestedModel = raw && typeof raw === "object" && !Array.isArray(raw)
     ? (raw as { model?: unknown }).model
     : undefined;
+  options.producers?.signal.throwIfAborted();
   try {
     const identity = extractCodexTurnIdentityFromBody(raw);
     if (identity.threadId && identity.turnId) {
@@ -655,6 +669,7 @@ export async function responseRequest(
       headers: { "content-type": "application/json" },
     });
   }
+  options.producers?.signal.throwIfAborted();
   const adapter = adapterFactory(provider);
   const queue = new AsyncEventQueue<AdapterEvent>();
   const abort = new AbortController();
@@ -663,6 +678,12 @@ export async function responseRequest(
   const run = async () => {
     const operation = runtimeDiagnostics()?.begin("adapter.turn", { "model.requested": responseModel, "model.backend": parsed.modelId, "model.effort": parsed.options.reasoning ?? "unspecified" });
     const terminal: { outcome: "succeeded" | "failed" | "cancelled" | "unknown" } = { outcome: "unknown" };
+    // Do not turn an already-emitted terminal into cancellation merely because its
+    // output acknowledgement is still pending when the owner stops admission.
+    const cancelOwnedWork = () => {
+      if (terminal.outcome === "unknown") abort.abort(options.producers?.signal.reason);
+    };
+    options.producers?.signal.addEventListener("abort", cancelOwnedWork, { once: true });
     const capture = Boolean(campaignCaptureId()), captured: string[] = [];
     let capturedBytes = 0, captureOmitted = false;
     const observe = (event: AdapterEvent) => {
@@ -681,12 +702,15 @@ export async function responseRequest(
     };
     try {
       if (capture) await captureCampaignContent("prompt", JSON.stringify(raw), operation?.context);
+      // An admitted handler can be suspended in capture when its owner starts teardown.
+      options.producers?.signal.throwIfAborted();
       const work = () => adapter.runTurn!(parsed, { headers: req.headers, abortSignal: abort.signal }, observe);
       await (operation ? operation.run(work) : work());
     } catch (error) {
       const event = adapterErrorEvent(error);
       observe(event);
     } finally {
+      options.producers?.signal.removeEventListener("abort", cancelOwnedWork);
       if (capture) {
         await captureCampaignContent("output", captured.join("\n"), operation?.context);
         if (captureOmitted) await omitCampaignCapture("too-large", operation?.context);
@@ -699,7 +723,8 @@ export async function responseRequest(
   const responseModel = route.slug;
 
   if (parsed.stream) {
-    void run();
+    if (options.producers) void options.producers.run(run);
+    else void run();
     const stream = bridgeToResponsesSSE(
       queue,
       responseModel,
@@ -727,7 +752,8 @@ export async function responseRequest(
     });
   }
 
-  await run();
+  if (options.producers) await options.producers.run(run);
+  else await run();
   const events = await queue.collect();
   const json = buildResponseJSON(events, responseModel, {
     hideThinkingSummary: parsed.options.hideThinkingSummary,
@@ -744,7 +770,17 @@ export async function compactRequest(
   req: Request,
   config: AppConfig,
   adapterFactory: ChatGptWebAdapterFactory = createChatGptWebAdapter,
-  options: Pick<ResponseRequestOptions, "onTurnIdentity"> = {},
+  options: Pick<ResponseRequestOptions, "onTurnIdentity" | "producers"> = {},
+): Promise<Response> {
+  const work = () => compactRequestImpl(req, config, adapterFactory, options);
+  return options.producers ? options.producers.run(work) : work();
+}
+
+async function compactRequestImpl(
+  req: Request,
+  config: AppConfig,
+  adapterFactory: ChatGptWebAdapterFactory,
+  options: Pick<ResponseRequestOptions, "onTurnIdentity" | "producers">,
 ): Promise<Response> {
   const nativeRequest = req.clone();
   let raw: Record<string, unknown>;
@@ -759,6 +795,7 @@ export async function compactRequest(
       error instanceof Error ? error.message : "Compaction request body must be a JSON object",
     );
   }
+  options.producers?.signal.throwIfAborted();
   const headerTurnMetadata = req.headers.get("x-codex-turn-metadata");
   if (headerTurnMetadata) {
     const existingMetadata = raw.client_metadata;
@@ -861,7 +898,7 @@ export async function compactRequest(
 
 export function startServer(
   config: AppConfig,
-  dependencies: { fetchUpstream?: NativeFetch; adapterFactory?: ChatGptWebAdapterFactory; cleanupClaims?: InterruptCleanupClaims } = {},
+  dependencies: { fetchUpstream?: NativeFetch; adapterFactory?: ChatGptWebAdapterFactory; cleanupClaims?: InterruptCleanupClaims; responseProducers?: ResponseProducers } = {},
 ): ReturnType<typeof Bun.serve> {
   if (config.purpose === "dev-harness") {
     throw new Error("DEV harness configuration cannot start a Responses listener");
@@ -895,6 +932,8 @@ export function startServer(
     chatGptTurnSessions.physicalSettlementForNativeTurn(identity.threadId, identity.turnId),
     structuredCompactionSettlementForNativeTurn(identity.threadId, identity.turnId),
   ]).then(() => undefined));
+  const ownedResponse = (work: () => Promise<Response>) => dependencies.responseProducers
+    ? dependencies.responseProducers.run(work) : work();
   const activity = () => ({
     active_http_turns: httpTurns.count(),
     active_browser_turns: chatGptTurnSessions.activeCount() + (turnBroker?.externalOwnerActiveCount() ?? 0),
@@ -1089,6 +1128,7 @@ export function startServer(
       }
       if (req.method === "POST" && url.pathname === "/admin/shutdown") {
         if (!controlAuthorized(req)) return new Response("Unauthorized", { status: 401 });
+        if (dependencies.responseProducers) return Response.json({ status: "refused", reason: "Runtime owner must settle response producers before shutdown" }, { status: 409 });
         const current = activity();
         if (!draining || current.active_http_turns > 0 || current.active_browser_turns > 0) {
           return Response.json(
@@ -1153,31 +1193,31 @@ export function startServer(
       }
       if (req.method === "POST" && url.pathname === "/v1/responses") {
         if (draining) return formatErrorResponse(503, "server_error", "codex-chatgpt-web is draining for a requested service operation");
-        return httpTurns.track(
+        return ownedResponse(() => httpTurns.track(
           (signal, bindIdentity) => responseRequest(
             new Request(req, { signal }),
             config,
             dependencies.adapterFactory,
-            { onTurnIdentity: bindIdentity },
+            { onTurnIdentity: bindIdentity, producers: dependencies.responseProducers },
           ),
           req.signal,
           process.platform,
           "responses",
-        );
+        ));
       }
       if (req.method === "POST" && url.pathname === "/v1/responses/compact") {
         if (draining) return formatErrorResponse(503, "server_error", "codex-chatgpt-web is draining for a requested service operation");
-        return httpTurns.track(
+        return ownedResponse(() => httpTurns.track(
           (signal, bindIdentity) => compactRequest(
             new Request(req, { signal }),
             config,
             dependencies.adapterFactory,
-            { onTurnIdentity: bindIdentity },
+            { onTurnIdentity: bindIdentity, producers: dependencies.responseProducers },
           ),
           req.signal,
           process.platform,
           "compact",
-        );
+        ));
       }
       if (req.method === "POST" && url.pathname === "/v1/alpha/search") {
         if (draining) return formatErrorResponse(503, "server_error", "codex-chatgpt-web is draining for a requested service operation");
@@ -1228,8 +1268,12 @@ export function startServer(
       console.error(`[codex-chatgpt-web] server shutdown failed: ${error instanceof Error ? error.message : String(error)}`);
     });
   }
-  process.once("SIGINT", shutdown);
-  process.once("SIGTERM", shutdown);
+  // A harness supplying response ownership also owns teardown. Standalone signal
+  // cleanup must not race its producer join and close shared diagnostics early.
+  if (!dependencies.responseProducers) {
+    process.once("SIGINT", shutdown);
+    process.once("SIGTERM", shutdown);
+  }
   return server;
 }
 import { closeRuntimeDiagnostics, runtimeDiagnostics } from "./diagnostics/runtime";

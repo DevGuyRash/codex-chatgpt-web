@@ -13,6 +13,12 @@ import { containsPath } from "../../src/diagnostics/paths";
 import { flushResponseState } from "../../src/responses/state";
 import { runtimeDiagnostics } from "../../src/diagnostics/runtime";
 import { resolve } from "node:path";
+import { ResponseProducers } from "../../src/response-producers";
+
+// New fail-closed owner budget: a small final capture requires bind + write, each with
+// at most 90 seconds of IPC budget. Multi-part captures do not earn extra teardown time.
+// The caller's cell/overall stop can shorten this; no existing operation deadline changes.
+const RESPONSE_SETTLEMENT_MS = 180_000;
 
 // Reuse the production supervisor's endpoint validation and MCP failure interpretation.
 const { RuntimeSupervisor } = createRequire(import.meta.url)("../../launcher/electron/runtime-supervisor.cjs") as {
@@ -23,9 +29,18 @@ const { RuntimeSupervisor } = createRequire(import.meta.url)("../../launcher/ele
 
 let active = false;
 
+/** The caller must not close capture dependencies or inspect acceptance for this runtime. */
+export class GoldenRuntimeUnsettledError extends AggregateError {
+  readonly code = "golden_runtime_unsettled";
+}
+
 /** One dedicated runner process owns the runtime. The callback must settle all its native producers. */
-export async function withGoldenRuntime<T>(input: Parameters<typeof prepareGoldenRuntimeConfig>[0] & { nativeHome: string }, signal: AbortSignal, run: (config: AppConfig) => Promise<T>): Promise<T> {
+export async function withGoldenRuntime<T>(input: Parameters<typeof prepareGoldenRuntimeConfig>[0] & { nativeHome: string; hardDeadlineAt?: number }, signal: AbortSignal, run: (config: AppConfig) => Promise<T>): Promise<T> {
   signal.throwIfAborted();
+  const checkDeadline = () => {
+    if (input.hardDeadlineAt !== undefined && (!Number.isFinite(input.hardDeadlineAt) || input.hardDeadlineAt <= Date.now())) throw new Error("Golden hard deadline is invalid or exhausted");
+  };
+  checkDeadline();
   if (active) throw new Error("This process already owns a golden runtime");
   const config = prepareGoldenRuntimeConfig(input);
   if (realpathSync(input.nativeHome) !== input.nativeHome || !lstatSync(input.nativeHome).isDirectory() || input.nativeHome === input.workspace.root || !containsPath(input.workspace.root, input.nativeHome)) throw new Error("Golden runtime requires the native producers' canonical isolated home");
@@ -35,6 +50,7 @@ export async function withGoldenRuntime<T>(input: Parameters<typeof prepareGolde
   active = true;
   const previousCodexHome = process.env.CODEX_HOME, previousSqliteHome = process.env.CODEX_SQLITE_HOME;
   const broker = TurnBroker.forSocket(config.brokerSocketPath);
+  const producers = new ResponseProducers();
   let server: ReturnType<typeof startServer> | undefined, tunnelAttempted = false;
   const configPath = getConfigPath(input.workspace.runtimeHome);
   let originalConfig: Buffer | undefined, writtenConfig: Buffer | undefined;
@@ -53,7 +69,7 @@ export async function withGoldenRuntime<T>(input: Parameters<typeof prepareGolde
     }
     await step("broker_listen", () => broker.listen());
     signal.throwIfAborted();
-    server = await step("http_listen", () => startServer(config));
+    server = await step("http_listen", () => startServer(config, { responseProducers: producers }));
     if (!server.port) throw new Error("Golden runtime did not bind its loopback port");
     config.port = server.port;
     saveConfig(config);
@@ -68,18 +84,29 @@ export async function withGoldenRuntime<T>(input: Parameters<typeof prepareGolde
     }).waitForTunnelMcpTransport(config));
     if (!observation.observed || !observation.ok) throw new Error(`Golden MCP transport was not observed healthy: ${observation.detail}`);
     signal.throwIfAborted();
+    checkDeadline();
     result = await run(config);
   } catch (error) { failed = true; failure = error; }
   finally {
     const cleanupErrors: unknown[] = [];
     const clean = async (name: string, action: () => unknown | Promise<unknown>) => { try { await step(name, action); } catch (error) { cleanupErrors.push(error); } };
     // Stop new HTTP admission before releasing the browser and tool boundaries.
+    producers.stop();
+    // A normal cancellation stops generation but does not discard final capture. Only
+    // the explicit caller hard deadline shortens this new owner-settlement ceiling.
+    const settlement = producers.settle(Math.max(0, Math.min(RESPONSE_SETTLEMENT_MS, (input.hardDeadlineAt ?? Infinity) - Date.now())));
+    // Cleanup below must release browser/tool waits before awaiting the join. Observe a
+    // budget failure immediately without losing it or abandoning the pending producers.
+    void settlement.catch(() => {});
     await clean("http_stop", () => server?.stop(true));
     await clean("retained_conversation_release", () => chatGptTurnSessions.clearAndReleaseRetained());
     await clean("browser_close", () => closeChatGptBrowserWorkers());
     if (tunnelAttempted) await clean("tunnel_stop", () => stopTunnel(config));
     await clean("broker_close", () => broker.close());
-    await clean("state_flush", () => flushResponseState());
+    // Releasing browser/tool work allows cancelled adapters to exit. Capture dependencies
+    // stay open: HTTP/native terminals do not own the final output acknowledgement.
+    await clean("response_producers_settle", () => settlement);
+    if (producers.settled) await clean("state_flush", () => flushResponseState());
     if (writtenConfig && !cleanupErrors.length) await clean("config_restore", () => {
       if (!existsSync(configPath) || !readFileSync(configPath).equals(writtenConfig!)) throw new Error("The isolated runtime configuration changed; restoration requires reconciliation");
       if (originalConfig) atomicWriteFile(configPath, originalConfig); else unlinkSync(configPath);
@@ -87,9 +114,14 @@ export async function withGoldenRuntime<T>(input: Parameters<typeof prepareGolde
     // Failed cleanup leaves this process unavailable for another runtime; a new attempt
     // requires external reconciliation, not a second callback over uncertain resources.
     active = cleanupErrors.length > 0;
-    if (previousCodexHome === undefined) delete process.env.CODEX_HOME; else process.env.CODEX_HOME = previousCodexHome;
-    if (previousSqliteHome === undefined) delete process.env.CODEX_SQLITE_HOME; else process.env.CODEX_SQLITE_HOME = previousSqliteHome;
-    if (cleanupErrors.length) throw new AggregateError([...(failed ? [failure] : []), ...cleanupErrors], "Golden runtime cleanup did not settle", failed ? { cause: failure } : undefined);
+    if (producers.settled) {
+      if (previousCodexHome === undefined) delete process.env.CODEX_HOME; else process.env.CODEX_HOME = previousCodexHome;
+      if (previousSqliteHome === undefined) delete process.env.CODEX_SQLITE_HOME; else process.env.CODEX_SQLITE_HOME = previousSqliteHome;
+    }
+    if (cleanupErrors.length) {
+      const ErrorType = producers.settled ? AggregateError : GoldenRuntimeUnsettledError;
+      throw new ErrorType([...(failed ? [failure] : []), ...cleanupErrors], "Golden runtime cleanup did not settle", failed ? { cause: failure } : undefined);
+    }
   }
   if (failed) throw failure;
   return result as T;

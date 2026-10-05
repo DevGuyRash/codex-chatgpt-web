@@ -189,7 +189,7 @@ export function liveBatchOutcomes(cells: readonly GoldenCell[], result: LiveBatc
 }
 
 /** Adapter between queue ownership and the live owner; neither layer may infer the other's settlement. */
-export function liveCampaignExecutor(options: Pick<Parameters<typeof runLiveBatch>[0], "root" | "sourceHome" | "executable" | "turnTimeoutMs">) {
+export function liveCampaignExecutor(options: Pick<Parameters<typeof runLiveBatch>[0], "root" | "sourceHome" | "executable" | "turnTimeoutMs" | "hardDeadlineAt">) {
   return {
     canExecute: canAdmitLiveCell,
     async executeBatch(attempts: readonly GoldenAttempt[], signal: AbortSignal): Promise<ReadonlyMap<string, GoldenOutcome>> {
